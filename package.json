@@ -1,0 +1,26 @@
+{
+  "name": "apistation-finops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ApiStation cost, usage, cash-flow and profitability console",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.mjs",
+    "start": "node src/server.mjs",
+    "migrate": "node scripts/migrate.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "backfill": "node scripts/backfill.mjs",
+    "sync": "node scripts/sync-once.mjs",
+    "copy-icons": "node scripts/copy-icons.mjs",
+    "test": "node --test",
+    "check": "node --check src/server.mjs && node --test"
+  },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "lucide-static": "^0.468.0",
+    "pg": "^8.16.3"
+  }
+}

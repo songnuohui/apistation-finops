@@ -1,0 +1,45 @@
+services:
+  apistation-finops:
+    build:
+      context: ..
+    image: apistation-finops:local
+    container_name: apistation-finops
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      NODE_OPTIONS: --max-old-space-size=256
+    ports:
+      - "127.0.0.1:${FINOPS_PORT:-8090}:8090"
+    networks:
+      - apistation
+    init: true
+    mem_limit: 384m
+    cpus: 0.75
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8090/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    stop_grace_period: 15s
+
+networks:
+  apistation:
+    external: true
+    name: "${APISTATION_DOCKER_NETWORK:?Set APISTATION_DOCKER_NETWORK to the existing sub2api Docker network}"

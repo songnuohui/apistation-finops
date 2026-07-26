@@ -1,0 +1,8 @@
+node_modules
+.env
+.git
+.codex-work
+docs/*.tmp.docx
+docs/rendered
+test
+
