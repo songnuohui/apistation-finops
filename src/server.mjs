@@ -23,6 +23,7 @@ import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
+  listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
 } from './services/sub2api-auth-service.mjs';
@@ -78,6 +79,15 @@ function authFailure(error){
   }
   return {status:500,error:'internal server error'};
 }
+async function refreshSourceGroupCatalog(accessToken,request){
+  if(config.demoMode||!accessToken)return;
+  try{
+    const groups=await listSub2ApiAdminGroups({accessToken,clientIp:clientIp(request)},config);
+    await repository.upsertSourceGroupCatalog(groups);
+  }catch(error){
+    console.warn('[monitor group catalog]',error instanceof Sub2ApiAuthError?error.code:error?.message||error);
+  }
+}
 function routeId(pathname,prefix){
   const raw=pathname.slice(prefix.length);
   if(!/^\d+$/.test(raw))return null;
@@ -112,6 +122,7 @@ async function login(request,res){
       res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),pendingLoginCookie(id,config)]);
       return json(res,200,{requiresTwoFactor:true,emailMasked:result.emailMasked});
     }
+    await refreshSourceGroupCatalog(result.accessToken,request);
     res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
     return json(res,200,{ok:true,user:result.user});
   }catch(error){
@@ -124,10 +135,11 @@ async function loginTwoFactor(request,res){
   const code=totpCode(await body(request));
   if(!pending||!code)return json(res,400,{error:'two-factor login session or verification code is invalid'});
   try{
-    const user=await completeSub2ApiAdministratorTwoFactor({tempToken:pending.tempToken,totpCode:code,clientIp:clientIp(request)},config);
+    const result=await completeSub2ApiAdministratorTwoFactor({tempToken:pending.tempToken,totpCode:code,clientIp:clientIp(request)},config);
     pendingLogins.delete(pendingLoginId(request));
-    res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(user,config)]);
-    return json(res,200,{ok:true,user});
+    await refreshSourceGroupCatalog(result.accessToken,request);
+    res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
+    return json(res,200,{ok:true,user:result.user});
   }catch(error){
     const failure=authFailure(error);
     return json(res,failure.status,{error:failure.error});
@@ -211,14 +223,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog']],
   );
-  if(migration.rowCount < 5)throw new Error('required FinOps migrations 002_cny_accounting through 006_group_monitoring are not applied');
+  if(migration.rowCount < 6)throw new Error('required FinOps migrations 002_cny_accounting through 007_source_group_catalog are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring'],
+     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

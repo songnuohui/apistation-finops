@@ -138,6 +138,48 @@ test('account cost history uses a bounded page query scoped to one account', asy
   assert.match(queries[0].text, /WHERE p\.source_account_id=\$1/);
 });
 
+test('monitor candidates merge the sanitized source catalog with usage activity', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      return {
+        rows: [{
+          source_group_id: 21,
+          name: 'Codex 主力',
+          platform: 'openai',
+          status: 'active',
+          rate_multiplier: '0.08',
+          sort_order: 2,
+          default_model: 'gpt-5.6',
+          catalog_synced_at: '2026-08-01T06:00:00.000Z',
+          requests: 123,
+          last_used_at: '2026-08-01T06:30:00.000Z',
+          latest_model: 'gpt-5.6',
+        }],
+        rowCount: 1,
+      };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const candidates = await repository.listMonitorGroupCandidates();
+  assert.deepEqual(candidates[0], {
+    sourceGroupId: 21,
+    name: 'Codex 主力',
+    platform: 'openai',
+    status: 'active',
+    groupMultiplier: 0.08,
+    sortOrder: 2,
+    defaultModel: 'gpt-5.6',
+    catalogSyncedAt: '2026-08-01T06:00:00.000Z',
+    requests: 123,
+    lastUsedAt: '2026-08-01T06:30:00.000Z',
+    latestModel: 'gpt-5.6',
+  });
+  assert.match(queries[0].text, /source_group_catalog/);
+  assert.doesNotMatch(queries[0].text, /credentials|model_routing/i);
+});
+
 test('sync state is pending when a required cursor is absent', async () => {
   const completeRows = REQUIRED_SYNC_SOURCES
     .filter((sourceName) => sourceName !== 'credit_reconciliation')

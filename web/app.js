@@ -944,12 +944,24 @@ function monitorAvailability(group) {
     : `${Number(group.availabilityPercent).toFixed(2)}%`;
 }
 
+function monitorSourceStatus(group) {
+  if (group.status === 'active') return '<span class="status">启用</span>';
+  if (group.status === 'inactive') return '<span class="status warning">停用</span>';
+  return '<span class="secondary-text">用量快照</span>';
+}
+
+function sourceGroupMultiplier(group) {
+  return group.groupMultiplier === null || group.groupMultiplier === undefined
+    ? '--'
+    : `${Number(group.groupMultiplier).toFixed(3).replace(/\.?0+$/, '')}x`;
+}
+
 function openMonitorGroupModal(group = null, candidate = null) {
   const editing = Boolean(group);
   const sourceGroupId = group?.sourceGroupId ?? candidate?.sourceGroupId ?? '';
-  const modelLabel = group?.modelLabel ?? candidate?.latestModel ?? '';
+  const modelLabel = group?.modelLabel ?? candidate?.latestModel ?? candidate?.defaultModel ?? '';
   openModal(editing ? '编辑监控分组' : '新增监控分组', [
-    { name: 'name', label: '展示名称', value: group?.name || (candidate ? `分组 #${candidate.sourceGroupId}` : '') },
+    { name: 'name', label: '展示名称', value: group?.name || candidate?.name || (candidate ? `分组 #${candidate.sourceGroupId}` : '') },
     { name: 'sourceGroupId', label: 'sub2api 分组 ID', type: 'number', value: sourceGroupId },
     { name: 'modelLabel', label: '展示模型', value: modelLabel, required: false },
     { name: 'displayOrder', label: '展示排序', type: 'number', value: group?.displayOrder ?? 0 },
@@ -975,6 +987,9 @@ async function renderMonitor(search = '') {
   const visibleGroups = term
     ? groups.filter((group) => `${group.name} ${group.sourceGroupId} ${group.modelLabel}`.toLowerCase().includes(term))
     : groups;
+  const visibleCandidates = term
+    ? candidates.filter((group) => `${group.name} ${group.sourceGroupId} ${group.platform} ${group.latestModel} ${group.defaultModel}`.toLowerCase().includes(term))
+    : candidates;
   const configuredGroupIds = new Set(groups.map((group) => Number(group.sourceGroupId)));
   const enabled = visibleGroups.filter((group) => group.enabled);
   const healthy = enabled.filter((group) => group.status === 'healthy').length;
@@ -983,13 +998,10 @@ async function renderMonitor(search = '') {
       ${metric('已展示分组', compact(enabled.length), '公开监控页中的分组')}
       ${metric('运行正常', compact(healthy), `${enabled.length || 0} 个已展示分组`, healthy === enabled.length && enabled.length ? 'good' : 'warn')}
       ${metric('可用性', enabled.length ? `${(enabled.reduce((sum, group) => sum + Number(group.availabilityPercent || 0), 0) / enabled.length).toFixed(2)}%` : '--', '最近 7 天监控观测')}
+      ${metric('已读取分组', compact(candidates.length), '来自 sub2api 分组目录或用量快照')}
       ${metric('独立地址', '/monitor', '可嵌入已授权来源')}
     </div>
-    <section class="monitor-preview">
-      <div class="panel-header"><div><h2>公开监控页</h2><span>与外部 iframe 使用同一页面</span></div><a class="button" href="/monitor" target="_blank" rel="noopener">新窗口打开</a></div>
-      <iframe class="monitor-frame" src="/monitor" title="分组可用性监控预览"></iframe>
-    </section>
-    ${section('展示配置', '选择需要对外展示的 sub2api 分组，并设置展示名称、模型标签和排序')}
+    ${section('展示配置', '只有在这里启用的分组才会出现在公开监控页')}
     <section class="table-panel">${searchTools('搜索展示名称或分组 ID', '<button type="button" class="button primary" id="monitor-group-add">新增分组</button>')}${
       table([
         { label: '展示分组' }, { label: '来源分组 ID', right: true }, { label: '模型标签' },
@@ -1002,15 +1014,22 @@ async function renderMonitor(search = '') {
         `<button type="button" class="icon-button table-icon" title="编辑监控分组" data-edit-monitor-group="${group.id}">${icon('settings-2')}</button>`,
       ]), 1080)
     }</section>
-    ${section('已同步分组', '从已同步使用记录中发现的分组 ID，可作为展示配置的来源')}
+    ${section('sub2api 分组目录', '登录 FinOps 时从 sub2api 管理接口读取；未重新登录时保留用量快照中的分组 ID')}
     <section class="table-panel">${table([
-      { label: '分组 ID', right: true }, { label: '最近模型' }, { label: '请求数', right: true }, { label: '最近使用' }, { label: '操作' },
-    ], candidates.map((group) => [
-      `#${group.sourceGroupId}`, escapeHtml(group.latestModel || '--'), compact(group.requests), dateTime(group.lastUsedAt),
+      { label: '分组' }, { label: '平台' }, { label: '状态' }, { label: '分组倍率', right: true },
+      { label: '最近模型' }, { label: '请求数', right: true }, { label: '最近使用' }, { label: '操作' },
+    ], visibleCandidates.map((group) => [
+      `<span class="primary-text">${escapeHtml(group.name || `分组 #${group.sourceGroupId}`)}</span><div class="secondary-text">#${group.sourceGroupId}</div>`,
+      escapeHtml(group.platform || '--'), monitorSourceStatus(group), sourceGroupMultiplier(group),
+      escapeHtml(group.latestModel || group.defaultModel || '--'), compact(group.requests), dateTime(group.lastUsedAt),
       configuredGroupIds.has(Number(group.sourceGroupId))
         ? '<span class="secondary-text">已配置</span>'
         : `<button type="button" class="button" data-add-monitor-group="${group.sourceGroupId}">${icon('plus')}添加展示</button>`,
-    ]), 860)}</section>`;
+    ]), 1120)}</section>
+    <section class="monitor-preview">
+      <div class="panel-header"><div><h2>公开监控页</h2><span>与外部 iframe 使用同一页面</span></div><a class="button" href="/monitor" target="_blank" rel="noopener">新窗口打开</a></div>
+      <iframe class="monitor-frame" src="/monitor" title="分组可用性监控预览"></iframe>
+    </section>`;
   bindSearch(renderMonitor);
   document.querySelector('#monitor-group-add')?.addEventListener('click', () => openMonitorGroupModal());
 }

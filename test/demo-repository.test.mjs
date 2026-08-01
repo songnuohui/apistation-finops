@@ -84,6 +84,9 @@ test('demo account cost history is paginated and editable by period', async () =
 
 test('public group monitor contains only enabled configured groups', async () => {
   const repository = new DemoRepository(config);
+  const candidates = await repository.listMonitorGroupCandidates();
+  assert.equal(candidates[0].name, 'GPT PLUS【限时特惠】');
+  assert.equal(candidates[0].groupMultiplier, 0.08);
   const before = await repository.getPublicMonitorDashboard();
   assert.ok(before.groups.length >= 1);
   assert.equal(before.groups[0].history.length, 60);

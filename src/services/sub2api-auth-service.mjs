@@ -80,7 +80,7 @@ async function verifiedAdminFromLogin(login, config, clientIp, fetchImpl) {
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
   );
-  return validateAdmin(profile);
+  return { user: validateAdmin(profile), accessToken: token };
 }
 
 export async function loginSub2ApiAdministrator({ email, password, clientIp = '' }, config, fetchImpl = fetch) {
@@ -96,7 +96,7 @@ export async function loginSub2ApiAdministrator({ email, password, clientIp = ''
     if (!tempToken) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api did not create a two-factor login session', 503);
     return { requiresTwoFactor: true, tempToken, emailMasked: String(login.user_email_masked || '').trim() };
   }
-  return { requiresTwoFactor: false, user: await verifiedAdminFromLogin(login, config, clientIp, fetchImpl) };
+  return { requiresTwoFactor: false, ...await verifiedAdminFromLogin(login, config, clientIp, fetchImpl) };
 }
 
 export async function completeSub2ApiAdministratorTwoFactor({ tempToken, totpCode, clientIp = '' }, config, fetchImpl = fetch) {
@@ -108,4 +108,46 @@ export async function completeSub2ApiAdministratorTwoFactor({ tempToken, totpCod
     fetchImpl,
   );
   return verifiedAdminFromLogin(login, config, clientIp, fetchImpl);
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export async function listSub2ApiAdminGroups({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+  const token = String(accessToken || '').trim();
+  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
+  const groups = await request(
+    config.sub2apiAuthUrl,
+    '/api/v1/admin/groups/all?include_inactive=true',
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
+      },
+    },
+    config.sub2apiAuthTimeoutMs,
+    fetchImpl,
+  );
+  if (!Array.isArray(groups)) {
+    throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api returned an invalid group catalog', 503);
+  }
+  return groups.flatMap((group) => {
+    const sourceGroupId = Number(group?.id);
+    if (!Number.isSafeInteger(sourceGroupId) || sourceGroupId <= 0) return [];
+    return [{
+      sourceGroupId,
+      name: String(group.name || '').trim().slice(0, 160),
+      platform: String(group.platform || '').trim().slice(0, 50),
+      status: String(group.status || '').trim().slice(0, 24),
+      groupMultiplier: optionalNumber(group.rate_multiplier),
+      sortOrder: Math.max(0, Math.min(1_000_000, Number.parseInt(group.sort_order, 10) || 0)),
+      defaultModel: String(group.default_mapped_model || '').trim().slice(0, 120),
+      sourceUpdatedAt: group.updated_at || null,
+    }];
+  });
 }

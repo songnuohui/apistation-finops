@@ -1314,20 +1314,64 @@ export class PostgresRepository {
 
   async listMonitorGroupCandidates() {
     const result = await this.pool.query(`
-      SELECT source_group_id,
-             COUNT(*)::int AS requests,
-             MAX(occurred_at) AS last_used_at,
-             (array_agg(model ORDER BY occurred_at DESC))[1] AS latest_model
-      FROM ${this.schema}.fact_usage_events
-      WHERE source_group_id > 0
-      GROUP BY source_group_id
-      ORDER BY MAX(occurred_at) DESC,source_group_id`);
+      WITH usage_candidates AS (
+        SELECT source_group_id,
+               COUNT(*)::int AS requests,
+               MAX(occurred_at) AS last_used_at,
+               (array_agg(model ORDER BY occurred_at DESC))[1] AS latest_model
+        FROM ${this.schema}.fact_usage_events
+        WHERE source_group_id > 0
+        GROUP BY source_group_id
+      )
+      SELECT COALESCE(c.source_group_id,u.source_group_id) AS source_group_id,
+             COALESCE(c.name,'') AS name,
+             COALESCE(c.platform,'') AS platform,
+             COALESCE(c.status,'') AS status,
+             c.rate_multiplier,c.sort_order,
+             COALESCE(c.default_model,'') AS default_model,
+             c.synced_at AS catalog_synced_at,
+             COALESCE(u.requests,0)::int AS requests,
+             u.last_used_at,
+             COALESCE(u.latest_model,'') AS latest_model
+      FROM ${this.schema}.source_group_catalog c
+      FULL OUTER JOIN usage_candidates u ON u.source_group_id=c.source_group_id
+      ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,
+               c.sort_order ASC NULLS LAST,u.last_used_at DESC NULLS LAST,source_group_id`);
     return result.rows.map((row) => ({
       sourceGroupId: number(row.source_group_id),
+      name: row.name || '',
+      platform: row.platform || '',
+      status: row.status || '',
+      groupMultiplier: nullableNumber(row.rate_multiplier),
+      sortOrder: number(row.sort_order),
+      defaultModel: row.default_model || '',
+      catalogSyncedAt: row.catalog_synced_at || null,
       requests: number(row.requests),
       lastUsedAt: row.last_used_at || null,
       latestModel: row.latest_model || '',
     }));
+  }
+
+  async upsertSourceGroupCatalog(groups) {
+    const catalog = groups.filter((group) => Number.isSafeInteger(Number(group.sourceGroupId)) && Number(group.sourceGroupId) > 0);
+    if (!catalog.length) return 0;
+    return inTransaction(this.pool, async (client) => {
+      for (const group of catalog) {
+        await client.query(`
+          INSERT INTO ${this.schema}.source_group_catalog(
+            source_group_id,name,platform,status,rate_multiplier,sort_order,default_model,source_updated_at,synced_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+          ON CONFLICT(source_group_id) DO UPDATE SET
+            name=EXCLUDED.name,platform=EXCLUDED.platform,status=EXCLUDED.status,
+            rate_multiplier=EXCLUDED.rate_multiplier,sort_order=EXCLUDED.sort_order,
+            default_model=EXCLUDED.default_model,source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
+        [
+          group.sourceGroupId, group.name || '', group.platform || '', group.status || '',
+          group.groupMultiplier, group.sortOrder || 0, group.defaultModel || '', group.sourceUpdatedAt || null,
+        ]);
+      }
+      return catalog.length;
+    });
   }
 
   async createMonitorGroup(input, actor='admin') {

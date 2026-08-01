@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
 } from '../src/services/sub2api-auth-service.mjs';
@@ -39,12 +40,48 @@ test('sub2api admin login verifies the issued token against the current profile'
   assert.deepEqual(result, {
     requiresTwoFactor: false,
     user: { id: 12, username: 'Operations', email: 'admin@example.com', role: 'admin' },
+    accessToken: 'short-lived-token',
   });
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, 'http://127.0.0.1:8080/api/v1/auth/login');
   assert.deepEqual(JSON.parse(calls[0].options.body), { email: 'admin@example.com', password: 'not-recorded' });
   assert.equal(calls[1].options.headers.Authorization, 'Bearer short-lived-token');
   assert.equal(calls[1].options.headers['X-Forwarded-For'], '203.0.113.6');
+});
+
+test('sub2api group catalog keeps only sanitized display fields', async () => {
+  const result = await listSub2ApiAdminGroups(
+    { accessToken: 'short-lived-token', clientIp: '203.0.113.6' },
+    config,
+    async (url, options) => {
+      assert.equal(url, 'http://127.0.0.1:8080/api/v1/admin/groups/all?include_inactive=true');
+      assert.equal(options.headers.Authorization, 'Bearer short-lived-token');
+      return json({
+        code: 0,
+        data: [{
+          id: 21,
+          name: 'Codex 主力',
+          platform: 'openai',
+          status: 'active',
+          rate_multiplier: 0.08,
+          sort_order: 2,
+          default_mapped_model: 'gpt-5.6',
+          updated_at: '2026-08-01T06:00:00Z',
+          model_routing: { secret: ['must not persist'] },
+        }],
+      });
+    },
+  );
+  assert.deepEqual(result, [{
+    sourceGroupId: 21,
+    name: 'Codex 主力',
+    platform: 'openai',
+    status: 'active',
+    groupMultiplier: 0.08,
+    sortOrder: 2,
+    defaultModel: 'gpt-5.6',
+    sourceUpdatedAt: '2026-08-01T06:00:00Z',
+  }]);
 });
 
 test('sub2api login keeps a TOTP challenge server-side', async () => {

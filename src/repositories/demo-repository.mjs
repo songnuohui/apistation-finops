@@ -209,10 +209,21 @@ export class DemoRepository {
   async listMonitorGroupCandidates() {
     return this.monitorGroups.map((group) => ({
       sourceGroupId: group.sourceGroupId,
+      name: group.name,
+      platform: 'openai',
+      status: 'active',
+      groupMultiplier: group.groupMultiplier,
+      sortOrder: group.displayOrder,
+      defaultModel: group.modelLabel,
+      catalogSyncedAt: group.lastObservedAt,
       requests: 1200 + group.sourceGroupId * 310,
       lastUsedAt: group.lastObservedAt,
       latestModel: group.modelLabel,
     }));
+  }
+
+  async upsertSourceGroupCatalog(groups) {
+    return groups.length;
   }
 
   async createMonitorGroup(input) {
