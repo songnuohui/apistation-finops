@@ -98,6 +98,15 @@ test('monitor PING latency migration remains FinOps-owned', () => {
   assert.doesNotMatch(migration, /credentials|api_key/i);
 });
 
+test('multiplier history migration remains FinOps-owned and keeps open facts explicitly scoped', () => {
+  const migration = read('migrations/010_multiplier_effective_history.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*group_selling_rate_rules/s);
+  assert.match(migration, /selling_rate_rule_id BIGINT/);
+  assert.match(migration, /finalized BOOLEAN NOT NULL DEFAULT FALSE/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /sub2api\.(?:groups|accounts|settings)|credentials/i);
+});
+
 test('immutable cost snapshot migration is isolated from sub2api and preserves unpriced history', () => {
   const migration = read('migrations/005_cost_snapshot_ledger.sql');
   const sync = read('src/services/sync-service.mjs');

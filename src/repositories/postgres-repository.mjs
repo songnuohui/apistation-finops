@@ -1401,6 +1401,7 @@ export class PostgresRepository {
     if (!catalog.length) return 0;
     return inTransaction(this.pool, async (client) => {
       for (const group of catalog) {
+        await this.upsertGroupSellingRateRule(client, group);
         await client.query(`
           INSERT INTO ${this.schema}.source_group_catalog(
             source_group_id,name,platform,status,rate_multiplier,sort_order,default_model,source_updated_at,synced_at)
@@ -1416,6 +1417,97 @@ export class PostgresRepository {
       }
       return catalog.length;
     });
+  }
+
+  async upsertGroupSellingRateRule(client, group) {
+    const sourceGroupId = Number(group.sourceGroupId);
+    const parsed = group.groupMultiplier === null || group.groupMultiplier === undefined || group.groupMultiplier === ''
+      ? null
+      : new Decimal(group.groupMultiplier);
+    const incomingMultiplier = parsed && parsed.isFinite() && parsed.gt(0) ? parsed.toString() : null;
+    const current = await client.query(`
+      SELECT id,selling_multiplier,effective_from
+      FROM ${this.schema}.group_selling_rate_rules
+      WHERE source_group_id=$1 AND status='active' AND effective_to IS NULL
+      ORDER BY effective_from DESC,id DESC
+      LIMIT 1
+      FOR UPDATE`, [sourceGroupId]);
+    const timing = await client.query(`
+      WITH clock AS (
+        SELECT NOW() AS now_at,
+               date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2 AS day_start
+      )
+      SELECT
+        clock.now_at,
+        clock.day_start,
+        EXISTS (
+          SELECT 1
+          FROM ${this.schema}.group_selling_rate_rules r
+          WHERE r.source_group_id=$1
+            AND r.status IN ('active','superseded')
+            AND r.effective_from < clock.day_start
+        ) AS has_multiplier_before_today,
+        (
+          SELECT r.id
+          FROM ${this.schema}.group_selling_rate_rules r
+          WHERE r.source_group_id=$1
+            AND r.status IN ('active','superseded')
+            AND r.effective_from >= clock.day_start
+            AND r.effective_from < clock.day_start + INTERVAL '1 day'
+          ORDER BY r.effective_from,r.id
+          LIMIT 1
+        ) AS first_today_rule_id
+      FROM clock`, [sourceGroupId, this.config.timezone || 'UTC']);
+    const clock = timing.rows[0];
+    if (!clock.has_multiplier_before_today && clock.first_today_rule_id) {
+      await client.query(`
+        UPDATE ${this.schema}.group_selling_rate_rules
+        SET effective_from=$2,updated_at=$3
+        WHERE id=$1 AND effective_from>$2`, [
+        clock.first_today_rule_id, clock.day_start, clock.now_at,
+      ]);
+    }
+
+    const activeRule = current.rows[0] || null;
+    const unchanged = Boolean(
+      activeRule
+      && incomingMultiplier
+      && new Decimal(activeRule.selling_multiplier).eq(new Decimal(incomingMultiplier)),
+    );
+    if (unchanged) return;
+    let changedAt = clock.now_at;
+    if (activeRule && group.sourceUpdatedAt) {
+      const sourceUpdatedAt = new Date(group.sourceUpdatedAt);
+      const activeEffectiveFrom = Number(activeRule.id) === Number(clock.first_today_rule_id)
+        && !clock.has_multiplier_before_today
+        ? new Date(clock.day_start)
+        : new Date(activeRule.effective_from);
+      const nowAt = new Date(clock.now_at);
+      if (
+        Number.isFinite(sourceUpdatedAt.getTime())
+        && sourceUpdatedAt > activeEffectiveFrom
+        && sourceUpdatedAt <= nowAt
+      ) {
+        changedAt = sourceUpdatedAt.toISOString();
+      }
+    }
+    if (activeRule) {
+      await client.query(`
+        UPDATE ${this.schema}.group_selling_rate_rules
+        SET effective_to=$2,status='superseded',updated_at=$2
+        WHERE id=$1`, [activeRule.id, changedAt]);
+    }
+    if (!incomingMultiplier) return;
+
+    const effectiveFrom = !clock.has_multiplier_before_today && !clock.first_today_rule_id
+      ? clock.day_start
+      : changedAt;
+    await client.query(`
+      INSERT INTO ${this.schema}.group_selling_rate_rules(
+        source_group_id,selling_multiplier,effective_from,status,created_by)
+      VALUES($1,$2,$3,'active','sub2api_read_only_catalog')`, [
+      sourceGroupId, incomingMultiplier, effectiveFrom,
+    ]);
   }
 
   async createMonitorGroup(input, actor='admin') {
@@ -1589,19 +1681,62 @@ export class PostgresRepository {
     const sellingMultiplier = input.sellingMultiplier ?? profile?.default_selling_multiplier ?? null;
     const cnyPerReferenceUnit = input.cnyPerReferenceUnit ?? profile?.cny_per_reference_unit ?? null;
     assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, sellingMultiplier, cnyPerReferenceUnit });
+    const timing = await client.query(`
+      WITH clock AS (
+        SELECT NOW() AS now_at,
+               date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2 AS day_start
+      )
+      SELECT
+        clock.now_at,
+        clock.day_start,
+        EXISTS (
+          SELECT 1
+          FROM ${this.schema}.account_cost_rules r
+          WHERE r.source_account_id=$1
+            AND r.status IN ('active','superseded')
+            AND r.cost_mode IN ('manual_multiplier','probe_multiplier')
+            AND r.effective_from < clock.day_start
+        ) AS has_multiplier_before_today,
+        (
+          SELECT r.id
+          FROM ${this.schema}.account_cost_rules r
+          WHERE r.source_account_id=$1
+            AND r.status IN ('active','superseded')
+            AND r.cost_mode IN ('manual_multiplier','probe_multiplier')
+            AND r.effective_from >= clock.day_start
+            AND r.effective_from < clock.day_start + INTERVAL '1 day'
+          ORDER BY r.effective_from,r.id
+          LIMIT 1
+        ) AS first_today_multiplier_rule_id
+      FROM clock`, [accountId, this.config.timezone || 'UTC']);
+    const clock = timing.rows[0];
+    if (!clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET effective_from=$2,updated_at=$3
+        WHERE id=$1 AND effective_from>$2`, [
+        clock.first_today_multiplier_rule_id, clock.day_start, clock.now_at,
+      ]);
+    }
+    const firstMultiplierToday = Boolean(clock.first_today_multiplier_rule_id);
+    const effectiveFrom = ['manual_multiplier','probe_multiplier'].includes(costMode)
+      && !clock.has_multiplier_before_today
+      && !firstMultiplierToday
+      ? clock.day_start
+      : clock.now_at;
     await client.query(`
       UPDATE ${this.schema}.account_cost_rules
-      SET effective_to=NOW(),status='superseded',updated_at=NOW()
+      SET effective_to=$2,status='superseded',updated_at=$2
       WHERE source_account_id=$1 AND status='active' AND effective_to IS NULL`,
-    [accountId]);
+    [accountId, clock.now_at]);
     const result = await client.query(`
       INSERT INTO ${this.schema}.account_cost_rules(
         source_account_id,cost_profile_id,cost_mode,basis_mode,upstream_multiplier,
         selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by)
-      VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),'active',$8,$9) RETURNING *`,
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10) RETURNING *`,
     [
       accountId,input.costProfileId || profile?.id || null,costMode,basisMode,
-      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,input.notes || '',actor,
+      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,
     ]);
     return result.rows[0];
   }

@@ -22,7 +22,7 @@ export const USAGE_COLUMN_COUNT = USAGE_COLUMNS.length;
 export const MAX_USAGE_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / USAGE_COLUMN_COUNT));
 export const COST_SNAPSHOT_BATCH_SIZE = 10_000;
 export const COST_SNAPSHOT_OPEN_DAYS = 3;
-export const COST_SNAPSHOT_COLUMN_COUNT = 23;
+export const COST_SNAPSHOT_COLUMN_COUNT = 24;
 export const MAX_COST_SNAPSHOT_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / COST_SNAPSHOT_COLUMN_COUNT));
 
 export const REQUIRED_SOURCE_COLUMNS = {
@@ -331,9 +331,12 @@ export class SyncService {
       const usageRows = await this.drain('usage_logs', () => this.syncUsage());
       await this.refreshRecentUsage();
       const monitorObservationRows = await this.refreshChannelMonitorSnapshots();
-      const liveCostSnapshotRows = await inTransaction(
+      const liveUsageSnapshotResult = await inTransaction(
         this.finopsPool,
-        (client) => this.freezePendingUsageCostSnapshots(client, 'live_sync'),
+        async (client) => ({
+          rows: await this.freezePendingUsageCostSnapshots(client, 'live_sync', { refreshOpenDay: true }),
+          finalized: await this.finalizeUsageCostSnapshots(client),
+        }),
       );
       const liveFixedCostSnapshotRows = await inTransaction(
         this.finopsPool,
@@ -354,7 +357,9 @@ export class SyncService {
         skipped: false, usageRows, paymentRows, redeemRows, affiliateRows, auditRows, subscriptionRows,
         monitorObservationRows,
         historicalCostSnapshotRows, historicalFixedCostSnapshotRows,
-        liveCostSnapshotRows, liveFixedCostSnapshotRows,
+        liveCostSnapshotRows: liveUsageSnapshotResult.rows,
+        finalizedUsageCostSnapshotRows: liveUsageSnapshotResult.finalized,
+        liveFixedCostSnapshotRows,
         durationMs: Date.now() - started,
       };
       this.logger.info('[sync] cycle complete', result);
@@ -581,8 +586,9 @@ export class SyncService {
     ]);
   }
 
-  async freezePendingUsageCostSnapshots(client, origin) {
+  async freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay = false } = {}) {
     let total = 0;
+    const refreshStartedAt = new Date();
     for (;;) {
       const pending = await client.query(`
         SELECT
@@ -599,6 +605,7 @@ export class SyncService {
           COALESCE(rule.basis_mode,rule_profile.basis_mode,account_profile.basis_mode,'revenue_backsolve') AS basis_mode,
           COALESCE(
             rule.selling_multiplier,
+            group_rate.selling_multiplier,
             rule_profile.default_selling_multiplier,
             account_profile.default_selling_multiplier,
             NULLIF(f.user_rate_multiplier,0)
@@ -612,6 +619,7 @@ export class SyncService {
           ) AS cny_per_reference_unit,
           COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
           rule.id AS account_cost_rule_id,
+          group_rate.id AS selling_rate_rule_id,
           fixed_period.id AS fixed_period_id,
           observation.id AS rate_observation_id,
           observation.effective_rate_multiplier AS observed_upstream_multiplier
@@ -632,6 +640,16 @@ export class SyncService {
         ) rule ON TRUE
         LEFT JOIN ${this.schema}.cost_profiles rule_profile
           ON rule_profile.id=rule.cost_profile_id
+        LEFT JOIN LATERAL (
+          SELECT r.id,r.selling_multiplier
+          FROM ${this.schema}.group_selling_rate_rules r
+          WHERE r.source_group_id=f.source_group_id
+            AND r.status IN ('active','superseded')
+            AND r.effective_from <= f.occurred_at
+            AND (r.effective_to IS NULL OR r.effective_to > f.occurred_at)
+          ORDER BY r.effective_from DESC,r.id DESC
+          LIMIT 1
+        ) group_rate ON TRUE
         LEFT JOIN LATERAL (
           SELECT p.id,p.cost_profile_id
           FROM ${this.schema}.account_cost_periods p
@@ -656,8 +674,28 @@ export class SyncService {
           FROM ${this.schema}.fact_usage_cost_snapshots snapshot
           WHERE snapshot.source_usage_id=f.source_usage_id
         )
+        OR (
+          $2::boolean
+          AND EXISTS (
+            SELECT 1
+            FROM ${this.schema}.fact_usage_cost_snapshots snapshot
+            WHERE snapshot.source_usage_id=f.source_usage_id
+              AND snapshot.finalized=FALSE
+              AND snapshot.frozen_at < $5
+              AND f.occurred_at >= (
+                date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
+                - (($4::int - 1) * INTERVAL '1 day')
+              )
+          )
+        )
         ORDER BY f.occurred_at,f.source_usage_id
-        LIMIT $1`, [COST_SNAPSHOT_BATCH_SIZE]);
+        LIMIT $1`, [
+        COST_SNAPSHOT_BATCH_SIZE,
+        refreshOpenDay,
+        this.config.timezone || 'UTC',
+        COST_SNAPSHOT_OPEN_DAYS,
+        refreshStartedAt,
+      ]);
       if (!pending.rowCount) break;
 
       const rows = pending.rows.map((row) => {
@@ -703,6 +741,7 @@ export class SyncService {
           basis_mode: row.basis_mode || 'revenue_backsolve',
           cost_profile_id: row.cost_profile_id || null,
           account_cost_rule_id: row.account_cost_rule_id || null,
+          selling_rate_rule_id: row.selling_rate_rule_id || null,
           rate_observation_id: row.rate_observation_id || null,
           selling_multiplier: row.selling_multiplier ?? null,
           upstream_multiplier: upstreamMultiplier,
@@ -722,7 +761,7 @@ export class SyncService {
             row.source_usage_id, row.source_account_id, row.source_user_id, row.source_group_id,
             row.model, row.occurred_at, row.user_charge_cny, row.standard_cost_usd_reference,
             row.source_selling_multiplier, row.source_account_multiplier, row.cost_mode, row.basis_mode,
-            row.cost_profile_id, row.account_cost_rule_id, row.rate_observation_id,
+            row.cost_profile_id, row.account_cost_rule_id, row.selling_rate_rule_id, row.rate_observation_id,
             row.selling_multiplier, row.upstream_multiplier, row.cny_per_reference_unit,
             row.upstream_multiplier_source, row.cost_status, row.calculated_cost_cny,
             row.snapshot_origin, row.pricing_version,
@@ -733,14 +772,62 @@ export class SyncService {
             source_usage_id,source_account_id,source_user_id,source_group_id,model,occurred_at,
             user_charge_cny,standard_cost_usd_reference,source_selling_multiplier,
             source_account_multiplier,cost_mode,basis_mode,cost_profile_id,account_cost_rule_id,
-            rate_observation_id,selling_multiplier,upstream_multiplier,cny_per_reference_unit,
+            selling_rate_rule_id,rate_observation_id,selling_multiplier,upstream_multiplier,cny_per_reference_unit,
             upstream_multiplier_source,cost_status,calculated_cost_cny,snapshot_origin,pricing_version)
           VALUES ${valuesPlaceholders(chunk.length, COST_SNAPSHOT_COLUMN_COUNT)}
-          ON CONFLICT(source_usage_id) DO NOTHING`, params);
+          ${refreshOpenDay ? `ON CONFLICT(source_usage_id) DO UPDATE SET
+            source_account_id=EXCLUDED.source_account_id,
+            source_user_id=EXCLUDED.source_user_id,
+            source_group_id=EXCLUDED.source_group_id,
+            model=EXCLUDED.model,
+            occurred_at=EXCLUDED.occurred_at,
+            user_charge_cny=EXCLUDED.user_charge_cny,
+            standard_cost_usd_reference=EXCLUDED.standard_cost_usd_reference,
+            source_selling_multiplier=EXCLUDED.source_selling_multiplier,
+            source_account_multiplier=EXCLUDED.source_account_multiplier,
+            cost_mode=EXCLUDED.cost_mode,
+            basis_mode=EXCLUDED.basis_mode,
+            cost_profile_id=EXCLUDED.cost_profile_id,
+            account_cost_rule_id=EXCLUDED.account_cost_rule_id,
+            selling_rate_rule_id=EXCLUDED.selling_rate_rule_id,
+            rate_observation_id=EXCLUDED.rate_observation_id,
+            selling_multiplier=EXCLUDED.selling_multiplier,
+            upstream_multiplier=EXCLUDED.upstream_multiplier,
+            cny_per_reference_unit=EXCLUDED.cny_per_reference_unit,
+            upstream_multiplier_source=EXCLUDED.upstream_multiplier_source,
+            cost_status=EXCLUDED.cost_status,
+            calculated_cost_cny=EXCLUDED.calculated_cost_cny,
+            snapshot_origin=EXCLUDED.snapshot_origin,
+            pricing_version=EXCLUDED.pricing_version,
+            frozen_at=clock_timestamp(),
+            finalized=FALSE,
+            finalized_at=NULL
+          WHERE NOT fact_usage_cost_snapshots.finalized`
+    : 'ON CONFLICT(source_usage_id) DO NOTHING'}`, params);
+        if (refreshOpenDay) {
+          await client.query(`
+            UPDATE ${this.schema}.fact_usage_cost_snapshots
+            SET frozen_at=clock_timestamp()
+            WHERE source_usage_id=ANY($1::bigint[]) AND finalized=FALSE`, [
+            chunk.map((row) => row.source_usage_id),
+          ]);
+        }
         total += inserted.rowCount;
       }
     }
     return total;
+  }
+
+  async finalizeUsageCostSnapshots(client) {
+    const result = await client.query(`
+      UPDATE ${this.schema}.fact_usage_cost_snapshots
+      SET finalized=TRUE,finalized_at=COALESCE(finalized_at,NOW())
+      WHERE finalized=FALSE
+        AND occurred_at < (
+          date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
+          - (($2::int - 1) * INTERVAL '1 day')
+        )`, [this.config.timezone || 'UTC', COST_SNAPSHOT_OPEN_DAYS]);
+    return result.rowCount;
   }
 
   async captureFixedCostDailySnapshots(client, origin) {

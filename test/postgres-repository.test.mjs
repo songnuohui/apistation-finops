@@ -180,6 +180,146 @@ test('monitor candidates merge the sanitized source catalog with usage activity'
   assert.doesNotMatch(queries[0].text, /credentials|model_routing/i);
 });
 
+test('first account multiplier of the day starts at local midnight', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:00:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: false,
+            first_today_multiplier_rule_id: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) {
+        return { rows: [{ effective_from: params[7] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const rule = await repository.upsertAccountCostRule(client, 8, {
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.05', sellingMultiplier: '2', cnyPerReferenceUnit: null, notes: '',
+  });
+  assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
+  const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
+  assert.equal(insert.params[7], '2026-07-31T16:00:00.000Z');
+  assert.match(queries[0].text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$2\)/);
+});
+
+test('same-day account multiplier changes preserve the first rule at midnight and split later changes by time', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:00:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: false,
+            first_today_multiplier_rule_id: 41,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) {
+        return { rows: [{ effective_from: params[7] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const rule = await repository.upsertAccountCostRule(client, 8, {
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.08', sellingMultiplier: '2', cnyPerReferenceUnit: null, notes: '',
+  });
+  const anchored = queries.find((query) => (
+    query.text.includes('UPDATE "finops".account_cost_rules')
+    && query.text.includes('SET effective_from=$2')
+  ));
+  const superseded = queries.find((query) => (
+    query.text.includes('SET effective_to=$2,status')
+  ));
+  assert.deepEqual(anchored.params, [41, '2026-07-31T16:00:00.000Z', '2026-08-01T04:00:00.000Z']);
+  assert.deepEqual(superseded.params, [8, '2026-08-01T04:00:00.000Z']);
+  assert.equal(rule.effective_from, '2026-08-01T04:00:00.000Z');
+});
+
+test('group selling multiplier history starts at midnight then uses the observed source update time', async () => {
+  const firstQueries = [];
+  const firstClient = {
+    async query(text, params = []) {
+      firstQueries.push({ text, params });
+      if (text.includes('FROM "finops".group_selling_rate_rules') && text.includes('FOR UPDATE')) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('WITH clock AS')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:10:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: false,
+            first_today_rule_id: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const firstRepository = new PostgresRepository({ connect: async () => firstClient }, config);
+  await firstRepository.upsertSourceGroupCatalog([{
+    sourceGroupId: 21, name: 'OpenAI', platform: 'openai', status: 'active',
+    groupMultiplier: '0.05', sortOrder: 0, defaultModel: 'gpt-test', sourceUpdatedAt: null,
+  }]);
+  const firstRule = firstQueries.find((query) => query.text.includes('INSERT INTO "finops".group_selling_rate_rules'));
+  assert.equal(firstRule.params[2], '2026-07-31T16:00:00.000Z');
+
+  const changedQueries = [];
+  const changedClient = {
+    async query(text, params = []) {
+      changedQueries.push({ text, params });
+      if (text.includes('FROM "finops".group_selling_rate_rules') && text.includes('FOR UPDATE')) {
+        return {
+          rows: [{ id: 71, selling_multiplier: '0.05', effective_from: '2026-07-31T16:00:00.000Z' }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('WITH clock AS')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:10:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: true,
+            first_today_rule_id: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const changedRepository = new PostgresRepository({ connect: async () => changedClient }, config);
+  await changedRepository.upsertSourceGroupCatalog([{
+    sourceGroupId: 21, name: 'OpenAI', platform: 'openai', status: 'active',
+    groupMultiplier: '0.08', sortOrder: 0, defaultModel: 'gpt-test',
+    sourceUpdatedAt: '2026-08-01T04:00:00.000Z',
+  }]);
+  const close = changedQueries.find((query) => query.text.includes('SET effective_to=$2,status'));
+  const nextRule = changedQueries.find((query) => query.text.includes('INSERT INTO "finops".group_selling_rate_rules'));
+  assert.deepEqual(close.params, [71, '2026-08-01T04:00:00.000Z']);
+  assert.equal(nextRule.params[2], '2026-08-01T04:00:00.000Z');
+});
+
 test('sync state is pending when a required cursor is absent', async () => {
   const completeRows = REQUIRED_SYNC_SOURCES
     .filter((sourceName) => sourceName !== 'credit_reconciliation')

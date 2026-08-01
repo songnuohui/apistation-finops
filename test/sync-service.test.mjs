@@ -335,16 +335,63 @@ test('cost snapshots prefer request multiplier, preserve unknown cost, and class
   assert.match(insert.text, /ON CONFLICT\(source_usage_id\) DO NOTHING/);
   assert.equal(insert.params.length, 4 * COST_SNAPSHOT_COLUMN_COUNT);
   const row = (index) => insert.params.slice(index * COST_SNAPSHOT_COLUMN_COUNT, (index + 1) * COST_SNAPSHOT_COLUMN_COUNT);
-  assert.equal(row(0)[16], '0.5');
-  assert.equal(row(0)[19], 'priced');
-  assert.equal(row(0)[20], '25');
-  assert.equal(row(1)[16], '0.8');
-  assert.equal(row(1)[18], 'probe_observation');
+  assert.equal(row(0)[17], '0.5');
+  assert.equal(row(0)[20], 'priced');
+  assert.equal(row(0)[21], '25');
+  assert.equal(row(1)[17], '0.8');
+  assert.equal(row(1)[19], 'probe_observation');
   assert.equal(row(2)[10], 'free');
-  assert.equal(row(2)[19], 'free');
-  assert.equal(row(2)[20], '0');
-  assert.equal(row(3)[19], 'missing_upstream_multiplier');
-  assert.equal(row(3)[20], null);
+  assert.equal(row(2)[20], 'free');
+  assert.equal(row(2)[21], '0');
+  assert.equal(row(3)[20], 'missing_upstream_multiplier');
+  assert.equal(row(3)[21], null);
+});
+
+test('open usage cost snapshots refresh while finalized history remains immutable', async () => {
+  const queries = [];
+  let selected = false;
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('INSERT INTO "finops".fact_usage_cost_snapshots')) {
+        return { rows: [], rowCount: params.length / COST_SNAPSHOT_COLUMN_COUNT };
+      }
+      if (text.includes('FROM "finops".fact_usage_events f')) {
+        if (selected) return { rows: [], rowCount: 0 };
+        selected = true;
+        return {
+          rows: [{
+            source_usage_id: 10, source_account_id: 8, source_user_id: 3, source_group_id: 2,
+            model: 'gpt-test', occurred_at: new Date('2026-08-01T01:00:00Z'),
+            user_charge_cny: '100', standard_cost_usd_reference: '10',
+            source_selling_multiplier: '2', source_account_multiplier: null,
+            configured_cost_mode: 'manual_multiplier', basis_mode: 'revenue_backsolve',
+            selling_multiplier: '2', manual_upstream_multiplier: '0.08', cny_per_reference_unit: null,
+            cost_profile_id: 7, account_cost_rule_id: 51, selling_rate_rule_id: 71,
+            fixed_period_id: null, rate_observation_id: null, observed_upstream_multiplier: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: text.includes('UPDATE "finops".fact_usage_cost_snapshots') ? 2 : 0 };
+    },
+  };
+  const service = new SyncService(null, {
+    finopsSchema: 'finops', sourceSchema: 'public', timezone: 'Asia/Shanghai',
+  });
+  assert.equal(await service.freezePendingUsageCostSnapshots(client, 'live_sync', { refreshOpenDay: true }), 1);
+  assert.equal(await service.finalizeUsageCostSnapshots(client), 2);
+  const refresh = queries.find((query) => query.text.includes('INSERT INTO "finops".fact_usage_cost_snapshots'));
+  const finalize = queries.find((query) => query.text.includes('SET finalized=TRUE'));
+  const select = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
+  assert.match(select.text, /group_selling_rate_rules/);
+  assert.match(select.text, /snapshot\.finalized=FALSE/);
+  assert.match(refresh.text, /ON CONFLICT\(source_usage_id\) DO UPDATE SET/);
+  assert.match(refresh.text, /WHERE NOT fact_usage_cost_snapshots\.finalized/);
+  assert.equal(refresh.params.length, COST_SNAPSHOT_COLUMN_COUNT);
+  assert.equal(refresh.params[14], 71);
+  assert.match(finalize.text, /finalized=TRUE/);
+  assert.match(finalize.text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$1\)/);
 });
 
 test('fixed daily snapshots use local midnight boundaries and finalization leaves closed days immutable', async () => {
