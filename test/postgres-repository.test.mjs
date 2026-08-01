@@ -252,6 +252,124 @@ test('same-day account multiplier changes preserve the first rule at midnight an
   assert.equal(rule.effective_from, '2026-08-01T04:00:00.000Z');
 });
 
+test('current-day multiplier correction replaces every open version from local midnight', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:00:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: true,
+            first_today_multiplier_rule_id: 41,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT *') && text.includes('FOR UPDATE')) {
+        return {
+          rows: [{
+            id: 44, cost_profile_id: null, cost_mode: 'manual_multiplier',
+            basis_mode: 'revenue_backsolve', upstream_multiplier: '0.05',
+            selling_multiplier: '2', cny_per_reference_unit: null, notes: '',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('FROM "finops".account_cost_archives')) return { rows: [], rowCount: 0 };
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) {
+        return { rows: [{ effective_from: params[7] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const rule = await repository.upsertAccountCostRule(client, 8, {
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.08', sellingMultiplier: '2', cnyPerReferenceUnit: null,
+    changeStrategy: 'current_day', notes: '',
+  });
+  const voidToday = queries.find((query) => query.text.includes("SET status='void'"));
+  const closePrevious = queries.find((query) => query.text.includes('effective_from < $2'));
+  const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
+  assert.deepEqual(voidToday.params, [8, '2026-07-31T16:00:00.000Z', '2026-08-01T04:00:00.000Z']);
+  assert.deepEqual(closePrevious.params, [8, '2026-07-31T16:00:00.000Z', '2026-08-01T04:00:00.000Z']);
+  assert.equal(insert.params[7], '2026-07-31T16:00:00.000Z');
+  assert.equal(insert.params[10], 'current_day');
+  assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
+});
+
+test('cost archive finalizes only FinOps snapshots and writes an audit event', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('SELECT source_account_id') && text.includes('FOR UPDATE')) return { rows: [{ source_account_id: 8 }], rowCount: 1 };
+      if (text.includes('SELECT NOW() AS now_at')) return {
+        rows: [{ now_at: '2026-08-01T05:00:00.000Z', cutoff_day: '2026-08-01' }], rowCount: 1,
+      };
+      if (text.includes('FROM "finops".account_cost_archives')) return { rows: [], rowCount: 0 };
+      if (text.includes('fact_usage_cost_snapshots')) return { rows: [], rowCount: 3 };
+      if (text.includes('account_cost_daily_snapshots')) return { rows: [], rowCount: 2 };
+      if (text.includes('INSERT INTO "finops".account_cost_archives')) return {
+        rows: [{ id: 9, cutoff_at: '2026-08-01T04:00:00.000Z' }], rowCount: 1,
+      };
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const result = await repository.archiveAccountCost(8, {
+    cutoffAt: '2026-08-01T04:00:00.000Z', notes: '日结',
+  }, 'finance@example.com');
+  assert.deepEqual(result, {
+    id: 9, accountId: 8, cutoffAt: '2026-08-01T04:00:00.000Z',
+    usageSnapshotCount: 3, fixedCostSnapshotCount: 2,
+  });
+  const writes = queries.map((query) => query.text).filter((text) => /\b(?:UPDATE|INSERT INTO)\b/.test(text));
+  assert.ok(writes.every((text) => !/\b(?:public|sub2api)\./i.test(text)));
+  assert.ok(queries.some((query) => query.text.includes("'archive_pricing'")));
+});
+
+test('audited reprice updates selected FinOps snapshots and records the before/after totals', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('SELECT source_account_id') && text.includes('FOR UPDATE')) return { rows: [{ source_account_id: 8 }], rowCount: 1 };
+      if (text.includes('SELECT source_usage_id,user_charge_cny')) return {
+        rows: [
+          { source_usage_id: 101, user_charge_cny: '10', standard_cost_usd_reference: '0', calculated_cost_cny: '2' },
+          { source_usage_id: 102, user_charge_cny: '20', standard_cost_usd_reference: '0', calculated_cost_cny: '4' },
+        ],
+        rowCount: 2,
+      };
+      if (text.includes('INSERT INTO "finops".account_cost_reprice_jobs')) return {
+        rows: [{ id: 12, effective_from: '2026-07-01T00:00:00.000Z', effective_to: '2026-08-01T00:00:00.000Z' }],
+        rowCount: 1,
+      };
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const result = await repository.repriceAccountCost(8, {
+    effectiveFrom: '2026-07-01T00:00:00.000Z', effectiveTo: '2026-08-01T00:00:00.000Z',
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.05', sellingMultiplier: '0.1', cnyPerReferenceUnit: null, notes: '更正',
+  }, 'finance@example.com');
+  assert.deepEqual(result, {
+    id: 12, accountId: 8, effectiveFrom: '2026-07-01T00:00:00.000Z',
+    effectiveTo: '2026-08-01T00:00:00.000Z', affectedUsageCount: 2, beforeCostCny: 6, afterCostCny: 15,
+  });
+  const snapshotUpdate = queries.find((query) => query.text.includes("upstream_multiplier_source='audited_reprice'"));
+  assert.ok(snapshotUpdate);
+  assert.equal(snapshotUpdate.params[0], 12);
+  assert.ok(queries.some((query) => query.text.includes("'historical_reprice'")));
+});
+
 test('group selling multiplier history starts at midnight then uses the observed source update time', async () => {
   const firstQueries = [];
   const firstClient = {

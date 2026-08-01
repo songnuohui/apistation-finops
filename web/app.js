@@ -743,6 +743,7 @@ async function renderUsersEnhanced(search = state.userSearch) {
 function accountActionButtons(item) {
   return `<div class="table-actions table-row-actions">
     <button type="button" class="icon-button table-icon" title="编辑账号台账" data-edit-ledger="${item.id}">${icon('settings-2')}</button>
+    <button type="button" class="icon-button table-icon" title="查看计价版本与封存记录" data-account-rule-history="${item.id}">${icon('shield-check')}</button>
     <button type="button" class="icon-button table-icon" title="查看与编辑成本明细" data-account-cost-history="${item.id}">${icon('receipt-text')}</button>
   </div>`;
 }
@@ -1309,10 +1310,32 @@ function ledgerFields(profiles, account) {
     { name: 'upstreamMultiplier', label: '手动上游倍率', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
     { name: 'sellingMultiplier', label: '销售倍率覆盖', type: 'number', required: false, value: account.sellingMultiplier || '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
+    { name: 'changeStrategy', label: '本次计价变更', type: 'select', value: 'future_only', options: [['future_only', '后续用量生效'], ['current_day', '从今天 0 点重算']] },
     { name: 'supplier', label: '供应商', required: false, value: account.supplier || '' },
     { name: 'purchaseBatch', label: '采购批次', required: false, value: account.purchaseBatch || '' },
     { name: 'tags', label: '账号标签（逗号分隔）', required: false, full: true, value: account.tags?.join(',') || '' },
   ];
+}
+
+function changeStrategyLabel(value) {
+  return value === 'current_day' ? '从当天 0 点重算' : '后续用量生效';
+}
+
+function accountRuleText(account) {
+  if (account.costMode === 'manual_multiplier' || account.costMode === 'probe_multiplier') {
+    const upstream = account.upstreamMultiplier ? `上游 ${account.upstreamMultiplier}x` : '上游待补';
+    const selling = account.sellingMultiplier ? `销售 ${account.sellingMultiplier}x` : '销售待补';
+    return `${costModeLabel(account.costMode)} · ${upstream} / ${selling}`;
+  }
+  return costModeLabel(account.costMode || account.costType);
+}
+
+function accountRuleContext(account) {
+  return `<div class="cost-rule-context">
+    <div><span>当前规则</span><strong>${escapeHtml(accountRuleText(account))}</strong></div>
+    <div><span>最后变更</span><strong>${dateTime(account.lastCostRuleChangedAt)}${account.lastCostRuleChangedBy ? ` · ${escapeHtml(account.lastCostRuleChangedBy)}` : ''}</strong></div>
+    <div><span>已封存至</span><strong>${dateTime(account.archivedThrough)}</strong></div>
+  </div>`;
 }
 
 function openAccountLedgerModal(account, profiles) {
@@ -1323,6 +1346,116 @@ function openAccountLedgerModal(account, profiles) {
       ...data,
       tags: data.tags ? data.tags.split(',').map((item) => item.trim()).filter(Boolean) : [],
     }),
+  }));
+  const form = document.querySelector('#modal-form');
+  form.insertAdjacentHTML('afterbegin', accountRuleContext(account));
+  const actions = form.querySelector('.form-actions');
+  actions.insertAdjacentHTML('afterbegin', `
+    <button type="button" class="button" data-account-rule-history>${icon('receipt-text')}版本记录</button>
+    <button type="button" class="button" data-account-cost-archive>${icon('shield-check')}封存计价</button>`);
+  actions.querySelector('[data-account-rule-history]')?.addEventListener('click', () => openAccountCostRuleHistory(account, profiles));
+  actions.querySelector('[data-account-cost-archive]')?.addEventListener('click', () => openAccountCostArchiveModal(account, profiles));
+}
+
+function accountCostRuleHistoryPager(data) {
+  const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
+  return `<div class="pager">
+    <span>共 ${compact(data.total)} 条版本与封存记录</span>
+    <label>每页<select data-cost-rule-page-size>${[10, 20, 50, 100].map((size) => `<option value="${size}" ${size === data.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label>
+    <div class="pager-nav">
+      <button type="button" class="icon-button pager-button" data-cost-rule-page="${Math.max(1, data.page - 1)}" ${data.page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
+      ${pageNumbers(data.page, pages).map((value) => value === 'ellipsis'
+        ? '<span class="pager-ellipsis">...</span>'
+        : `<button type="button" class="page-number ${value === data.page ? 'active' : ''}" data-cost-rule-page="${value}" ${value === data.page ? 'aria-current="page"' : ''}>${value}</button>`).join('')}
+      <button type="button" class="icon-button pager-button" data-cost-rule-page="${Math.min(pages, data.page + 1)}" ${data.page >= pages ? 'disabled' : ''}>&rsaquo;</button>
+    </div>
+    <span>第 ${data.page} / ${pages} 页</span>
+  </div>`;
+}
+
+function ruleHistoryValue(item) {
+  if (item.type === 'archive') {
+    return `封存至 ${dateTime(item.cutoffAt)}<div class="secondary-text">冻结 ${compact(item.usageSnapshotCount)} 条用量快照 / ${compact(item.fixedCostSnapshotCount)} 条固定成本日快照</div>`;
+  }
+  if (item.type === 'reprice') {
+    return `<span class="primary-text">历史更正</span><div class="secondary-text">${dateTime(item.rangeStart)} - ${dateTime(item.rangeEnd)} · ${cny(item.beforeCostCny)} -> ${cny(item.afterCostCny)}</div>`;
+  }
+  const upstream = item.upstreamMultiplier ? `上游 ${item.upstreamMultiplier}x` : '上游 --';
+  const selling = item.sellingMultiplier ? `销售 ${item.sellingMultiplier}x` : '销售 --';
+  return `<span class="primary-text">${escapeHtml(costModeLabel(item.costMode))}</span><div class="secondary-text">${upstream} · ${selling}</div>`;
+}
+
+async function openAccountCostRuleHistory(account, profiles, page = 1, pageSize = 10) {
+  openContentModal('账号计价版本', '<div class="detail-loading"><span></span>正在读取计价版本</div>', 'cost-history-modal');
+  try {
+    const data = await api(`/accounts/${account.id}/cost-rules?page=${page}&page_size=${pageSize}`, { range: false });
+    const form = document.querySelector('#modal-form');
+    form.innerHTML = `
+      <div class="cost-history-summary">
+        <div><strong>${escapeHtml(account.name)}</strong><span>#${account.id} · ${escapeHtml(accountRuleText(account))}</span></div>
+        <div class="table-actions">
+          <button type="button" class="button" data-rule-history-edit>${icon('settings-2')}编辑规则</button>
+          <button type="button" class="button" data-rule-history-reprice>${icon('refresh-cw')}历史更正</button>
+          <button type="button" class="button primary" data-rule-history-archive>${icon('shield-check')}封存计价</button>
+        </div>
+      </div>
+      ${table([
+        { label: '时间' }, { label: '版本 / 封存' }, { label: '生效策略' }, { label: '状态' }, { label: '操作人' }, { label: '备注' },
+      ], data.items.map((item) => [
+        dateTime(item.type === 'archive' ? item.cutoffAt : item.occurredAt),
+        ruleHistoryValue(item),
+        item.type === 'archive' ? '<span class="secondary-text">已锁定历史快照</span>' : item.type === 'reprice' ? '<span class="secondary-text">显式审计更正</span>' : escapeHtml(changeStrategyLabel(item.changeStrategy)),
+        `<span class="status ${item.type === 'archive' || item.type === 'reprice' || item.status === 'active' ? '' : 'warning'}">${item.type === 'archive' ? '已封存' : item.type === 'reprice' ? '已更正' : escapeHtml(item.status)}</span>`,
+        escapeHtml(item.actor || '--'),
+        escapeHtml(item.notes || '--'),
+      ]), 980)}
+      ${accountCostRuleHistoryPager(data)}`;
+    form.className = 'modal-content';
+    form.querySelector('[data-rule-history-edit]')?.addEventListener('click', () => openAccountLedgerModal(account, profiles));
+    form.querySelector('[data-rule-history-reprice]')?.addEventListener('click', () => openAccountCostRepriceModal(account));
+    form.querySelector('[data-rule-history-archive]')?.addEventListener('click', () => openAccountCostArchiveModal(account, profiles));
+    form.querySelectorAll('[data-cost-rule-page]').forEach((button) => {
+      button.addEventListener('click', () => openAccountCostRuleHistory(account, profiles, Number(button.dataset.costRulePage), pageSize));
+    });
+    form.querySelector('[data-cost-rule-page-size]')?.addEventListener('change', (event) => {
+      openAccountCostRuleHistory(account, profiles, 1, Number(event.target.value));
+    });
+  } catch (error) {
+    const form = document.querySelector('#modal-form');
+    form.innerHTML = `<div class="empty"><strong>计价版本读取失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openAccountCostArchiveModal(account) {
+  openModal('封存账号计价', [
+    { name: 'cutoffAt', label: '封存截止时间', type: 'datetime-local', value: dateTimeInputValue(new Date()) },
+    { name: 'notes', label: '封存备注', type: 'textarea', full: true, required: false },
+  ], (data) => api(`/accounts/${account.id}/cost-archive`, {
+    method: 'POST',
+    range: false,
+    body: JSON.stringify(data),
+  }));
+}
+
+function openAccountCostRepriceModal(account) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const costMode = ['manual_multiplier', 'probe_multiplier', 'free'].includes(account.costMode)
+    ? account.costMode
+    : 'manual_multiplier';
+  openModal('历史成本更正', [
+    { name: 'effectiveFrom', label: '更正开始时间', type: 'datetime-local', value: dateTimeInputValue(start) },
+    { name: 'effectiveTo', label: '更正结束时间', type: 'datetime-local', value: dateTimeInputValue(new Date()) },
+    { name: 'costMode', label: '核算模式', type: 'select', value: costMode, options: [['manual_multiplier', '手动上游倍率'], ['probe_multiplier', '已确认探测倍率'], ['free', '免费资源']] },
+    { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
+    { name: 'upstreamMultiplier', label: '确认上游倍率', type: 'number', required: false, value: account.upstreamMultiplier || '' },
+    { name: 'sellingMultiplier', label: '确认销售倍率', type: 'number', required: false, value: account.sellingMultiplier || '' },
+    { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
+    { name: 'notes', label: '更正原因', type: 'textarea', full: true, required: true },
+  ], (data) => api(`/accounts/${account.id}/cost-reprice`, {
+    method: 'POST',
+    range: false,
+    body: JSON.stringify(data),
   }));
 }
 
@@ -1428,6 +1561,7 @@ content.addEventListener('click', (event) => {
   const monitorGroupEdit = event.target.closest('[data-edit-monitor-group]');
   const monitorGroupAdd = event.target.closest('[data-add-monitor-group]');
   const ledgerEdit = event.target.closest('[data-edit-ledger]');
+  const accountRuleHistory = event.target.closest('[data-account-rule-history]');
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
   if (userDetails) {
     openUserDetails(userDetails.dataset.userDetails);
@@ -1470,12 +1604,15 @@ content.addEventListener('click', (event) => {
     render();
     return;
   }
-  if (ledgerEdit || accountCostHistory) {
-    const accountId = ledgerEdit?.dataset.editLedger || accountCostHistory?.dataset.accountCostHistory;
+  if (ledgerEdit || accountRuleHistory || accountCostHistory) {
+    const accountId = ledgerEdit?.dataset.editLedger
+      || accountRuleHistory?.dataset.accountRuleHistory
+      || accountCostHistory?.dataset.accountCostHistory;
     const account = state.accountItems.get(accountId);
     if (!account) return;
     api('/cost-profiles', { range: false }).then((profiles) => {
       if (ledgerEdit) openAccountLedgerModal(account, profiles);
+      else if (accountRuleHistory) openAccountCostRuleHistory(account, profiles);
       else openAccountCostHistory(account, profiles);
     }).catch((error) => toast(error.message));
   }

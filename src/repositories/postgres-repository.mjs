@@ -1,6 +1,6 @@
 import { inTransaction } from '../db.mjs';
 import Decimal from 'decimal.js/decimal.mjs';
-import { splitFixedCostCny } from '../services/cost-accounting.mjs';
+import { calculateMultiplierCostCny, splitFixedCostCny } from '../services/cost-accounting.mjs';
 
 function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
@@ -853,6 +853,9 @@ export class PostgresRepository {
               period.original_amount AS current_original_amount,period.fee_amount AS current_fee_amount,
               period.tax_amount AS current_tax_amount,period.effective_from AS current_effective_from,
               period.effective_to AS current_effective_to,period.notes AS current_cost_notes,
+              last_rule.id AS last_cost_rule_id,last_rule.updated_at AS last_cost_rule_changed_at,
+              last_rule.created_by AS last_cost_rule_changed_by,
+              archive.cutoff_at AS archived_through,
               COALESCE(u.requests,0)::float8 AS requests,COALESCE(u.tokens,0)::float8 AS tokens,
              COUNT(*) OVER() AS total_count
       FROM ${this.schema}.dim_accounts a
@@ -867,6 +870,18 @@ export class PostgresRepository {
           AND (r.effective_to IS NULL OR r.effective_to > NOW())
         ORDER BY r.effective_from DESC,r.id DESC LIMIT 1
       ) rule ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT r.id,r.updated_at,r.created_by
+        FROM ${this.schema}.account_cost_rules r
+        WHERE r.source_account_id=a.source_account_id
+        ORDER BY r.updated_at DESC,r.id DESC LIMIT 1
+      ) last_rule ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT archived.cutoff_at
+        FROM ${this.schema}.account_cost_archives archived
+        WHERE archived.source_account_id=a.source_account_id
+        ORDER BY archived.cutoff_at DESC,archived.id DESC LIMIT 1
+      ) archive ON TRUE
       LEFT JOIN LATERAL (
         SELECT s.*
         FROM ${this.schema}.upstream_billing_snapshots s
@@ -944,8 +959,84 @@ export class PostgresRepository {
         probeStatus: row.probe_status || '',
         probeObservedAt: row.probe_observed_at || null,
         probeFreshUntil: row.probe_fresh_until || null,
+        lastCostRuleId: row.last_cost_rule_id ? number(row.last_cost_rule_id) : null,
+        lastCostRuleChangedAt: row.last_cost_rule_changed_at || null,
+        lastCostRuleChangedBy: row.last_cost_rule_changed_by || '',
+        archivedThrough: row.archived_through || null,
       };
     }), page, pageSize);
+  }
+
+  async listAccountCostRuleHistory({ accountId, page = 1, pageSize = 20, offset = 0 }) {
+    const account = await this.pool.query(
+      `SELECT source_account_id FROM ${this.schema}.dim_accounts WHERE source_account_id=$1`,
+      [accountId],
+    );
+    if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
+    const result = await this.pool.query(`
+      WITH history AS (
+        SELECT
+          'rule'::text AS event_type,r.id AS event_id,r.effective_from AS occurred_at,
+          r.updated_at,r.created_by,r.status,r.change_strategy,r.cost_mode,r.basis_mode,
+          r.upstream_multiplier,r.selling_multiplier,r.cny_per_reference_unit,
+          r.notes,NULL::timestamptz AS cutoff_at,NULL::integer AS usage_snapshot_count,
+          NULL::integer AS fixed_cost_snapshot_count,
+          r.effective_from AS range_start,r.effective_to AS range_end,
+          NULL::numeric AS before_cost_cny,NULL::numeric AS after_cost_cny
+        FROM ${this.schema}.account_cost_rules r
+        WHERE r.source_account_id=$1
+        UNION ALL
+        SELECT
+          'archive'::text AS event_type,a.id AS event_id,a.cutoff_at AS occurred_at,
+          a.created_at AS updated_at,a.created_by,'archived'::varchar AS status,
+          NULL::varchar AS change_strategy,NULL::varchar AS cost_mode,NULL::varchar AS basis_mode,
+          NULL::numeric AS upstream_multiplier,NULL::numeric AS selling_multiplier,
+          NULL::numeric AS cny_per_reference_unit,a.notes,a.cutoff_at,
+          a.usage_snapshot_count,a.fixed_cost_snapshot_count,
+          NULL::timestamptz AS range_start,NULL::timestamptz AS range_end,
+          NULL::numeric AS before_cost_cny,NULL::numeric AS after_cost_cny
+        FROM ${this.schema}.account_cost_archives a
+        WHERE a.source_account_id=$1
+        UNION ALL
+        SELECT
+          'reprice'::text AS event_type,j.id AS event_id,j.created_at AS occurred_at,
+          j.created_at AS updated_at,j.created_by,'repriced'::varchar AS status,
+          'historical_correction'::varchar AS change_strategy,j.cost_mode,j.basis_mode,
+          j.upstream_multiplier,j.selling_multiplier,j.cny_per_reference_unit,
+          j.notes,NULL::timestamptz AS cutoff_at,j.affected_usage_count,
+          NULL::integer AS fixed_cost_snapshot_count,
+          j.effective_from AS range_start,j.effective_to AS range_end,
+          j.before_cost_cny,j.after_cost_cny
+        FROM ${this.schema}.account_cost_reprice_jobs j
+        WHERE j.source_account_id=$1
+      )
+      SELECT *,COUNT(*) OVER() AS total_count
+      FROM history
+      ORDER BY occurred_at DESC,updated_at DESC,event_id DESC
+      LIMIT $2 OFFSET $3`, [accountId, pageSize, offset]);
+    return pageResult(result.rows.map((row) => ({
+      total_count: row.total_count,
+      type: row.event_type,
+      id: number(row.event_id),
+      occurredAt: row.occurred_at,
+      updatedAt: row.updated_at,
+      actor: row.created_by || '',
+      status: row.status,
+      changeStrategy: row.change_strategy || '',
+      costMode: row.cost_mode || '',
+      basisMode: row.basis_mode || '',
+      upstreamMultiplier: nullableNumber(row.upstream_multiplier),
+      sellingMultiplier: nullableNumber(row.selling_multiplier),
+      cnyPerReferenceUnit: nullableNumber(row.cny_per_reference_unit),
+      notes: row.notes || '',
+      cutoffAt: row.cutoff_at || null,
+      usageSnapshotCount: number(row.usage_snapshot_count),
+      fixedCostSnapshotCount: number(row.fixed_cost_snapshot_count),
+      rangeStart: row.range_start || null,
+      rangeEnd: row.range_end || null,
+      beforeCostCny: nullableNumber(row.before_cost_cny),
+      afterCostCny: nullableNumber(row.after_cost_cny),
+    })), page, pageSize);
   }
 
   async listAccountCostPeriods({ accountId, page = 1, pageSize = 10, offset = 0 }) {
@@ -1675,6 +1766,7 @@ export class PostgresRepository {
   async upsertAccountCostRule(client, accountId, input, profile, actor='admin') {
     const costMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : 'fixed_purchase');
     const basisMode = input.basisMode || profile?.basis_mode || 'revenue_backsolve';
+    const changeStrategy = input.changeStrategy || 'future_only';
     const upstreamMultiplier = input.upstreamMultiplier ?? (
       costMode === 'manual_multiplier' ? profile?.variable_multiplier : null
     );
@@ -1710,7 +1802,50 @@ export class PostgresRepository {
         ) AS first_today_multiplier_rule_id
       FROM clock`, [accountId, this.config.timezone || 'UTC']);
     const clock = timing.rows[0];
-    if (!clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
+    const currentRuleResult = await client.query(`
+      SELECT *
+      FROM ${this.schema}.account_cost_rules
+      WHERE source_account_id=$1 AND status='active' AND effective_to IS NULL
+      ORDER BY effective_from DESC,id DESC LIMIT 1
+      FOR UPDATE`, [accountId]);
+    const currentRule = currentRuleResult.rows[0];
+    const costProfileId = input.costProfileId || profile?.id || null;
+    const sameCurrentRule = currentRule
+      && String(currentRule.cost_profile_id || '') === String(costProfileId || '')
+      && String(currentRule.cost_mode || '') === String(costMode)
+      && String(currentRule.basis_mode || '') === String(basisMode)
+      && String(currentRule.upstream_multiplier ?? '') === String(upstreamMultiplier ?? '')
+      && String(currentRule.selling_multiplier ?? '') === String(sellingMultiplier ?? '')
+      && String(currentRule.cny_per_reference_unit ?? '') === String(cnyPerReferenceUnit ?? '')
+      && String(currentRule.notes || '') === String(input.notes || '');
+    const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(costMode);
+    if (sameCurrentRule && changeStrategy !== 'current_day') return { ...currentRule, unchanged: true };
+
+    if (changeStrategy === 'current_day' && multiplierMode) {
+      const archive = await client.query(`
+        SELECT cutoff_at
+        FROM ${this.schema}.account_cost_archives
+        WHERE source_account_id=$1 AND cutoff_at>$2
+        ORDER BY cutoff_at DESC,id DESC LIMIT 1
+        FOR UPDATE`, [accountId, clock.day_start]);
+      if (archive.rowCount) {
+        throw httpError('today has archived pricing; use future_only or create an audited historical correction', 409);
+      }
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET status='void',effective_to=NULL,updated_at=$3
+        WHERE source_account_id=$1
+          AND status IN ('active','superseded')
+          AND effective_from >= $2
+          AND effective_from < $2 + INTERVAL '1 day'`, [accountId, clock.day_start, clock.now_at]);
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET effective_to=$2,status='superseded',updated_at=$3
+        WHERE source_account_id=$1
+          AND status IN ('active','superseded')
+          AND effective_from < $2
+          AND (effective_to IS NULL OR effective_to>$2)`, [accountId, clock.day_start, clock.now_at]);
+    } else if (!clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
       await client.query(`
         UPDATE ${this.schema}.account_cost_rules
         SET effective_from=$2,updated_at=$3
@@ -1719,26 +1854,179 @@ export class PostgresRepository {
       ]);
     }
     const firstMultiplierToday = Boolean(clock.first_today_multiplier_rule_id);
-    const effectiveFrom = ['manual_multiplier','probe_multiplier'].includes(costMode)
+    const effectiveFrom = changeStrategy === 'current_day' && multiplierMode
+      ? clock.day_start
+      : multiplierMode
       && !clock.has_multiplier_before_today
       && !firstMultiplierToday
       ? clock.day_start
       : clock.now_at;
-    await client.query(`
-      UPDATE ${this.schema}.account_cost_rules
-      SET effective_to=$2,status='superseded',updated_at=$2
-      WHERE source_account_id=$1 AND status='active' AND effective_to IS NULL`,
-    [accountId, clock.now_at]);
+    if (!(changeStrategy === 'current_day' && multiplierMode)) {
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET effective_to=$2,status='superseded',updated_at=$2
+        WHERE source_account_id=$1 AND status='active' AND effective_to IS NULL`,
+      [accountId, clock.now_at]);
+    }
     const result = await client.query(`
       INSERT INTO ${this.schema}.account_cost_rules(
         source_account_id,cost_profile_id,cost_mode,basis_mode,upstream_multiplier,
-        selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10) RETURNING *`,
+        selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by,change_strategy)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11) RETURNING *`,
     [
-      accountId,input.costProfileId || profile?.id || null,costMode,basisMode,
-      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,
+      accountId,costProfileId,costMode,basisMode,
+      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,changeStrategy,
     ]);
     return result.rows[0];
+  }
+
+  async archiveAccountCost(accountId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const account = await client.query(`
+        SELECT source_account_id
+        FROM ${this.schema}.dim_accounts
+        WHERE source_account_id=$1
+        FOR UPDATE`, [accountId]);
+      if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
+      const clock = await client.query(`
+        SELECT NOW() AS now_at,
+               ($1::timestamptz AT TIME ZONE $2)::date AS cutoff_day`,
+      [input.cutoffAt, this.config.timezone || 'UTC']);
+      const cutoffAt = new Date(input.cutoffAt);
+      if (cutoffAt.getTime() > new Date(clock.rows[0].now_at).getTime()) {
+        throw httpError('archive cutoff cannot be in the future', 400);
+      }
+      const previous = await client.query(`
+        SELECT cutoff_at
+        FROM ${this.schema}.account_cost_archives
+        WHERE source_account_id=$1
+        ORDER BY cutoff_at DESC,id DESC LIMIT 1
+        FOR UPDATE`, [accountId]);
+      if (previous.rowCount && cutoffAt.getTime() <= new Date(previous.rows[0].cutoff_at).getTime()) {
+        throw httpError('archive cutoff must be later than the existing archive', 409);
+      }
+      const usage = await client.query(`
+        UPDATE ${this.schema}.fact_usage_cost_snapshots
+        SET finalized=TRUE,finalized_at=COALESCE(finalized_at,NOW())
+        WHERE source_account_id=$1 AND finalized=FALSE AND occurred_at<$2`,
+      [accountId, input.cutoffAt]);
+      const fixed = await client.query(`
+        UPDATE ${this.schema}.account_cost_daily_snapshots
+        SET finalized=TRUE,finalized_at=COALESCE(finalized_at,NOW()),updated_at=NOW()
+        WHERE source_account_id=$1 AND finalized=FALSE AND day<$2::date`,
+      [accountId, clock.rows[0].cutoff_day]);
+      const created = await client.query(`
+        INSERT INTO ${this.schema}.account_cost_archives(
+          source_account_id,cutoff_at,usage_snapshot_count,fixed_cost_snapshot_count,notes,created_by)
+        VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [accountId,input.cutoffAt,usage.rowCount,fixed.rowCount,input.notes || '',actor]);
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'archive_pricing','account_cost_archive',$2,$3::jsonb)`,
+      [actor,String(accountId),JSON.stringify(created.rows[0])]);
+      return {
+        id: number(created.rows[0].id),
+        accountId,
+        cutoffAt: created.rows[0].cutoff_at,
+        usageSnapshotCount: usage.rowCount,
+        fixedCostSnapshotCount: fixed.rowCount,
+      };
+    });
+  }
+
+  async repriceAccountCost(accountId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const account = await client.query(`
+        SELECT source_account_id
+        FROM ${this.schema}.dim_accounts
+        WHERE source_account_id=$1
+        FOR UPDATE`, [accountId]);
+      if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
+      const snapshots = await client.query(`
+        SELECT source_usage_id,user_charge_cny,standard_cost_usd_reference,calculated_cost_cny
+        FROM ${this.schema}.fact_usage_cost_snapshots
+        WHERE source_account_id=$1 AND occurred_at >= $2 AND occurred_at < $3
+        ORDER BY occurred_at,source_usage_id
+        FOR UPDATE`, [accountId,input.effectiveFrom,input.effectiveTo]);
+      const beforeCostCny = cnySum(...snapshots.rows.map((row) => row.calculated_cost_cny || 0));
+      const repriced = snapshots.rows.map((row) => {
+        const calculation = calculateMultiplierCostCny({
+          mode: input.costMode,
+          basisMode: input.basisMode,
+          userChargeCny: row.user_charge_cny,
+          standardCostReference: row.standard_cost_usd_reference,
+          sellingMultiplier: input.sellingMultiplier,
+          upstreamMultiplier: input.upstreamMultiplier,
+          cnyPerReferenceUnit: input.cnyPerReferenceUnit,
+        });
+        return {
+          sourceUsageId: row.source_usage_id,
+          costMode: input.costMode,
+          basisMode: input.basisMode,
+          upstreamMultiplier: input.upstreamMultiplier,
+          sellingMultiplier: input.sellingMultiplier,
+          cnyPerReferenceUnit: input.cnyPerReferenceUnit,
+          costStatus: calculation.status,
+          calculatedCostCny: calculation.costCny,
+        };
+      });
+      const afterCostCny = cnySum(...repriced.map((row) => row.calculatedCostCny || 0));
+      const job = await client.query(`
+        INSERT INTO ${this.schema}.account_cost_reprice_jobs(
+          source_account_id,effective_from,effective_to,cost_mode,basis_mode,
+          upstream_multiplier,selling_multiplier,cny_per_reference_unit,
+          affected_usage_count,before_cost_cny,after_cost_cny,notes,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        RETURNING *`,
+      [
+        accountId,input.effectiveFrom,input.effectiveTo,input.costMode,input.basisMode,
+        input.upstreamMultiplier,input.sellingMultiplier,input.cnyPerReferenceUnit,
+        repriced.length,beforeCostCny,afterCostCny,input.notes || '',actor,
+      ]);
+      const jobId = Number(job.rows[0].id);
+      const batchSize = 5_000;
+      for (let offset = 0; offset < repriced.length; offset += batchSize) {
+        const batch = repriced.slice(offset, offset + batchSize);
+        const params = [jobId];
+        const values = batch.map((row, index) => {
+          const base = 2 + index * 8;
+          params.push(
+            row.sourceUsageId,row.costMode,row.basisMode,row.upstreamMultiplier,row.sellingMultiplier,
+            row.cnyPerReferenceUnit,row.costStatus,row.calculatedCostCny,
+          );
+          return `($${base}::bigint,$${base + 1}::varchar,$${base + 2}::varchar,$${base + 3}::numeric,` +
+            `$${base + 4}::numeric,$${base + 5}::numeric,$${base + 6}::varchar,$${base + 7}::numeric)`;
+        }).join(',');
+        await client.query(`
+          UPDATE ${this.schema}.fact_usage_cost_snapshots snapshot
+          SET cost_mode=changes.cost_mode,basis_mode=changes.basis_mode,
+              account_cost_rule_id=NULL,selling_rate_rule_id=NULL,rate_observation_id=NULL,
+              selling_multiplier=changes.selling_multiplier,upstream_multiplier=changes.upstream_multiplier,
+              cny_per_reference_unit=changes.cny_per_reference_unit,
+              upstream_multiplier_source='audited_reprice',cost_status=changes.cost_status,
+              calculated_cost_cny=changes.calculated_cost_cny,pricing_version=pricing_version+1,
+              frozen_at=NOW(),finalized=TRUE,finalized_at=COALESCE(finalized_at,NOW()),
+              last_reprice_job_id=$1
+          FROM (VALUES ${values}) AS changes(
+            source_usage_id,cost_mode,basis_mode,upstream_multiplier,selling_multiplier,
+            cny_per_reference_unit,cost_status,calculated_cost_cny
+          )
+          WHERE snapshot.source_usage_id=changes.source_usage_id`, params);
+      }
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'historical_reprice','account_cost_reprice_job',$2,$3::jsonb)`,
+      [actor,String(jobId),JSON.stringify(job.rows[0])]);
+      return {
+        id: jobId,
+        accountId,
+        effectiveFrom: job.rows[0].effective_from,
+        effectiveTo: job.rows[0].effective_to,
+        affectedUsageCount: repriced.length,
+        beforeCostCny: number(beforeCostCny),
+        afterCostCny: number(afterCostCny),
+      };
+    });
   }
 
   async createAccountCostPeriod(input, actor='admin') {

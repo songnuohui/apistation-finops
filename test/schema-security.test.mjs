@@ -118,6 +118,19 @@ test('current-day multiplier rule backfill remains FinOps-owned and uses the con
   assert.match(migrator, /replaceAll\('\{\{FINOPS_TIMEZONE\}\}', sqlLiteral\(config\.timezone\)\)/);
 });
 
+test('cost archives and audited historical repricing remain FinOps-owned', () => {
+  const archives = read('migrations/012_cost_rule_archiving.sql');
+  const repricing = read('migrations/013_audited_cost_repricing.sql');
+  assert.match(archives, /CREATE TABLE IF NOT EXISTS .*account_cost_archives/s);
+  assert.match(archives, /change_strategy IN \('future_only','current_day'\)/);
+  assert.match(repricing, /CREATE TABLE IF NOT EXISTS .*account_cost_reprice_jobs/s);
+  assert.match(repricing, /last_reprice_job_id BIGINT/);
+  for (const migration of [archives, repricing]) {
+    assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+    assert.doesNotMatch(migration, /sub2api\.(?:groups|accounts|settings)|credentials/i);
+  }
+});
+
 test('immutable cost snapshot migration is isolated from sub2api and preserves unpriced history', () => {
   const migration = read('migrations/005_cost_snapshot_ledger.sql');
   const sync = read('src/services/sync-service.mjs');

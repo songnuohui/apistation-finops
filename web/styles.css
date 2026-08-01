@@ -925,6 +925,33 @@ textarea:focus-visible {
   max-height: min(92vh, 820px);
 }
 
+.cost-rule-context {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 9px 0 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cost-rule-context span,
+.cost-rule-context strong {
+  display: block;
+}
+
+.cost-rule-context span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.cost-rule-context strong {
+  margin-top: 4px;
+  color: #1d2b3d;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 650;
+}
+
 .cost-history-summary {
   min-height: 62px;
   display: flex;
@@ -1166,6 +1193,7 @@ textarea:focus-visible {
   .detail-filter input { width: 100%; min-width: 0; }
   .detail-range-note { flex: 1 1 100%; margin-left: 0; }
   .detail-metrics { grid-template-columns: 1fr 1fr; }
+  .cost-rule-context { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 480px) {

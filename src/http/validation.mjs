@@ -4,6 +4,7 @@ const COST_TYPES = new Set(['metered', 'prepaid', 'subscription', 'one_time', 'f
 const ALLOCATION_METHODS = new Set(['standard_cost_weight', 'token_weight', 'none']);
 const COST_MODES = new Set(['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free']);
 const BASIS_MODES = new Set(['revenue_backsolve', 'reference_cny']);
+const COST_CHANGE_STRATEGIES = new Set(['future_only', 'current_day']);
 const FIXED_ALLOCATION_STRATEGIES = new Set(['equal', 'standard_cost_weight', 'token_weight']);
 const CASH_TYPES = new Set([
   'other_expense', 'other_income', 'gateway_fee', 'account_purchase', 'supplier_topup',
@@ -191,9 +192,50 @@ export function normalizeAccountLedger(input) {
     upstreamMultiplier,
     sellingMultiplier,
     cnyPerReferenceUnit,
+    changeStrategy: optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only',
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags) || [],
+  };
+}
+
+export function normalizeAccountCostArchive(input) {
+  return {
+    cutoffAt: dateValue(input.cutoffAt, 'cutoffAt'),
+    notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
+  };
+}
+
+export function normalizeAccountCostReprice(input) {
+  const effectiveFrom = dateValue(input.effectiveFrom, 'effectiveFrom');
+  const effectiveTo = dateValue(input.effectiveTo, 'effectiveTo');
+  if (new Date(effectiveTo) <= new Date(effectiveFrom)) throw badRequest('effectiveTo must be after effectiveFrom');
+  const costMode = enumValue(input.costMode, 'costMode', COST_MODES);
+  if (!['manual_multiplier', 'probe_multiplier', 'free'].includes(costMode)) {
+    throw badRequest('historical cost reprice supports multiplier or free modes only');
+  }
+  const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES) || 'revenue_backsolve';
+  const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
+  const sellingMultiplier = optionalDecimal(input.sellingMultiplier, 'sellingMultiplier', { min: 0, allowZero: false });
+  const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
+  if (['manual_multiplier', 'probe_multiplier'].includes(costMode) && !upstreamMultiplier) {
+    throw badRequest('historical multiplier reprice requires upstreamMultiplier');
+  }
+  if (costMode !== 'free' && basisMode === 'revenue_backsolve' && !sellingMultiplier) {
+    throw badRequest('revenue_backsolve requires sellingMultiplier');
+  }
+  if (costMode !== 'free' && basisMode === 'reference_cny' && !cnyPerReferenceUnit) {
+    throw badRequest('reference_cny requires cnyPerReferenceUnit');
+  }
+  return {
+    effectiveFrom,
+    effectiveTo,
+    costMode,
+    basisMode,
+    upstreamMultiplier,
+    sellingMultiplier,
+    cnyPerReferenceUnit,
+    notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
   };
 }
 

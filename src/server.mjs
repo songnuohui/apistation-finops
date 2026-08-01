@@ -14,7 +14,7 @@ import {
 } from './auth.mjs';
 import { accountScope, resolveRange, pagination, searchTerm } from './http/query.mjs';
 import {
-  normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountLedger,
+  normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings,
 } from './http/validation.mjs';
@@ -180,6 +180,12 @@ async function api(request,res,url){
       accountId:Number(accountCostHistory[1]),...page(),
     }));
   }
+  const accountRuleHistory=/^\/api\/accounts\/(\d+)\/cost-rules$/.exec(url.pathname);
+  if(request.method==='GET'&&accountRuleHistory){
+    return json(res,200,await repository.listAccountCostRuleHistory({
+      accountId:Number(accountRuleHistory[1]),...page(),
+    }));
+  }
   if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
   }));
@@ -211,6 +217,18 @@ async function api(request,res,url){
   if(request.method==='POST'&&url.pathname==='/api/account-cost-periods/bulk'){
     return json(res,201,await repository.createBulkAccountCostPeriods(normalizeBulkAccountCostPeriods(await body(request)),auth.actor));
   }
+  const accountCostArchive=/^\/api\/accounts\/(\d+)\/cost-archive$/.exec(url.pathname);
+  if(request.method==='POST'&&accountCostArchive){
+    return json(res,201,await repository.archiveAccountCost(
+      Number(accountCostArchive[1]),normalizeAccountCostArchive(await body(request)),auth.actor,
+    ));
+  }
+  const accountCostReprice=/^\/api\/accounts\/(\d+)\/cost-reprice$/.exec(url.pathname);
+  if(request.method==='POST'&&accountCostReprice){
+    return json(res,201,await repository.repriceAccountCost(
+      Number(accountCostReprice[1]),normalizeAccountCostReprice(await body(request)),auth.actor,
+    ));
+  }
   const accountId=routeId(url.pathname,'/api/accounts/');
   if(request.method==='PATCH'&&accountId)return json(res,200,await repository.updateAccountLedger(accountId,normalizeAccountLedger(await body(request)),auth.actor));
   const periodId=routeId(url.pathname,'/api/account-cost-periods/');
@@ -236,14 +254,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing']],
   );
-  if(migration.rowCount < 10)throw new Error('required FinOps migrations 002_cny_accounting through 011_backfill_current_day_multiplier_rules are not applied');
+  if(migration.rowCount < 12)throw new Error('required FinOps migrations 002_cny_accounting through 013_audited_cost_repricing are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

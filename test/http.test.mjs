@@ -5,7 +5,7 @@ import { authorize, sessionCookie } from '../src/auth.mjs';
 import { accountScope, pagination, resolveRange } from '../src/http/query.mjs';
 import { resolveStaticPath } from '../src/http/static-path.mjs';
 import {
-  normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeBulkAccountCostPeriods,
+  normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings,
 } from '../src/http/validation.mjs';
@@ -72,6 +72,21 @@ test('write payloads are normalized and invalid financial data is rejected', () 
     name: 'free mismatch', costType: 'free', costMode: 'fixed_purchase', currency: 'CNY', allocationMethod: 'none',
   }), /free costType requires free costMode/);
   assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier' }).upstreamMultiplier, null);
+  assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier', changeStrategy: 'current_day' }).changeStrategy, 'current_day');
+  assert.throws(() => normalizeAccountLedger({ changeStrategy: 'rewrite_everything' }), /invalid changeStrategy/);
+  assert.equal(normalizeAccountCostArchive({ cutoffAt: '2026-08-01T12:00:00+08:00', notes: '日结' }).notes, '日结');
+  const reprice = normalizeAccountCostReprice({
+    effectiveFrom: '2026-07-01T00:00:00+08:00', effectiveTo: '2026-08-01T00:00:00+08:00',
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.05', sellingMultiplier: '0.1', notes: '修正手工录入',
+  });
+  assert.equal(reprice.upstreamMultiplier, '0.05');
+  assert.throws(() => normalizeAccountCostReprice({
+    ...reprice, effectiveFrom: reprice.effectiveTo,
+  }), /effectiveTo/);
+  assert.throws(() => normalizeAccountCostReprice({
+    ...reprice, upstreamMultiplier: '',
+  }), /upstreamMultiplier/);
   const period = normalizeAccountCostPeriod({
     accountId: '2745', originalAmount: '35', originalCurrency: 'CNY', fxRate: '1', baseAmount: '35',
     effectiveFrom: '2026-07-01T00:00:00+08:00', effectiveTo: '2026-08-01T00:00:00+08:00', tags: '主力, GPT PLUS,主力',
