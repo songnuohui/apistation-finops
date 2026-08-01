@@ -10,6 +10,10 @@ if (config.demoMode) throw new Error('SOURCE_DATABASE_URL and FINOPS_DATABASE_UR
 const sourcePool = createSourcePool(config);
 const pool = createFinopsPool(config);
 
+function sqlLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
 try {
   await assertDistinctDatabases(sourcePool, pool);
   const schema = await pool.query(
@@ -23,7 +27,9 @@ try {
   for (const file of files) {
     const version = path.basename(file, '.sql');
     const raw = await fs.readFile(path.join(root, 'migrations', file), 'utf8');
-    const sql = raw.replaceAll('{{FINOPS_SCHEMA}}', `"${config.finopsSchema}"`);
+    const sql = raw
+      .replaceAll('{{FINOPS_SCHEMA}}', `"${config.finopsSchema}"`)
+      .replaceAll('{{FINOPS_TIMEZONE}}', sqlLiteral(config.timezone));
     await inTransaction(pool, async (client) => {
       await client.query(`CREATE TABLE IF NOT EXISTS "${config.finopsSchema}".schema_migrations (version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
       const existing = await client.query(`SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version = $1`, [version]);

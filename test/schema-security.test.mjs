@@ -107,6 +107,17 @@ test('multiplier history migration remains FinOps-owned and keeps open facts exp
   assert.doesNotMatch(migration, /sub2api\.(?:groups|accounts|settings)|credentials/i);
 });
 
+test('current-day multiplier rule backfill remains FinOps-owned and uses the configured timezone template', () => {
+  const migration = read('migrations/011_backfill_current_day_multiplier_rules.sql');
+  const migrator = read('scripts/migrate.mjs');
+  assert.match(migration, /first_today_multiplier_rule/);
+  assert.match(migration, /\{\{FINOPS_TIMEZONE\}\}/);
+  assert.match(migration, /UPDATE \{\{FINOPS_SCHEMA\}\}\.account_cost_rules/s);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /sub2api\.(?:groups|accounts|settings)|credentials/i);
+  assert.match(migrator, /replaceAll\('\{\{FINOPS_TIMEZONE\}\}', sqlLiteral\(config\.timezone\)\)/);
+});
+
 test('immutable cost snapshot migration is isolated from sub2api and preserves unpriced history', () => {
   const migration = read('migrations/005_cost_snapshot_ledger.sql');
   const sync = read('src/services/sync-service.mjs');
