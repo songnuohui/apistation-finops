@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   assertSourceUnitContract, COST_SNAPSHOT_COLUMN_COUNT, MAX_USAGE_ROWS_PER_INSERT,
   REQUIRED_SOURCE_COLUMNS,
-  refundCashAmount, SyncService, USAGE_COLUMN_COUNT,
+  refundCashAmount, summarizeChannelMonitorGroup, SyncService, USAGE_COLUMN_COUNT,
 } from '../src/services/sync-service.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { assertDistinctDatabases } from '../src/db.mjs';
@@ -50,6 +50,22 @@ test('configuration rejects legacy automatic USD-to-CNY conversion', () => {
     () => loadConfig({ NODE_ENV: 'development', AUTH_DISABLED: 'true', SOURCE_DATABASE_URL: 'postgres://source' }),
     /must be configured together/,
   );
+});
+
+test('channel monitor summaries use operational and degraded checks as available', () => {
+  assert.deepEqual(summarizeChannelMonitorGroup([
+    { enabled: true, primaryStatus: 'operational', availability7d: 99.5, primaryLatencyMs: 120 },
+    { enabled: true, primaryStatus: 'degraded', availability7d: 98.5, primaryLatencyMs: 180 },
+    { enabled: false, primaryStatus: 'failed', availability7d: 0, primaryLatencyMs: 999 },
+  ]), {
+    status: 'degraded',
+    availableCount: 2,
+    totalCount: 2,
+    availabilityPercent: 99,
+    averageLatencyMs: 150,
+  });
+  assert.equal(summarizeChannelMonitorGroup([{ enabled: true, primaryStatus: 'failed' }]).status, 'unavailable');
+  assert.equal(summarizeChannelMonitorGroup([{ enabled: true }]).status, 'unknown');
 });
 
 test('database isolation rejects source and FinOps connections to the same database', async () => {

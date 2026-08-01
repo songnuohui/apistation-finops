@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   listSub2ApiAdminGroups,
+  listSub2ApiAdminChannelMonitors,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
 } from '../src/services/sub2api-auth-service.mjs';
@@ -81,6 +82,46 @@ test('sub2api group catalog keeps only sanitized display fields', async () => {
     sortOrder: 2,
     defaultModel: 'gpt-5.6',
     sourceUpdatedAt: '2026-08-01T06:00:00Z',
+  }]);
+});
+
+test('sub2api channel monitor list keeps only status fields needed by FinOps', async () => {
+  const result = await listSub2ApiAdminChannelMonitors(
+    { accessToken: 'short-lived-token' },
+    config,
+    async (url, options) => {
+      assert.equal(url, 'http://127.0.0.1:8080/api/v1/admin/channel-monitors?page=1&page_size=100&enabled=true');
+      assert.equal(options.headers.Authorization, 'Bearer short-lived-token');
+      return json({
+        code: 0,
+        data: {
+          items: [{
+            id: 7,
+            name: 'PLUS monitor',
+            group_name: 'PLUS 分组',
+            primary_model: 'gpt-5.4',
+            enabled: true,
+            primary_status: 'operational',
+            primary_latency_ms: 220,
+            availability_7d: 99.1,
+            last_checked_at: '2026-08-01T06:00:00Z',
+            endpoint: 'https://secret.example.invalid',
+            api_key_masked: 'sk-***',
+          }],
+        },
+      });
+    },
+  );
+  assert.deepEqual(result, [{
+    id: 7,
+    name: 'PLUS monitor',
+    groupName: 'PLUS 分组',
+    primaryModel: 'gpt-5.4',
+    enabled: true,
+    primaryStatus: 'operational',
+    primaryLatencyMs: 220,
+    availability7d: 99.1,
+    lastCheckedAt: '2026-08-01T06:00:00Z',
   }]);
 });
 

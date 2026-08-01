@@ -82,6 +82,15 @@ test('source group catalog migration remains FinOps-owned', () => {
   assert.doesNotMatch(migration, /credentials|model_routing/i);
 });
 
+test('monitor settings migration remains FinOps-owned and excludes account pool data', () => {
+  const migration = read('migrations/008_monitor_settings.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*monitor_settings/s);
+  assert.match(migration, /refresh_interval_seconds INTEGER/);
+  assert.match(migration, /observation_source VARCHAR/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /account_count|account pool/i);
+});
+
 test('immutable cost snapshot migration is isolated from sub2api and preserves unpriced history', () => {
   const migration = read('migrations/005_cost_snapshot_ledger.sql');
   const sync = read('src/services/sync-service.mjs');

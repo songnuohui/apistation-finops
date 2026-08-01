@@ -130,6 +130,7 @@ const demoMonitorDefinitions = [
   status: 'healthy',
   availableAccountCount: index < 2 ? 12 : 8,
   totalAccountCount: index < 2 ? 12 : 8,
+  configuredGroupMultiplier: effectiveMultiplier,
   groupMultiplier: effectiveMultiplier,
   userMultiplier: effectiveMultiplier,
   effectiveMultiplier,
@@ -206,6 +207,15 @@ export class DemoRepository {
       .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
   }
 
+  async getMonitorSettings() {
+    return { refreshIntervalSeconds: this.monitorRefreshIntervalSeconds || 30 };
+  }
+
+  async updateMonitorSettings(input) {
+    this.monitorRefreshIntervalSeconds = input.refreshIntervalSeconds;
+    return this.getMonitorSettings();
+  }
+
   async listMonitorGroupCandidates() {
     return this.monitorGroups.map((group) => ({
       sourceGroupId: group.sourceGroupId,
@@ -237,6 +247,7 @@ export class DemoRepository {
       availableAccountCount: 0,
       totalAccountCount: 0,
       groupMultiplier: null,
+      configuredGroupMultiplier: null,
       userMultiplier: null,
       effectiveMultiplier: null,
       averageLatencyMs: null,
@@ -259,10 +270,18 @@ export class DemoRepository {
   async getPublicMonitorDashboard() {
     return {
       generatedAt: new Date().toISOString(),
+      refreshIntervalSeconds: (await this.getMonitorSettings()).refreshIntervalSeconds,
       groups: this.monitorGroups
         .filter((group) => group.enabled)
         .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id)
-        .map(({ availableAccountCount: _availableAccountCount, totalAccountCount: _totalAccountCount, ...group }) => ({
+        .map(({
+          availableAccountCount: _availableAccountCount,
+          totalAccountCount: _totalAccountCount,
+          groupMultiplier: _groupMultiplier,
+          userMultiplier: _userMultiplier,
+          effectiveMultiplier: _effectiveMultiplier,
+          ...group
+        }) => ({
           ...group,
           history: demoMonitorHistory(group),
         })),

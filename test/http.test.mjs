@@ -7,6 +7,7 @@ import { resolveStaticPath } from '../src/http/static-path.mjs';
 import {
   normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
+  normalizeMonitorSettings,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -119,4 +120,10 @@ test('monitor group configuration validates a positive source group ID and displ
   });
   assert.throws(() => normalizeMonitorGroup({ name: 'invalid', sourceGroupId: '0' }), /invalid sourceGroupId/);
   assert.throws(() => normalizeMonitorGroup({ name: 'invalid', sourceGroupId: 'abc' }), /invalid sourceGroupId/);
+});
+
+test('monitor settings validate a bounded refresh interval', () => {
+  assert.deepEqual(normalizeMonitorSettings({ refreshIntervalSeconds: '45' }), { refreshIntervalSeconds: 45 });
+  assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '4' }), /invalid refreshIntervalSeconds/);
+  assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '3601' }), /invalid refreshIntervalSeconds/);
 });

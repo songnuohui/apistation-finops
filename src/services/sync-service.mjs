@@ -96,6 +96,51 @@ function sourceTimestamp(cursor) {
   return cursor?.cursor_time || '1970-01-01 00:00:00+00';
 }
 
+function normalizedGroupName(value) {
+  return String(value || '').trim().toLocaleLowerCase('zh-CN');
+}
+
+export function summarizeChannelMonitorGroup(monitors = []) {
+  const enabled = monitors.filter((monitor) => monitor?.enabled !== false);
+  if (!enabled.length) {
+    return {
+      status: 'unknown',
+      availableCount: 0,
+      totalCount: 0,
+      availabilityPercent: null,
+      averageLatencyMs: null,
+    };
+  }
+  const statuses = enabled.map((monitor) => String(monitor.primaryStatus || '').trim().toLowerCase());
+  const known = statuses.filter(Boolean);
+  const availableCount = statuses.filter((status) => status === 'operational' || status === 'degraded').length;
+  const totalCount = enabled.length;
+  const availabilityValues = enabled
+    .filter((monitor) => String(monitor.primaryStatus || '').trim())
+    .map((monitor) => Number(monitor.availability7d))
+    .filter(Number.isFinite);
+  const latencyValues = enabled
+    .map((monitor) => Number(monitor.primaryLatencyMs))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  let status = 'unknown';
+  if (known.length) {
+    if (!availableCount) status = 'unavailable';
+    else if (availableCount < totalCount || statuses.some((value) => value === 'degraded')) status = 'degraded';
+    else status = 'healthy';
+  }
+  return {
+    status,
+    availableCount,
+    totalCount,
+    availabilityPercent: availabilityValues.length
+      ? Number((availabilityValues.reduce((total, value) => total + value, 0) / availabilityValues.length).toFixed(2))
+      : null,
+    averageLatencyMs: latencyValues.length
+      ? Math.round(latencyValues.reduce((total, value) => total + value, 0) / latencyValues.length)
+      : null,
+  };
+}
+
 export class SyncService {
   constructor(sourcePool, finopsPoolOrConfig, configOrLogger, logger = console) {
     // Keep the legacy three-argument form for unit tests only. Production
@@ -116,6 +161,61 @@ export class SyncService {
     this.balanceSettings = `"${this.config.sourceSettingsSchema || 'finops_source'}"."balance_recharge_multiplier"`;
     this.running = false;
     this.timer = null;
+    this.channelMonitorReader = null;
+    this.sourceGroupCatalogReader = null;
+    this.sourceGroupCatalogWriter = null;
+    this.sub2ApiAccessToken = '';
+  }
+
+  setChannelMonitorReader(reader) {
+    this.channelMonitorReader = typeof reader === 'function' ? reader : null;
+  }
+
+  setSourceGroupCatalogReader(reader) {
+    this.sourceGroupCatalogReader = typeof reader === 'function' ? reader : null;
+  }
+
+  setSourceGroupCatalogWriter(writer) {
+    this.sourceGroupCatalogWriter = typeof writer === 'function' ? writer : null;
+  }
+
+  setSub2ApiAccessToken(accessToken) {
+    this.sub2ApiAccessToken = String(accessToken || '').trim();
+  }
+
+  clearSub2ApiAccessToken() {
+    this.sub2ApiAccessToken = '';
+  }
+
+  async readChannelMonitors() {
+    if (!this.channelMonitorReader || !this.sub2ApiAccessToken) return null;
+    try {
+      return await this.channelMonitorReader({ accessToken: this.sub2ApiAccessToken });
+    } catch (error) {
+      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
+      this.logger.warn('[monitor] failed to read sub2api channel monitors', error?.code || error?.message || error);
+      return null;
+    }
+  }
+
+  async refreshSourceGroupCatalog() {
+    if (!this.sourceGroupCatalogReader || !this.sourceGroupCatalogWriter || !this.sub2ApiAccessToken) return null;
+    try {
+      const groups = await this.sourceGroupCatalogReader({ accessToken: this.sub2ApiAccessToken });
+      await this.sourceGroupCatalogWriter(groups);
+      return groups;
+    } catch (error) {
+      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
+      this.logger.warn('[monitor] failed to refresh sub2api group catalog', error?.code || error?.message || error);
+      return null;
+    }
+  }
+
+  async refreshChannelMonitorSnapshots() {
+    await this.refreshSourceGroupCatalog();
+    const channelMonitors = await this.readChannelMonitors();
+    if (!Array.isArray(channelMonitors)) return 0;
+    return this.captureChannelMonitorGroupObservations(channelMonitors);
   }
 
   async validateSourceSchema() {
@@ -223,7 +323,7 @@ export class SyncService {
         : 0;
       const usageRows = await this.drain('usage_logs', () => this.syncUsage());
       await this.refreshRecentUsage();
-      const monitorObservationRows = await this.captureMonitorGroupObservations();
+      const monitorObservationRows = await this.refreshChannelMonitorSnapshots();
       const liveCostSnapshotRows = await inTransaction(
         this.finopsPool,
         (client) => this.freezePendingUsageCostSnapshots(client, 'live_sync'),
@@ -310,84 +410,46 @@ export class SyncService {
     return result.rows[0];
   }
 
-  async captureMonitorGroupObservations() {
-    const result = await this.finopsPool.query(`
-      WITH enabled_groups AS (
-        SELECT id,source_group_id
-        FROM ${this.schema}.monitor_groups
-        WHERE enabled
-      ), group_accounts AS (
-        SELECT eg.id AS monitor_group_id,e.source_account_id
-        FROM enabled_groups eg
-        JOIN ${this.schema}.fact_usage_events e
-          ON e.source_group_id=eg.source_group_id
-         AND e.source_account_id > 0
-         AND e.occurred_at >= NOW() - INTERVAL '30 days'
-        GROUP BY eg.id,e.source_account_id
-      ), account_states AS (
-        SELECT ga.monitor_group_id,ga.source_account_id,
-               a.status AS account_status,a.source_deleted_at,
-               p.status AS probe_status,p.fresh_until,p.group_rate_multiplier,
-               p.user_rate_multiplier,p.effective_rate_multiplier,
-               COALESCE(p.observed_at,p.received_at,p.last_attempt_at,p.synced_at) AS probe_time
-        FROM group_accounts ga
-        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=ga.source_account_id
-        LEFT JOIN LATERAL (
-          SELECT status,fresh_until,group_rate_multiplier,user_rate_multiplier,
-                 effective_rate_multiplier,observed_at,received_at,last_attempt_at,synced_at
-          FROM ${this.schema}.upstream_billing_snapshots
-          WHERE source_account_id=ga.source_account_id
-          ORDER BY COALESCE(observed_at,received_at,last_attempt_at,synced_at) DESC,id DESC
-          LIMIT 1
-        ) p ON TRUE
-      ), group_rollup AS (
-        SELECT monitor_group_id,
-               COUNT(*)::int AS total_account_count,
-               COUNT(*) FILTER (
-                 WHERE account_status='active' AND source_deleted_at IS NULL
-                   AND probe_status='ok'
-                   AND (fresh_until IS NULL OR fresh_until > NOW())
-               )::int AS available_account_count,
-               (array_agg(group_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
-                 FILTER (WHERE group_rate_multiplier IS NOT NULL))[1] AS group_multiplier,
-               (array_agg(user_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
-                 FILTER (WHERE user_rate_multiplier IS NOT NULL))[1] AS probe_user_multiplier,
-               (array_agg(effective_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
-                 FILTER (WHERE effective_rate_multiplier IS NOT NULL))[1] AS effective_multiplier
-        FROM account_states
-        GROUP BY monitor_group_id
-      ), usage_metrics AS (
-        SELECT eg.id AS monitor_group_id,
-               AVG(e.duration_ms) FILTER (WHERE e.occurred_at >= NOW() - INTERVAL '30 minutes')::int AS average_latency_ms,
-               (array_agg(e.user_rate_multiplier ORDER BY e.occurred_at DESC)
-                 FILTER (WHERE e.user_rate_multiplier IS NOT NULL))[1] AS usage_user_multiplier
-        FROM enabled_groups eg
-        LEFT JOIN ${this.schema}.fact_usage_events e
-          ON e.source_group_id=eg.source_group_id
-         AND e.occurred_at >= NOW() - INTERVAL '30 days'
-        GROUP BY eg.id
-      )
-      INSERT INTO ${this.schema}.monitor_group_observations(
-        monitor_group_id,status,available_account_count,total_account_count,
-        group_multiplier,user_multiplier,effective_multiplier,average_latency_ms)
-      SELECT eg.id,
-             CASE
-               WHEN COALESCE(gr.total_account_count,0)=0 THEN 'unknown'
-               WHEN COALESCE(gr.available_account_count,0)=0 THEN 'unavailable'
-               WHEN gr.available_account_count < gr.total_account_count THEN 'degraded'
-               ELSE 'healthy'
-             END,
-             COALESCE(gr.available_account_count,0),
-             COALESCE(gr.total_account_count,0),
-             gr.group_multiplier,
-             COALESCE(gr.probe_user_multiplier,um.usage_user_multiplier),
-             COALESCE(gr.effective_multiplier,gr.group_multiplier,gr.probe_user_multiplier,um.usage_user_multiplier),
-             um.average_latency_ms
-      FROM enabled_groups eg
-      LEFT JOIN group_rollup gr ON gr.monitor_group_id=eg.id
-      LEFT JOIN usage_metrics um ON um.monitor_group_id=eg.id
-    `);
-    return result.rowCount;
+  async captureMonitorGroupObservations(channelMonitors = null) {
+    if (!Array.isArray(channelMonitors)) return 0;
+    return this.captureChannelMonitorGroupObservations(channelMonitors);
+  }
+
+  async captureChannelMonitorGroupObservations(channelMonitors) {
+    const configured = await this.finopsPool.query(`
+      SELECT g.id,g.name AS monitor_group_name,COALESCE(c.name,'') AS source_group_name
+      FROM ${this.schema}.monitor_groups g
+      LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
+      WHERE g.enabled
+      ORDER BY g.id`);
+    if (!configured.rowCount) return 0;
+    return inTransaction(this.finopsPool, async (client) => {
+      for (const group of configured.rows) {
+        const groupNames = new Set([
+          normalizedGroupName(group.monitor_group_name),
+          normalizedGroupName(group.source_group_name),
+        ].filter(Boolean));
+        const monitors = channelMonitors.filter((monitor) => (
+          monitor?.enabled !== false && groupNames.has(normalizedGroupName(monitor.groupName))
+        ));
+        const summary = summarizeChannelMonitorGroup(monitors);
+        await client.query(`
+          INSERT INTO ${this.schema}.monitor_group_observations(
+            monitor_group_id,status,available_account_count,total_account_count,
+            group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
+            source_availability_percent,observation_source)
+          VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,'sub2api_channel_monitor')`,
+        [
+          group.id,
+          summary.status,
+          summary.availableCount,
+          summary.totalCount,
+          summary.averageLatencyMs,
+          summary.availabilityPercent,
+        ]);
+      }
+      return configured.rowCount;
+    });
   }
 
   async upsertUpstreamBillingSnapshot(client, accountId, rawSnapshot) {

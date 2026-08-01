@@ -151,3 +151,46 @@ export async function listSub2ApiAdminGroups({ accessToken, clientIp = '' }, con
     }];
   });
 }
+
+function optionalInteger(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export async function listSub2ApiAdminChannelMonitors({ accessToken }, config, fetchImpl = fetch) {
+  const token = String(accessToken || '').trim();
+  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
+  const payload = await request(
+    config.sub2apiAuthUrl,
+    '/api/v1/admin/channel-monitors?page=1&page_size=100&enabled=true',
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    },
+    config.sub2apiAuthTimeoutMs,
+    fetchImpl,
+  );
+  const monitors = Array.isArray(payload) ? payload : payload?.items;
+  if (!Array.isArray(monitors)) {
+    throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api returned an invalid channel monitor list', 503);
+  }
+  return monitors.flatMap((monitor) => {
+    const id = optionalInteger(monitor?.id);
+    if (!id || id <= 0) return [];
+    return [{
+      id,
+      name: String(monitor.name || '').trim().slice(0, 120),
+      groupName: String(monitor.group_name || '').trim().slice(0, 120),
+      primaryModel: String(monitor.primary_model || '').trim().slice(0, 160),
+      enabled: monitor.enabled !== false,
+      primaryStatus: String(monitor.primary_status || '').trim().slice(0, 24),
+      primaryLatencyMs: optionalInteger(monitor.primary_latency_ms),
+      availability7d: optionalNumber(monitor.availability_7d),
+      lastCheckedAt: monitor.last_checked_at || null,
+    }];
+  });
+}

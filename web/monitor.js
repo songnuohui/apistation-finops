@@ -3,6 +3,9 @@ const refreshButton = document.querySelector('#refresh-button');
 const updatedLabel = document.querySelector('#updated-label');
 const groupCount = document.querySelector('#group-count');
 const statusSummary = document.querySelector('#status-summary');
+const refreshNote = document.querySelector('.monitor-refresh-note');
+let refreshTimer = null;
+let refreshIntervalSeconds = 30;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
@@ -23,6 +26,17 @@ function number(value, digits = 0) {
 function multiplier(value) {
   if (value === null || value === undefined) return '--';
   return `${Number(value).toFixed(3).replace(/\.?0+$/, '')}x`;
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(load, refreshIntervalSeconds * 1000);
+}
+
+function setRefreshInterval(value) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) refreshIntervalSeconds = Math.min(3600, Math.max(5, Math.round(parsed)));
+  if (refreshNote) refreshNote.textContent = `自动刷新 ${refreshIntervalSeconds} 秒`;
 }
 
 function relativeTime(value) {
@@ -57,7 +71,7 @@ function card(group) {
       </div>
       <span class="status-badge is-${escapeHtml(status)}">${escapeHtml(statusText[status] || statusText.unknown)}</span>
     </header>
-    <div class="group-multiplier"><span>当前倍率</span><strong>${escapeHtml(multiplier(group.effectiveMultiplier ?? group.groupMultiplier ?? group.userMultiplier))}</strong></div>
+    <div class="group-multiplier"><span>当前倍率</span><strong>${escapeHtml(multiplier(group.configuredGroupMultiplier))}</strong></div>
     <div class="metric-row">
       <div class="metric-box"><span class="metric-label">响应延迟</span><strong class="metric-value">${latency}</strong></div>
     </div>
@@ -78,6 +92,7 @@ async function load() {
     const response = await fetch('/api/public/group-monitor', { cache: 'no-store' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    setRefreshInterval(data.refreshIntervalSeconds);
     const groups = Array.isArray(data.groups) ? data.groups : [];
     const healthy = groups.filter((group) => group.status === 'healthy').length;
     groupCount.textContent = `${groups.length} 个分组`;
@@ -95,9 +110,9 @@ async function load() {
   } finally {
     refreshButton.disabled = false;
     refreshButton.classList.remove('is-spinning');
+    scheduleRefresh();
   }
 }
 
 refreshButton.addEventListener('click', load);
 load();
-window.setInterval(load, 30_000);

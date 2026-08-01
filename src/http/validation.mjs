@@ -209,6 +209,16 @@ export function normalizeMonitorGroup(input) {
   };
 }
 
+export function normalizeMonitorSettings(input) {
+  return {
+    refreshIntervalSeconds: integerValue(
+      input.refreshIntervalSeconds,
+      'refreshIntervalSeconds',
+      { min: 5, max: 3600 },
+    ),
+  };
+}
+
 export function normalizeCashTransaction(input) {
   const transactionType = enumValue(input.transactionType, 'transactionType', CASH_TYPES);
   const defaultDirection = transactionType === 'other_income' ? 'in' : 'out';

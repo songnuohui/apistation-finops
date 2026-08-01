@@ -1274,20 +1274,26 @@ export class PostgresRepository {
                COUNT(*)::int AS observation_count,
                COUNT(*) FILTER (WHERE status IN ('healthy','degraded'))::int AS available_count
         FROM ${this.schema}.monitor_group_observations
-        WHERE observed_at >= NOW() - INTERVAL '7 days'
+        WHERE observation_source='sub2api_channel_monitor'
+          AND observed_at >= NOW() - INTERVAL '7 days'
         GROUP BY monitor_group_id
       ), latest AS (
         SELECT DISTINCT ON (monitor_group_id)
                monitor_group_id,status,available_account_count,total_account_count,
-               group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,observed_at
+               group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
+               source_availability_percent,observed_at
         FROM ${this.schema}.monitor_group_observations
+        WHERE observation_source='sub2api_channel_monitor'
         ORDER BY monitor_group_id,observed_at DESC,id DESC
       )
       SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
              l.status,l.available_account_count,l.total_account_count,
-             l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,l.observed_at,
+             c.rate_multiplier AS configured_group_multiplier,
+             l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,
+             l.source_availability_percent,l.observed_at,
              r.observation_count,r.available_count
       FROM ${this.schema}.monitor_groups g
+      LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
       LEFT JOIN latest l ON l.monitor_group_id=g.id
       LEFT JOIN recent r ON r.monitor_group_id=g.id
       ORDER BY g.display_order,g.id`);
@@ -1301,15 +1307,52 @@ export class PostgresRepository {
       status: row.status || 'unknown',
       availableAccountCount: number(row.available_account_count),
       totalAccountCount: number(row.total_account_count),
+      configuredGroupMultiplier: nullableNumber(row.configured_group_multiplier),
       groupMultiplier: nullableNumber(row.group_multiplier),
       userMultiplier: nullableNumber(row.user_multiplier),
       effectiveMultiplier: nullableNumber(row.effective_multiplier),
       averageLatencyMs: nullableNumber(row.average_latency_ms),
       lastObservedAt: row.observed_at || null,
-      availabilityPercent: number(row.observation_count)
-        ? Number((number(row.available_count) * 100 / number(row.observation_count)).toFixed(2))
-        : null,
+      availabilityPercent: nullableNumber(row.source_availability_percent)
+        ?? (row.status && row.status !== 'unknown' && number(row.observation_count)
+          ? Number((number(row.available_count) * 100 / number(row.observation_count)).toFixed(2))
+          : null),
     }));
+  }
+
+  async getMonitorSettings() {
+    const result = await this.pool.query(`
+      SELECT refresh_interval_seconds
+      FROM ${this.schema}.monitor_settings
+      WHERE id=TRUE
+      LIMIT 1`);
+    return {
+      refreshIntervalSeconds: result.rowCount
+        ? number(result.rows[0].refresh_interval_seconds)
+        : 30,
+    };
+  }
+
+  async updateMonitorSettings(input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        INSERT INTO ${this.schema}.monitor_settings(id,refresh_interval_seconds,updated_at)
+        VALUES(TRUE,$1,NOW())
+        ON CONFLICT(id) DO UPDATE SET
+          refresh_interval_seconds=EXCLUDED.refresh_interval_seconds,
+          updated_at=NOW()
+        RETURNING refresh_interval_seconds,updated_at`, [input.refreshIntervalSeconds]);
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update','monitor_settings','singleton',$2::jsonb)`,
+      [actor, JSON.stringify({
+        refreshIntervalSeconds: number(result.rows[0].refresh_interval_seconds),
+        updatedAt: result.rows[0].updated_at,
+      })]);
+      return {
+        refreshIntervalSeconds: number(result.rows[0].refresh_interval_seconds),
+      };
+    });
   }
 
   async listMonitorGroupCandidates() {
@@ -1429,15 +1472,33 @@ export class PostgresRepository {
   }
 
   async getPublicMonitorDashboard() {
-    const groups = (await this.listMonitorGroups()).filter((group) => group.enabled);
-    if (!groups.length) return { generatedAt: new Date().toISOString(), groups: [] };
-    const publicGroups = groups.map(({ availableAccountCount: _availableAccountCount, totalAccountCount: _totalAccountCount, ...group }) => group);
+    const [allGroups, settings] = await Promise.all([
+      this.listMonitorGroups(),
+      this.getMonitorSettings(),
+    ]);
+    const groups = allGroups.filter((group) => group.enabled);
+    if (!groups.length) {
+      return {
+        generatedAt: new Date().toISOString(),
+        refreshIntervalSeconds: settings.refreshIntervalSeconds,
+        groups: [],
+      };
+    }
+    const publicGroups = groups.map(({
+      availableAccountCount: _availableAccountCount,
+      totalAccountCount: _totalAccountCount,
+      groupMultiplier: _groupMultiplier,
+      userMultiplier: _userMultiplier,
+      effectiveMultiplier: _effectiveMultiplier,
+      ...group
+    }) => group);
     const result = await this.pool.query(`
       WITH ranked AS (
         SELECT monitor_group_id,observed_at,status,
                ROW_NUMBER() OVER (PARTITION BY monitor_group_id ORDER BY observed_at DESC,id DESC) AS row_number
-        FROM ${this.schema}.monitor_group_observations
+      FROM ${this.schema}.monitor_group_observations
         WHERE monitor_group_id=ANY($1::bigint[])
+          AND observation_source='sub2api_channel_monitor'
       )
       SELECT monitor_group_id,observed_at,status
       FROM ranked
@@ -1455,6 +1516,7 @@ export class PostgresRepository {
     }
     return {
       generatedAt: new Date().toISOString(),
+      refreshIntervalSeconds: settings.refreshIntervalSeconds,
       groups: publicGroups.map((group) => ({ ...group, history: history.get(group.id) || [] })),
     };
   }

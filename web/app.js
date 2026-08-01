@@ -934,7 +934,7 @@ function monitorStatus(group) {
 }
 
 function monitorMultiplier(group) {
-  const value = group.effectiveMultiplier ?? group.groupMultiplier ?? group.userMultiplier;
+  const value = group.configuredGroupMultiplier;
   return value === null || value === undefined ? '--' : `${Number(value).toFixed(3).replace(/\.?0+$/, '')}x`;
 }
 
@@ -976,10 +976,24 @@ function openMonitorGroupModal(group = null, candidate = null) {
   }));
 }
 
+function openMonitorSettingsModal(settings) {
+  openModal('监控页设置', [
+    {
+      name: 'refreshIntervalSeconds', label: '自动刷新间隔（秒）', type: 'number',
+      value: settings.refreshIntervalSeconds,
+    },
+  ], (data) => api('/monitor-settings', {
+    method: 'PATCH',
+    range: false,
+    body: JSON.stringify(data),
+  }));
+}
+
 async function renderMonitor(search = '') {
-  const [groups, candidates] = await Promise.all([
+  const [groups, candidates, settings] = await Promise.all([
     api('/monitor-groups', { range: false }),
     api('/monitor-group-candidates', { range: false }),
+    api('/monitor-settings', { range: false }),
   ]);
   state.lastExport = groups;
   state.monitorCandidates = new Map(candidates.map((candidate) => [String(candidate.sourceGroupId), candidate]));
@@ -1005,7 +1019,7 @@ async function renderMonitor(search = '') {
     <section class="table-panel">${searchTools('搜索展示名称或分组 ID', '<button type="button" class="button primary" id="monitor-group-add">新增分组</button>')}${
       table([
         { label: '展示分组' }, { label: '来源分组 ID', right: true }, { label: '模型标签' },
-        { label: '当前状态' }, { label: '最近倍率', right: true }, { label: '7 天可用性', right: true },
+        { label: '当前状态' }, { label: '分组倍率', right: true }, { label: '7 天可用性', right: true },
         { label: '最近观测' }, { label: '编辑' },
       ], visibleGroups.map((group) => [
         `<span class="primary-text">${escapeHtml(group.name)}</span><div class="secondary-text">排序 ${group.displayOrder} · ${group.enabled ? '展示中' : '已隐藏'}</div>`,
@@ -1032,6 +1046,16 @@ async function renderMonitor(search = '') {
     </section>`;
   bindSearch(renderMonitor);
   document.querySelector('#monitor-group-add')?.addEventListener('click', () => openMonitorGroupModal());
+  const groupAddButton = document.querySelector('#monitor-group-add');
+  if (groupAddButton && !document.querySelector('#monitor-settings-button')) {
+    const settingsButton = document.createElement('button');
+    settingsButton.type = 'button';
+    settingsButton.className = 'button';
+    settingsButton.id = 'monitor-settings-button';
+    settingsButton.textContent = '刷新设置';
+    settingsButton.addEventListener('click', () => openMonitorSettingsModal(settings));
+    groupAddButton.parentElement?.insertBefore(settingsButton, groupAddButton);
+  }
 }
 
 async function renderSync() {

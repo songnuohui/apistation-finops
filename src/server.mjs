@@ -16,6 +16,7 @@ import { accountScope, resolveRange, pagination, searchTerm } from './http/query
 import {
   normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
+  normalizeMonitorSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -23,6 +24,7 @@ import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
+  listSub2ApiAdminChannelMonitors,
   listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
@@ -37,6 +39,9 @@ const finopsPool=createFinopsPool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const pendingLogins=new PendingLoginStore();
+syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiAdminChannelMonitors({accessToken},config));
+syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
+syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
 function setHeaders(res,{embeddable=false}={}){
@@ -122,7 +127,9 @@ async function login(request,res){
       res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),pendingLoginCookie(id,config)]);
       return json(res,200,{requiresTwoFactor:true,emailMasked:result.emailMasked});
     }
+    syncService?.setSub2ApiAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
+    await syncService?.refreshChannelMonitorSnapshots();
     res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
     return json(res,200,{ok:true,user:result.user});
   }catch(error){
@@ -137,7 +144,9 @@ async function loginTwoFactor(request,res){
   try{
     const result=await completeSub2ApiAdministratorTwoFactor({tempToken:pending.tempToken,totpCode:code,clientIp:clientIp(request)},config);
     pendingLogins.delete(pendingLoginId(request));
+    syncService?.setSub2ApiAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
+    await syncService?.refreshChannelMonitorSnapshots();
     res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
     return json(res,200,{ok:true,user:result.user});
   }catch(error){
@@ -182,6 +191,10 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/sync-details')return json(res,200,await repository.getSyncDetails());
   if(request.method==='GET'&&url.pathname==='/api/monitor-groups')return json(res,200,await repository.listMonitorGroups());
   if(request.method==='GET'&&url.pathname==='/api/monitor-group-candidates')return json(res,200,await repository.listMonitorGroupCandidates());
+  if(request.method==='GET'&&url.pathname==='/api/monitor-settings')return json(res,200,await repository.getMonitorSettings());
+  if(request.method==='PATCH'&&url.pathname==='/api/monitor-settings'){
+    return json(res,200,await repository.updateMonitorSettings(normalizeMonitorSettings(await body(request)),auth.actor));
+  }
   if(request.method==='POST'&&url.pathname==='/api/monitor-groups'){
     return json(res,201,await repository.createMonitorGroup(normalizeMonitorGroup(await body(request)),auth.actor));
   }
@@ -223,14 +236,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings']],
   );
-  if(migration.rowCount < 6)throw new Error('required FinOps migrations 002_cny_accounting through 007_source_group_catalog are not applied');
+  if(migration.rowCount < 7)throw new Error('required FinOps migrations 002_cny_accounting through 008_monitor_settings are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog'],
+     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };
@@ -248,6 +261,7 @@ const server=http.createServer(async(request,res)=>{
     if(request.method==='POST'&&url.pathname==='/auth/login')return await login(request,res);
     if(request.method==='POST'&&url.pathname==='/auth/login/2fa')return await loginTwoFactor(request,res);
     if(request.method==='POST'&&url.pathname==='/auth/logout'){
+      syncService?.clearSub2ApiAccessToken();
       res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),clearSessionCookie(config)]);
       return json(res,200,{ok:true});
     }
