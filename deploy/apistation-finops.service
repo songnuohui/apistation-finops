@@ -1,0 +1,32 @@
+[Unit]
+Description=ApiStation FinOps read-only accounting service
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=finops
+Group=finops
+WorkingDirectory=/opt/apistation-finops/current
+EnvironmentFile=/etc/apistation-finops/finops.env
+ExecStart=/usr/bin/node /opt/apistation-finops/current/src/server.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+MemoryMax=384M
+CPUQuota=75%
+TasksMax=128
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

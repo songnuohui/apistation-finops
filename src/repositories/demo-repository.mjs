@@ -1,6 +1,18 @@
+import { splitFixedCostCny } from '../services/cost-accounting.mjs';
+
 function effectiveCostCny(costType, ignoredReferenceCost, purchaseAllocatedCostCny) {
   if (costType === 'free') return 0;
   return Number(purchaseAllocatedCostCny ?? ignoredReferenceCost ?? 0);
+}
+
+function pageResult(items, page = 1, pageSize = 20) {
+  const total = items.length;
+  return {
+    items: items.slice((page - 1) * pageSize, page * pageSize),
+    total,
+    page,
+    pageSize,
+  };
 }
 
 const users = [
@@ -15,7 +27,7 @@ const users = [
 ].map(([email, id, revenue, ignoredReferenceCost, allocatedCost, margin, balance], index) => ({
   id, email, username: email.split('@')[0], tags: index < 2 ? ['核心用户'] : index === 7 ? ['测试'] : [],
   cashPaidCny: +(revenue * 0.96).toFixed(2), creditedCny: +(revenue * 1.04).toFixed(2),
-  recognizedRevenueCny: revenue, userChargeCny: +(revenue * 1.04).toFixed(2),
+  recognizedRevenueCny: revenue, userChargeCny: revenue,
   tokenListValueUsd: +(revenue * 0.17).toFixed(2),
   revenue, revenueCny: revenue, tokens: Math.round(revenue * 1_180_000), requests: Math.round(revenue * 7.6),
   allocatedCost, purchaseAllocatedCostCny: allocatedCost,
@@ -35,8 +47,10 @@ const accounts = [
   ['Claude Kiro 90% Cache #1', 1804, 'Anthropic', 'Kiro Direct', 'metered', 84.64, 49.27, 44.18, 0, null],
   ['Gemini Pro Shared #2', 1908, 'Gemini', 'Google Direct', 'prepaid', 56.31, 18.64, 13.22, 2.5, '2026-09-15'],
 ].map(([name, id, platform, supplier, costType, revenue, ignoredReferenceCost, periodCost, idleCost, expiresAt], index) => ({
-  id, name, platform, supplier, costType, purchaseBatch: `2026-07-B${index + 1}`,
-  revenue, revenueCny: revenue, recognizedRevenueCny: revenue, userChargeCny: +(revenue * 1.04).toFixed(2),
+  id, name, platform, supplier, costType,
+  costMode: costType === 'free' ? 'free' : 'fixed_purchase',
+  purchaseBatch: `2026-07-B${index + 1}`,
+  revenue, revenueCny: revenue, recognizedRevenueCny: revenue, userChargeCny: revenue,
   tokenListValueUsd: +(revenue * 0.16).toFixed(2),
   periodCost, periodCostCny: periodCost, purchaseAllocatedCostCny: periodCost,
   effectiveCostCny: effectiveCostCny(costType, 0, periodCost),
@@ -61,7 +75,7 @@ const models = [
   ['gpt-5.4', 584, 23_700_000, 22.80, 19.38, 1.04, 18.34],
 ].map(([name, requests, tokens, standardCost, revenue, cost, profit]) => ({
   name, requests, tokens, tokenListValueUsd: standardCost,
-  userChargeCny: +(revenue * 1.04).toFixed(2), recognizedRevenueCny: revenue, revenue, revenueCny: revenue,
+  userChargeCny: revenue, recognizedRevenueCny: revenue, revenue, revenueCny: revenue,
   purchaseAllocatedCostCny: cost, effectiveCostCny: cost, fullyLoadedCostCny: cost, bookedCostCny: cost,
   cost, costCny: cost, profit, profitCny: profit, grossProfitCny: profit, bookedProfitCny: profit,
   unbookedAccountCount: 0, costCoverageStatus: 'complete', margin: profit / revenue,
@@ -75,7 +89,7 @@ const trend = Array.from({ length: 14 }, (_, index) => {
   const profit = +(revenue - effectiveCost).toFixed(2);
   return {
     day: day.toISOString().slice(0, 10), revenue, revenueCny: revenue, recognizedRevenueCny: revenue,
-    userChargeCny: +(revenue * 1.04).toFixed(2), allocatedCost, allocatedCostCny: allocatedCost,
+    userChargeCny: revenue, allocatedCost, allocatedCostCny: allocatedCost,
     purchaseAllocatedCostCny: allocatedCost, effectiveCostCny: effectiveCost, fullyLoadedCostCny: effectiveCost,
     bookedCostCny: effectiveCost, profit, profitCny: profit, grossProfitCny: profit, bookedProfitCny: profit,
   };
@@ -95,10 +109,47 @@ const cashTransactions = [
 }));
 
 const demoCostProfiles = [
-  { id: 1, name: 'PLUS 月租账号', costType: 'subscription', currency: 'CNY', allocationMethod: 'standard_cost_weight', version: 1, accountCount: 12 },
-  { id: 2, name: 'OpenAI 按量', costType: 'metered', currency: 'CNY', allocationMethod: 'token_weight', version: 2, accountCount: 4 },
-  { id: 3, name: '免费测试资源', costType: 'free', currency: 'CNY', allocationMethod: 'none', version: 1, accountCount: 2 },
+  { id: 1, name: 'PLUS 月租账号', costType: 'subscription', costMode: 'fixed_purchase', basisMode: 'revenue_backsolve', currency: 'CNY', allocationMethod: 'standard_cost_weight', version: 1, accountCount: 12 },
+  { id: 2, name: 'OpenAI 探测倍率', costType: 'metered', costMode: 'probe_multiplier', basisMode: 'revenue_backsolve', currency: 'CNY', allocationMethod: 'token_weight', version: 2, accountCount: 4 },
+  { id: 3, name: '免费测试资源', costType: 'free', costMode: 'free', basisMode: 'revenue_backsolve', currency: 'CNY', allocationMethod: 'none', version: 1, accountCount: 2 },
 ];
+
+const demoMonitorDefinitions = [
+  ['GPT PLUS【限时特惠】', 1, 'gpt-5.4', 0.08, 96.32, 2053],
+  ['GPT PLUS【稳定】', 2, 'gpt-5.4', 0.08, 97.02, 3205],
+  ['GPT pluspro 混池【应急】', 3, 'gpt-5.4', 0.12, 97.99, 1404],
+  ['GPT PRO【稳定】', 4, 'gpt-5.4', 0.16, 99.21, 1235],
+  ['GPT PRO【兜底】', 5, 'gpt-5.4', 0.20, 99.40, 2416],
+].map(([name, sourceGroupId, modelLabel, effectiveMultiplier, availabilityPercent, averageLatencyMs], index) => ({
+  id: index + 1,
+  name,
+  sourceGroupId,
+  modelLabel,
+  displayOrder: index,
+  enabled: true,
+  status: 'healthy',
+  availableAccountCount: index < 2 ? 12 : 8,
+  totalAccountCount: index < 2 ? 12 : 8,
+  groupMultiplier: effectiveMultiplier,
+  userMultiplier: effectiveMultiplier,
+  effectiveMultiplier,
+  averageLatencyMs,
+  availabilityPercent,
+  lastObservedAt: new Date(Date.now() - (3 + index) * 60_000).toISOString(),
+}));
+
+function demoMonitorHistory(group) {
+  const failed = Math.max(0, Math.min(12, Math.round(60 * (100 - group.availabilityPercent) / 100)));
+  const history = Array.from({ length: 60 }, (_, index) => ({
+    observedAt: new Date(Date.now() - (59 - index) * 60_000).toISOString(),
+    status: 'healthy',
+  }));
+  for (let index = 0; index < failed; index += 1) {
+    const position = Math.min(59, 8 + index * 7);
+    history[position].status = index % 3 === 0 ? 'degraded' : 'unavailable';
+  }
+  return history;
+}
 
 export class DemoRepository {
   constructor(config) {
@@ -107,13 +158,103 @@ export class DemoRepository {
     this.accounts = accounts.map((item) => ({ ...item, tags: [...item.tags] }));
     this.cashTransactions = cashTransactions.map((item) => ({ ...item }));
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
-    this.accountCostPeriods = [];
+    this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
+    this.accountCostPeriods = this.accounts.map((account, index) => {
+      const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const effectiveTo = account.expiresAt
+        ? new Date(`${account.expiresAt}T23:59:59+08:00`).toISOString()
+        : new Date(Date.now() + 30 * 86_400_000).toISOString();
+      const period = {
+        id: index + 1,
+        accountId: account.id,
+        costProfileId: null,
+        originalAmount: account.periodCost,
+        baseAmount: account.periodCost,
+        feeAmount: 0,
+        taxAmount: 0,
+        originalCurrency: 'CNY',
+        fxRate: '1',
+        supplier: account.supplier,
+        purchaseBatch: account.purchaseBatch,
+        effectiveFrom,
+        effectiveTo,
+        notes: '演示数据',
+        status: 'active',
+      };
+      account.currentCostPeriodId = period.id;
+      account.currentCostProfileId = null;
+      account.currentOriginalAmount = period.originalAmount;
+      account.currentFeeAmount = period.feeAmount;
+      account.currentTaxAmount = period.taxAmount;
+      account.currentEffectiveFrom = period.effectiveFrom;
+      account.currentEffectiveTo = period.effectiveTo;
+      account.currentCostNotes = period.notes;
+      return period;
+    });
   }
 
   async getBootstrap() {
     return {
       mode: 'demo', baseCurrency: 'CNY', billingUnit: 'CNY', balanceCurrency: 'CNY', referenceCurrency: 'USD',
       timezone: this.config.timezone, syncLagSeconds: 38,
+    };
+  }
+
+  async listMonitorGroups() {
+    return this.monitorGroups
+      .map((group) => ({ ...group }))
+      .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
+  }
+
+  async listMonitorGroupCandidates() {
+    return this.monitorGroups.map((group) => ({
+      sourceGroupId: group.sourceGroupId,
+      requests: 1200 + group.sourceGroupId * 310,
+      lastUsedAt: group.lastObservedAt,
+      latestModel: group.modelLabel,
+    }));
+  }
+
+  async createMonitorGroup(input) {
+    if (this.monitorGroups.some((group) => Number(group.sourceGroupId) === Number(input.sourceGroupId))) {
+      throw Object.assign(new Error('source group is already configured'), { statusCode: 409 });
+    }
+    const group = {
+      id: Math.max(0, ...this.monitorGroups.map((item) => item.id)) + 1,
+      ...input,
+      status: 'unknown',
+      availableAccountCount: 0,
+      totalAccountCount: 0,
+      groupMultiplier: null,
+      userMultiplier: null,
+      effectiveMultiplier: null,
+      averageLatencyMs: null,
+      availabilityPercent: null,
+      lastObservedAt: null,
+    };
+    this.monitorGroups.push(group);
+    return { ...group };
+  }
+
+  async updateMonitorGroup(id, input) {
+    const group = this.monitorGroups.find((item) => Number(item.id) === Number(id));
+    if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    const duplicate = this.monitorGroups.find((item) => item.id !== group.id && Number(item.sourceGroupId) === Number(input.sourceGroupId));
+    if (duplicate) throw Object.assign(new Error('source group is already configured'), { statusCode: 409 });
+    Object.assign(group, input);
+    return { ...group };
+  }
+
+  async getPublicMonitorDashboard() {
+    return {
+      generatedAt: new Date().toISOString(),
+      groups: this.monitorGroups
+        .filter((group) => group.enabled)
+        .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id)
+        .map(({ availableAccountCount: _availableAccountCount, totalAccountCount: _totalAccountCount, ...group }) => ({
+          ...group,
+          history: demoMonitorHistory(group),
+        })),
     };
   }
 
@@ -124,9 +265,9 @@ export class DemoRepository {
     const effectiveCostCny = trend.reduce((sum, item) => sum + item.effectiveCostCny, 0);
     const grossProfit = revenue - effectiveCostCny;
     return {
-      cash: { received: 1384.2, rechargeReceived: 1384.2, subscriptionReceived: 86.4, totalReceived: 1470.6, refunds: 24.1, gatewayFees: 8.42, procurementSpend: 188.5, netInflow: 1249.58 },
+      cash: { received: 1384.2, rechargeReceived: 1384.2, totalReceived: 1384.2, refunds: 24.1, gatewayFees: 8.42, procurementSpend: 188.5, netInflow: 1163.18 },
       operations: {
-        revenue, revenueCny: revenue, recognizedRevenueCny: revenue, userChargeCny,
+        consumptionCny: userChargeCny, revenue: userChargeCny, revenueCny: userChargeCny, recognizedRevenueCny: userChargeCny, userChargeCny,
         pendingRevenueCny: 0, pendingUsageCount: 0,
         tokenListValueUsd: models.reduce((sum, item) => sum + item.tokenListValueUsd, 0),
         allocatedCost, allocatedCostCny: allocatedCost, purchaseAllocatedCostCny: allocatedCost,
@@ -144,17 +285,112 @@ export class DemoRepository {
     };
   }
 
-  async getTrend() { return trend; }
-  async getUsageBreakdown() { return models; }
+  async getTrend({ preset = '7d', dailyStart, dailyEnd } = {}) {
+    const rechargeEvents = this.cashTransactions
+      .filter((item) => item.type === 'recharge' && item.direction === 'in')
+      .map((item) => ({
+        id: item.id,
+        occurredAt: item.occurredAt,
+        amountCny: Number(item.amount || 0),
+        creditedCny: Number(item.creditedAmountCny || 0),
+        paymentMethod: item.method,
+        reference: item.reference,
+      }));
+    let visibleTrend = trend;
+    if (preset === 'today') visibleTrend = trend.slice(-1);
+    else if (preset === '7d') visibleTrend = trend.slice(-7);
+    else if (preset === 'custom' && dailyStart && dailyEnd) {
+      visibleTrend = trend.filter((item) => item.day >= dailyStart && item.day <= dailyEnd);
+    }
+    return {
+      items: visibleTrend.map((item, index) => ({
+        ...item,
+        rechargeCny: index === visibleTrend.length - 1 ? rechargeEvents.reduce((sum, event) => sum + event.amountCny, 0) : 0,
+      })),
+      rechargeEvents: preset === 'today' ? rechargeEvents : [],
+    };
+  }
+  async getUsageBreakdown({ page = 1, pageSize = 20 } = {}) {
+    return { items: models.slice((page - 1) * pageSize, page * pageSize), total: models.length, page, pageSize };
+  }
 
-  async listUsers({ search = '', page = 1, pageSize = 20 } = {}) {
-    const filtered = this.users.filter((item) => `${item.email} ${item.username}`.toLowerCase().includes(search.toLowerCase()));
+  async listUsers({ search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc' } = {}) {
+    const sortable = new Set([
+      'cashPaidCny','adminCreditCny','adminDeductionCny','balanceCny',
+      'userChargeCny','requests','tokens','bookedCostCny','bookedProfitCny',
+    ]);
+    const key = sortable.has(sort) ? sort : 'userChargeCny';
+    const order = direction === 'asc' ? 1 : -1;
+    const filtered = this.users
+      .filter((item) => `${item.email} ${item.username}`.toLowerCase().includes(search.toLowerCase()))
+      .sort((left, right) => order * (Number(left[key] || 0) - Number(right[key] || 0)));
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
   }
 
-  async listAccounts({ search = '', page = 1, pageSize = 20 } = {}) {
-    const filtered = this.accounts.filter((item) => `${item.name} ${item.platform} ${item.supplier}`.toLowerCase().includes(search.toLowerCase()));
+  async getUserDetails({ userId, recharge, usage } = {}) {
+    const user = this.users.find((item) => Number(item.id) === Number(userId));
+    if (!user) throw Object.assign(new Error('user not found; run synchronization first'), { statusCode: 404 });
+    const userRecharges = this.cashTransactions
+      .filter((item) => item.type === 'recharge' && item.direction === 'in' && Number(item.sourceUserId || 1) === Number(userId))
+      .map((item) => ({
+        id: item.id, occurredAt: item.occurredAt, amountCny: Number(item.amount || 0),
+        creditedCny: Number(item.creditedAmountCny || 0), paymentMethod: item.method,
+        reference: item.reference, status: item.status,
+      }));
+    const userUsage = Array.from({ length: Math.min(32, Math.max(1, Math.round(user.requests / 8))) }, (_, index) => ({
+      sourceUsageId: Number(`${user.id}${index + 1}`),
+      occurredAt: new Date(Date.now() - index * 78 * 60_000).toISOString(),
+      model: index % 2 ? 'gpt-5.6-sol' : 'claude-opus-4-8',
+      requestedModel: index % 2 ? 'gpt-5.6-sol' : 'claude-opus-4-8',
+      upstreamModel: '',
+      accountId: 2745 + (index % 3),
+      userChargeCny: +(user.userChargeCny / Math.max(1, Math.round(user.requests / 8))).toFixed(2),
+      tokens: Math.round(user.tokens / Math.max(1, Math.round(user.requests / 8))),
+      durationMs: 14200 + index * 110,
+    }));
+    const pageItems = (items, page) => ({
+      items: items.slice((page.page - 1) * page.pageSize, page.page * page.pageSize),
+      total: items.length, page: page.page, pageSize: page.pageSize,
+    });
+    return {
+      user: {
+        id: user.id, email: user.email, username: user.username, tags: user.tags, status: 'active',
+        balanceCny: user.balanceCny, consumptionCny: user.userChargeCny, requests: user.requests, tokens: user.tokens,
+        rechargeCny: user.cashPaidCny, creditedCny: user.creditedCny,
+        adminCreditCny: user.adminCreditCny || 0, adminDeductionCny: user.adminDeductionCny || 0,
+      },
+      trend: trend.slice(-7).map((item, index) => ({
+        day: item.day,
+        consumptionCny: +(user.userChargeCny * (0.08 + (index % 4) * 0.04)).toFixed(2),
+        rechargeCny: index === 6 ? userRecharges.reduce((sum, row) => sum + row.amountCny, 0) : 0,
+      })),
+      recharges: pageItems(userRecharges, recharge),
+      usage: pageItems(userUsage, usage),
+    };
+  }
+
+  async listAccounts({ search = '', scope = 'current', page = 1, pageSize = 20 } = {}) {
+    const filtered = this.accounts.filter((item) => {
+      const deleted = Boolean(item.sourceDeletedAt);
+      const matchesScope = scope === 'all'
+        || (scope === 'deleted' && deleted)
+        || (scope === 'current' && !deleted && item.status === 'active');
+      return matchesScope && `${item.name} ${item.platform} ${item.supplier}`.toLowerCase().includes(search.toLowerCase());
+    });
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
+  }
+
+  async listAccountCostPeriods({ accountId, page = 1, pageSize = 10 } = {}) {
+    const periods = this.accountCostPeriods
+      .filter((item) => Number(item.accountId) === Number(accountId))
+      .sort((left, right) => new Date(right.effectiveFrom) - new Date(left.effectiveFrom) || right.id - left.id)
+      .map((item) => ({
+        ...item,
+        totalCost: Number(item.baseAmount || item.originalAmount || 0)
+          + Number(item.feeAmount || 0) + Number(item.taxAmount || 0),
+        costProfile: this.costProfiles.find((profile) => Number(profile.id) === Number(item.costProfileId))?.name || '未绑定模板',
+      }));
+    return pageResult(periods, page, pageSize);
   }
 
   async getSupplierOverview({ search = '' } = {}) {
@@ -186,19 +422,20 @@ export class DemoRepository {
     }
 
     const items = [...grouped.values()].map((item) => {
-      const grossProfit = item.revenue - item.effectiveCostCny;
+      const grossProfit = item.userChargeCny - item.effectiveCostCny;
       return {
         ...item,
         platforms: [...item.platforms],
-        revenueCny: item.revenue,
-        recognizedRevenueCny: item.revenue,
+        revenue: item.userChargeCny,
+        revenueCny: item.userChargeCny,
+        recognizedRevenueCny: item.userChargeCny,
         purchaseAllocatedCostCny: item.purchaseSpend,
         fullyLoadedCostCny: item.effectiveCostCny, bookedCostCny: item.effectiveCostCny,
         grossProfit,
         grossProfitCny: grossProfit, bookedProfitCny: grossProfit,
-        grossMargin: item.revenue ? grossProfit / item.revenue : null,
+        grossMargin: item.userChargeCny ? grossProfit / item.userChargeCny : null,
       };
-    }).sort((a, b) => b.purchaseSpend - a.purchaseSpend || b.revenue - a.revenue);
+    }).sort((a, b) => b.purchaseSpend - a.purchaseSpend || b.userChargeCny - a.userChargeCny);
 
     const purchases = filtered.map((account) => ({
       id: `demo-${account.id}`,
@@ -294,7 +531,6 @@ export class DemoRepository {
       { sourceName: 'redeem_codes', label: '兑换码与人工调账', status: 'healthy', lagSeconds: 34, lastSuccessAt: new Date(now - 34_000).toISOString(), rowsSynced: 86, lastError: null },
       { sourceName: 'user_affiliate_ledger', label: '邀请返利额度', status: 'healthy', lagSeconds: 33, lastSuccessAt: new Date(now - 33_000).toISOString(), rowsSynced: 44, lastError: null },
       { sourceName: 'payment_audit_logs', label: '支付审计', status: 'healthy', lagSeconds: 32, lastSuccessAt: new Date(now - 32_000).toISOString(), rowsSynced: 123, lastError: null },
-      { sourceName: 'user_subscriptions', label: '用户订阅', status: 'healthy', lagSeconds: 33, lastSuccessAt: new Date(now - 33_000).toISOString(), rowsSynced: 18, lastError: null },
       { sourceName: 'credit_reconciliation', label: '额度对账', status: 'healthy', lagSeconds: 34, lastSuccessAt: new Date(now - 34_000).toISOString(), rowsSynced: 20, lastError: null },
       { sourceName: 'reconciliation', label: '自动对账', status: 'healthy', lagSeconds: 65, lastSuccessAt: new Date(now - 65_000).toISOString(), rowsSynced: 8, lastError: null },
     ];
@@ -315,7 +551,14 @@ export class DemoRepository {
 
   async createCostProfile(input) {
     const id = Math.max(0, ...this.costProfiles.map((profile) => profile.id)) + 1;
-    const profile = { id, ...input, version: 1, accountCount: 0 };
+    const profile = {
+      id,
+      ...input,
+      costMode: input.costMode || (input.costType === 'free' ? 'free' : 'fixed_purchase'),
+      basisMode: input.basisMode || 'revenue_backsolve',
+      version: 1,
+      accountCount: 0,
+    };
     this.costProfiles.unshift(profile);
     return profile;
   }
@@ -325,8 +568,11 @@ export class DemoRepository {
     const selectedProfile = input.costProfileId
       ? this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId))
       : null;
-    if ((selectedProfile?.costType || account?.costType) === 'free') {
+    if ((selectedProfile?.costMode || account?.costMode) === 'free') {
       throw Object.assign(new Error('free accounts cannot have a CNY cost period'), { statusCode: 409 });
+    }
+    if ((selectedProfile?.costMode || account?.costMode) && (selectedProfile?.costMode || account?.costMode) !== 'fixed_purchase') {
+      throw Object.assign(new Error('multiplier accounts use the account ledger rule instead of a fixed cost period'), { statusCode: 409 });
     }
     const id = Math.max(0, ...this.accountCostPeriods.map((period) => period.id)) + 1;
     const period = { id, ...input, status: 'active' };
@@ -334,6 +580,7 @@ export class DemoRepository {
     if (account) {
       if (selectedProfile) {
         account.costType = selectedProfile.costType;
+        account.costMode = selectedProfile.costMode;
         selectedProfile.accountCount += 1;
       }
       if (input.supplier) account.supplier = input.supplier;
@@ -352,7 +599,94 @@ export class DemoRepository {
       account.costCoverageStatus = 'complete';
       account.costConfigurationConflict = account.costType === 'free';
       account.grossMargin = account.revenue ? +(account.grossProfit / account.revenue).toFixed(4) : null;
+      account.currentCostPeriodId = id;
+      account.currentCostProfileId = input.costProfileId || null;
+      account.currentOriginalAmount = Number(input.originalAmount);
+      account.currentFeeAmount = Number(input.feeAmount || 0);
+      account.currentTaxAmount = Number(input.taxAmount || 0);
+      account.currentEffectiveFrom = input.effectiveFrom;
+      account.currentEffectiveTo = input.effectiveTo;
+      account.currentCostNotes = input.notes || '';
     }
     return period;
+  }
+
+  async createBulkAccountCostPeriods(input, actor) {
+    const periods = [];
+    const strategy = input.allocationStrategy || 'equal';
+    const costs = splitFixedCostCny(input.originalAmount, input.accountIds, strategy);
+    const fees = splitFixedCostCny(input.feeAmount || 0, input.accountIds, strategy);
+    const taxes = splitFixedCostCny(input.taxAmount || 0, input.accountIds, strategy);
+    for (const [index, accountId] of input.accountIds.entries()) {
+      periods.push(await this.createAccountCostPeriod({
+        ...input,
+        accountId,
+        originalAmount: costs[index].amountCny,
+        baseAmount: costs[index].amountCny,
+        feeAmount: fees[index].amountCny,
+        taxAmount: taxes[index].amountCny,
+      }, actor));
+    }
+    return {
+      accountIds: input.accountIds,
+      created: periods.length,
+      periods,
+      allocatedTotalCny: Number(input.originalAmount) + Number(input.feeAmount || 0) + Number(input.taxAmount || 0),
+    };
+  }
+
+  async updateAccountLedger(accountId, input) {
+    const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
+    if (!account) throw Object.assign(new Error('account not found; run synchronization first'), { statusCode: 404 });
+    const profile = input.costProfileId ? this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId)) : null;
+    if (input.costProfileId && !profile) throw Object.assign(new Error('cost profile not found'), { statusCode: 404 });
+    const costMode = input.costMode || profile?.costMode || account.costMode || 'fixed_purchase';
+    if (costMode === 'free' && account.hasCostRecord) {
+      throw Object.assign(new Error('free accounts cannot retain active CNY cost periods'), { statusCode: 409 });
+    }
+    if (costMode === 'manual_multiplier' && !(input.upstreamMultiplier || profile?.variableMultiplier)) {
+      throw Object.assign(new Error('manual_multiplier requires an account or template upstreamMultiplier'), { statusCode: 400 });
+    }
+    if (input.basisMode === 'reference_cny' && !(input.cnyPerReferenceUnit || profile?.cnyPerReferenceUnit)) {
+      throw Object.assign(new Error('reference_cny requires an account or template cnyPerReferenceUnit'), { statusCode: 400 });
+    }
+    account.costProfileId = input.costProfileId;
+    account.costType = profile?.costType || (costMode === 'free' ? 'free' : account.costType);
+    account.costMode = costMode;
+    account.basisMode = input.basisMode || account.basisMode || 'revenue_backsolve';
+    account.upstreamMultiplier = input.upstreamMultiplier || profile?.variableMultiplier || null;
+    account.sellingMultiplier = input.sellingMultiplier || profile?.defaultSellingMultiplier || null;
+    account.cnyPerReferenceUnit = input.cnyPerReferenceUnit || profile?.cnyPerReferenceUnit || null;
+    account.supplier = input.supplier;
+    account.purchaseBatch = input.purchaseBatch;
+    account.tags = input.tags;
+    return { ...account };
+  }
+
+  async updateAccountCostPeriod(periodId, input) {
+    const period = this.accountCostPeriods.find((item) => Number(item.id) === Number(periodId));
+    if (!period) throw Object.assign(new Error('account cost period not found'), { statusCode: 404 });
+    Object.assign(period, input);
+    const account = this.accounts.find((item) => Number(item.id) === Number(period.accountId));
+    if (account) {
+      if (input.costProfileId) {
+        const profile = this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId));
+        if (!profile) throw Object.assign(new Error('cost profile not found'), { statusCode: 404 });
+        if (profile.costMode !== 'fixed_purchase') throw Object.assign(new Error('only fixed_purchase profiles can have a CNY cost period'), { statusCode: 409 });
+        account.costType = profile.costType;
+        account.costMode = profile.costMode;
+        account.costProfileId = profile.id;
+      }
+      account.supplier = input.supplier;
+      account.purchaseBatch = input.purchaseBatch;
+      if (Array.isArray(input.tags)) account.tags = input.tags;
+      account.currentOriginalAmount = Number(input.originalAmount);
+      account.currentFeeAmount = Number(input.feeAmount || 0);
+      account.currentTaxAmount = Number(input.taxAmount || 0);
+      account.currentEffectiveFrom = input.effectiveFrom;
+      account.currentEffectiveTo = input.effectiveTo;
+      account.currentCostNotes = input.notes || '';
+    }
+    return { ...period };
   }
 }

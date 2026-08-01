@@ -1,5 +1,5 @@
 import { loadConfig } from '../src/config.mjs';
-import { createPool } from '../src/db.mjs';
+import { assertDistinctDatabases, createFinopsPool, createSourcePool } from '../src/db.mjs';
 import { SyncService } from '../src/services/sync-service.mjs';
 
 function positiveInteger(value, fallback) {
@@ -10,11 +10,12 @@ function positiveInteger(value, fallback) {
 }
 
 const config = loadConfig();
-if (!config.databaseUrl) throw new Error('DATABASE_URL is required for historical backfill');
+if (config.demoMode) throw new Error('SOURCE_DATABASE_URL and FINOPS_DATABASE_URL are required for historical backfill');
 
 const maxCycles = positiveInteger(process.env.BACKFILL_MAX_CYCLES, 100_000);
-const pool = createPool(config);
-const sync = new SyncService(pool, config);
+const sourcePool = createSourcePool(config);
+const finopsPool = createFinopsPool(config);
+const sync = new SyncService(sourcePool, finopsPool, config);
 let stopping = false;
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -25,6 +26,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 try {
+  await assertDistinctDatabases(sourcePool, finopsPool);
   await sync.validateSourceSchema();
   for (let cycle = 1; cycle <= maxCycles && !stopping; cycle += 1) {
     const result = await sync.runOnce();
@@ -40,5 +42,5 @@ try {
     if (cycle === maxCycles) throw new Error(`BACKFILL_MAX_CYCLES reached: ${maxCycles}`);
   }
 } finally {
-  await pool.end();
+  await Promise.all([sourcePool.end(), finopsPool.end()]);
 }

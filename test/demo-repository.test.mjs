@@ -65,3 +65,40 @@ test('demo accounting is CNY-only and rejects cost periods on free accounts', as
     accountId: 2745, costProfileId: profile.id, originalAmount: '1', baseAmount: '1',
   }), /free accounts cannot have a CNY cost period/);
 });
+
+test('demo account cost history is paginated and editable by period', async () => {
+  const repository = new DemoRepository(config);
+  const first = await repository.listAccountCostPeriods({ accountId: 2745, page: 1, pageSize: 1 });
+  assert.equal(first.total, 1);
+  assert.equal(first.items.length, 1);
+  assert.equal(first.items[0].accountId, 2745);
+  await repository.updateAccountCostPeriod(first.items[0].id, {
+    originalAmount: '41', baseAmount: '41', feeAmount: '0', taxAmount: '0',
+    effectiveFrom: first.items[0].effectiveFrom, effectiveTo: first.items[0].effectiveTo,
+    supplier: 'new supplier', purchaseBatch: 'NEW-BATCH', notes: 'revised',
+  });
+  const updated = (await repository.listAccountCostPeriods({ accountId: 2745 })).items[0];
+  assert.equal(updated.originalAmount, '41');
+  assert.equal(updated.supplier, 'new supplier');
+});
+
+test('public group monitor contains only enabled configured groups', async () => {
+  const repository = new DemoRepository(config);
+  const before = await repository.getPublicMonitorDashboard();
+  assert.ok(before.groups.length >= 1);
+  assert.equal(before.groups[0].history.length, 60);
+  assert.equal('availableAccountCount' in before.groups[0], false);
+  assert.equal('totalAccountCount' in before.groups[0], false);
+  assert.equal('availableAccountCount' in before.groups[0].history[0], false);
+  assert.equal('totalAccountCount' in before.groups[0].history[0], false);
+
+  await repository.updateMonitorGroup(before.groups[0].id, {
+    name: before.groups[0].name,
+    sourceGroupId: before.groups[0].sourceGroupId,
+    modelLabel: before.groups[0].modelLabel,
+    displayOrder: before.groups[0].displayOrder,
+    enabled: false,
+  });
+  const after = await repository.getPublicMonitorDashboard();
+  assert.equal(after.groups.some((group) => group.id === before.groups[0].id), false);
+});

@@ -1,7 +1,17 @@
 import { inTransaction } from '../db.mjs';
+import Decimal from 'decimal.js/decimal.mjs';
+import { splitFixedCostCny } from '../services/cost-accounting.mjs';
 
 function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
+}
+
+function nullableNumber(value) {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function cnySum(...values) {
+  return values.reduce((total, value) => total.plus(value || 0), new Decimal(0)).toString();
 }
 
 export function effectiveCostCny(costType, ignoredReferenceCost, purchaseAllocatedCostCny) {
@@ -18,6 +28,32 @@ export function effectiveCostSql(costTypeExpression, ignoredReferenceExpression,
   END`;
 }
 
+export function allocatedCostSql(
+  allocationMethodExpression,
+  costExpression,
+  standardWeightExpression,
+  totalStandardWeightExpression,
+  tokenWeightExpression,
+  totalTokenWeightExpression,
+  requestWeightExpression,
+  totalRequestWeightExpression,
+) {
+  return `CASE LOWER(COALESCE(${allocationMethodExpression}, 'standard_cost_weight'))
+    WHEN 'none' THEN 0
+    WHEN 'token_weight' THEN CASE
+      WHEN ${totalTokenWeightExpression} > 0 THEN ${costExpression}*${tokenWeightExpression}/${totalTokenWeightExpression}
+      WHEN ${totalRequestWeightExpression} > 0 THEN ${costExpression}*${requestWeightExpression}/${totalRequestWeightExpression}
+      ELSE 0
+    END
+    ELSE CASE
+      WHEN ${totalStandardWeightExpression} > 0 THEN ${costExpression}*${standardWeightExpression}/${totalStandardWeightExpression}
+      WHEN ${totalTokenWeightExpression} > 0 THEN ${costExpression}*${tokenWeightExpression}/${totalTokenWeightExpression}
+      WHEN ${totalRequestWeightExpression} > 0 THEN ${costExpression}*${requestWeightExpression}/${totalRequestWeightExpression}
+      ELSE 0
+    END
+  END`;
+}
+
 export const SYNC_SOURCE_LABELS = Object.freeze({
   usage_logs: '用量与扣费',
   payment_orders: '充值与退款',
@@ -28,7 +64,10 @@ export const SYNC_SOURCE_LABELS = Object.freeze({
   credit_reconciliation: '额度对账',
 });
 
-export const REQUIRED_SYNC_SOURCES = Object.freeze(Object.keys(SYNC_SOURCE_LABELS));
+export const REQUIRED_SYNC_SOURCES = Object.freeze([
+  'usage_logs', 'payment_orders', 'redeem_codes', 'user_affiliate_ledger',
+  'payment_audit_logs', 'credit_reconciliation',
+]);
 
 function pageResult(rows, page, pageSize) {
   const total = rows.length ? Number(rows[0].total_count) : 0;
@@ -37,6 +76,15 @@ function pageResult(rows, page, pageSize) {
 
 function httpError(message, statusCode) {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, sellingMultiplier, cnyPerReferenceUnit }) {
+  if (costMode === 'manual_multiplier' && !upstreamMultiplier) {
+    throw httpError('manual_multiplier requires an account or template upstreamMultiplier', 400);
+  }
+  if (basisMode === 'reference_cny' && !cnyPerReferenceUnit) {
+    throw httpError('reference_cny requires an account or template cnyPerReferenceUnit', 400);
+  }
 }
 
 export class PostgresRepository {
@@ -61,11 +109,6 @@ export class PostgresRepository {
 
   async getSummary({ start, end }) {
     const usage = await this.pool.query(`
-      WITH recognition AS (
-        SELECT source_usage_id,COALESCE(SUM(allocated_credit),0) AS allocated_credit
-        FROM ${this.schema}.revenue_recognition
-        GROUP BY source_usage_id
-      )
       SELECT COUNT(*) AS requests,
              COALESCE(SUM(input_tokens),0) AS input_tokens,
              COALESCE(SUM(output_tokens),0) AS output_tokens,
@@ -74,17 +117,11 @@ export class PostgresRepository {
              COUNT(DISTINCT source_account_id) FILTER (WHERE source_account_id <> 0) AS active_accounts,
              COALESCE(AVG(duration_ms),0) AS average_latency_ms,
              COALESCE(SUM(user_charge_cny),0) AS user_charge_cny,
-             COALESCE(SUM(recognized_revenue_cny),0) AS recognized_revenue_cny,
-             COALESCE(SUM(GREATEST(user_charge_cny-COALESCE(recognition.allocated_credit,0),0))
-               FILTER (WHERE revenue_recognition_status IN ('unallocated','partial') AND user_charge_cny>0),0) AS pending_revenue_cny,
-             COUNT(*) FILTER (WHERE revenue_recognition_status IN ('unallocated','partial') AND user_charge_cny>0) AS pending_usage_count,
              COALESCE(SUM(standard_cost_usd_reference),0) AS token_list_value_usd
       FROM ${this.schema}.fact_usage_events
-      LEFT JOIN recognition USING(source_usage_id)
       WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
     const cash = await this.pool.query(`
       SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='recharge' AND status <> 'void'),0) AS received,
-             COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='subscription_purchase' AND status <> 'void'),0) AS subscription_received,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='refund' AND status <> 'void'),0) AS refunds,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='gateway_fee'),0) AS gateway_fees,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type IN ('account_purchase','supplier_topup','subscription_renewal')),0) AS procurement_spend
@@ -92,42 +129,65 @@ export class PostgresRepository {
       WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
     const costs = await this.pool.query(`
       WITH usage_by_account AS (
-        SELECT source_account_id,
-               COALESCE(SUM(recognized_revenue_cny),0) AS recognized_revenue_cny,
-               COALESCE(SUM(user_charge_cny),0) AS user_charge_cny
+        SELECT source_account_id,COALESCE(SUM(user_charge_cny),0) AS user_charge_cny
         FROM ${this.schema}.fact_usage_events
         WHERE occurred_at >= $1 AND occurred_at < $2
         GROUP BY source_account_id
-      ), purchase_by_account AS (
+      ), multiplier_by_account AS (
         SELECT source_account_id,
-               COALESCE(SUM((base_amount+fee_amount+tax_amount) *
-                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(effective_to,$2)-GREATEST(effective_from,$1))) /
-                 NULLIF(EXTRACT(EPOCH FROM effective_to-effective_from),0)),0) AS purchase_allocated_cost_cny,
-               COUNT(*) AS cost_record_count
-        FROM ${this.schema}.account_cost_periods
-        WHERE status='active' AND effective_from < $2 AND effective_to > $1
+               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(user_charge_cny) FILTER (
+                 WHERE cost_status NOT IN ('priced','free','fixed_cost')
+               ),0) AS unpriced_user_charge_cny,
+               COUNT(*) FILTER (WHERE cost_status='priced') AS priced_usage_count,
+               MAX(cost_mode) AS cost_mode
+        FROM ${this.schema}.usage_cost_facts
+        WHERE occurred_at >= $1 AND occurred_at < $2
         GROUP BY source_account_id
+      ), fixed_by_account AS (
+        SELECT p.source_account_id,
+               COALESCE(SUM(p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$2)-GREATEST(p.effective_from,$1))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)),0) AS fixed_cost_cny,
+               COUNT(*) AS fixed_cost_record_count
+        FROM ${this.schema}.account_fixed_cost_periods p
+        WHERE p.status='active' AND p.effective_from < $2 AND p.effective_to > $1
+        GROUP BY p.source_account_id
       ), account_costs AS (
-        SELECT COALESCE(u.source_account_id,p.source_account_id) AS source_account_id,
-               COALESCE(u.recognized_revenue_cny,0) AS recognized_revenue_cny,
+        SELECT COALESCE(u.source_account_id,m.source_account_id,f.source_account_id) AS source_account_id,
                COALESCE(u.user_charge_cny,0) AS user_charge_cny,
-               COALESCE(p.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny,
-               COALESCE(p.cost_record_count,0) AS cost_record_count,
-               COALESCE(cp.cost_type,'unconfigured') AS cost_type,
-               ${effectiveCostSql('cp.cost_type','0','COALESCE(p.purchase_allocated_cost_cny,0)')} AS effective_cost_cny
+               COALESCE(m.multiplier_cost_cny,0) AS multiplier_cost_cny,
+               COALESCE(f.fixed_cost_cny,0) AS fixed_cost_cny,
+               COALESCE(f.fixed_cost_record_count,0) AS fixed_cost_record_count,
+               COALESCE(m.priced_usage_count,0) AS priced_usage_count,
+               COALESCE(m.unpriced_user_charge_cny,0) AS multiplier_unpriced_user_charge_cny,
+               COALESCE(m.cost_mode,account_profile.cost_mode,
+                 CASE
+                   WHEN account_profile.cost_type='free' THEN 'free'
+                   WHEN COALESCE(f.fixed_cost_record_count,0)>0 THEN 'fixed_purchase'
+                   ELSE 'unconfigured'
+                 END
+               ) AS cost_mode
         FROM usage_by_account u
-        FULL JOIN purchase_by_account p USING(source_account_id)
+        FULL JOIN multiplier_by_account m USING(source_account_id)
+        FULL JOIN fixed_by_account f USING(source_account_id)
         LEFT JOIN ${this.schema}.dim_accounts a
-          ON a.source_account_id=COALESCE(u.source_account_id,p.source_account_id)
-        LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
+          ON a.source_account_id=COALESCE(u.source_account_id,m.source_account_id,f.source_account_id)
+        LEFT JOIN ${this.schema}.cost_profiles account_profile ON account_profile.id=a.cost_profile_id
       )
-      SELECT COALESCE(SUM(purchase_allocated_cost_cny),0) AS purchase_allocated_cost_cny,
-             COALESCE(SUM(effective_cost_cny),0) AS effective_cost_cny,
-             COUNT(*) FILTER (WHERE cost_type <> 'free' AND cost_record_count=0
-               AND (recognized_revenue_cny>0 OR user_charge_cny>0)) AS unbooked_account_count,
-             COUNT(*) FILTER (WHERE cost_type='free' AND cost_record_count>0) AS cost_conflict_count,
-             COALESCE(SUM(recognized_revenue_cny) FILTER (WHERE cost_type <> 'free' AND cost_record_count=0),0) AS unbooked_revenue_cny,
-             COALESCE(SUM(user_charge_cny) FILTER (WHERE cost_type <> 'free' AND cost_record_count=0),0) AS unbooked_user_charge_cny
+      SELECT COALESCE(SUM(fixed_cost_cny),0) AS fixed_cost_cny,
+             COALESCE(SUM(multiplier_cost_cny),0) AS multiplier_cost_cny,
+             COALESCE(SUM(fixed_cost_cny+multiplier_cost_cny),0) AS effective_cost_cny,
+             COUNT(*) FILTER (WHERE user_charge_cny>0 AND (
+               multiplier_unpriced_user_charge_cny>0
+               OR (cost_mode='fixed_purchase' AND fixed_cost_record_count=0)
+               OR cost_mode='unconfigured'
+             )) AS unbooked_account_count,
+             COALESCE(SUM(CASE
+               WHEN multiplier_unpriced_user_charge_cny>0 THEN multiplier_unpriced_user_charge_cny
+               WHEN cost_mode IN ('fixed_purchase','unconfigured') AND fixed_cost_record_count=0 THEN user_charge_cny
+               ELSE 0
+             END),0) AS unbooked_user_charge_cny
       FROM account_costs`, [start, end]);
     const missing = await this.pool.query(`SELECT COUNT(*) AS count
       FROM ${this.schema}.dim_accounts WHERE cost_profile_id IS NULL AND status='active'`);
@@ -135,30 +195,21 @@ export class PostgresRepository {
     const u = usage.rows[0];
     const c = cash.rows[0];
     const userChargeCny = number(u.user_charge_cny);
-    const recognizedRevenueCny = number(u.recognized_revenue_cny);
-    const pendingRevenueCny = number(u.pending_revenue_cny);
-    const pendingUsageCount = number(u.pending_usage_count);
     const tokenListValueUsd = number(u.token_list_value_usd);
     const cost = costs.rows[0];
-    const purchaseAllocatedCostCny = number(cost.purchase_allocated_cost_cny);
+    const purchaseAllocatedCostCny = number(cost.fixed_cost_cny);
+    const multiplierCostCny = number(cost.multiplier_cost_cny);
     const effectiveCost = number(cost.effective_cost_cny);
-    const grossProfitCny = recognizedRevenueCny - effectiveCost;
+    const grossProfitCny = userChargeCny - effectiveCost;
     const received = number(c.received);
-    const subscriptionReceived = number(c.subscription_received);
     const refunds = number(c.refunds);
     const gatewayFees = number(c.gateway_fees);
     const procurementSpend = number(c.procurement_spend);
     const missingCount = number(missing.rows[0].count);
     const unbookedAccountCount = number(cost.unbooked_account_count);
-    const unbookedRevenueCny = number(cost.unbooked_revenue_cny);
     const unbookedUserChargeCny = number(cost.unbooked_user_charge_cny);
-    const costConflictCount = number(cost.cost_conflict_count);
+    const costConflictCount = 0;
     const alerts = [];
-    if (pendingUsageCount) alerts.push({
-      severity: 'high',
-      title: `${pendingUsageCount} 笔扣费尚未匹配余额批次`,
-      detail: `未分配扣费 ${pendingRevenueCny.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })}，请检查充值、赠送或返利账本`,
-    });
     if (missingCount) alerts.push({
       severity: 'high',
       title: `${missingCount} 个账号缺少成本规则`,
@@ -167,7 +218,7 @@ export class PostgresRepository {
     if (unbookedAccountCount) alerts.push({
       severity: 'high',
       title: `${unbookedAccountCount} 个账号存在用量但缺少 CNY 成本档案`,
-      detail: `影响确认收入 ${unbookedRevenueCny.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })}、余额扣费 ${unbookedUserChargeCny.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })}；当前利润为已入账成本口径`,
+      detail: `影响用户实际消费 ${unbookedUserChargeCny.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })}；当前利润为已登记成本口径`,
     });
     if (costConflictCount) alerts.push({
       severity: 'high',
@@ -177,21 +228,22 @@ export class PostgresRepository {
 
     return {
       cash: {
-        received, rechargeReceived: received, subscriptionReceived, totalReceived: received + subscriptionReceived,
+        received, rechargeReceived: received, totalReceived: received,
         refunds, gatewayFees, procurementSpend,
-        netInflow: received + subscriptionReceived - refunds - gatewayFees - procurementSpend,
+        netInflow: received - refunds - gatewayFees - procurementSpend,
       },
       operations: {
-        revenue: recognizedRevenueCny, revenueCny: recognizedRevenueCny, recognizedRevenueCny,
+        consumptionCny: userChargeCny,
+        revenue: userChargeCny, revenueCny: userChargeCny, recognizedRevenueCny: userChargeCny,
         allocatedCost: purchaseAllocatedCostCny, allocatedCostCny: purchaseAllocatedCostCny,
-        purchaseAllocatedCostCny,
+        purchaseAllocatedCostCny, multiplierCostCny,
         effectiveCostCny: effectiveCost, fullyLoadedCostCny: effectiveCost,
         bookedCostCny: effectiveCost, bookedProfitCny: grossProfitCny,
         grossProfit: grossProfitCny, grossProfitCny, profitBasis: 'booked_cost_only',
-        unbookedAccountCount, unbookedRevenueCny, unbookedUserChargeCny,
+        unbookedAccountCount, unbookedRevenueCny: unbookedUserChargeCny, unbookedUserChargeCny,
         costConflictCount,
-        grossMargin: recognizedRevenueCny ? grossProfitCny / recognizedRevenueCny : null,
-        userChargeCny, tokenListValueUsd, pendingRevenueCny, pendingUsageCount,
+        grossMargin: userChargeCny ? grossProfitCny / userChargeCny : null,
+        userChargeCny, tokenListValueUsd,
       },
       usage: {
         requests: number(u.requests),
@@ -206,53 +258,79 @@ export class PostgresRepository {
     };
   }
 
-  async getTrend({ start, end }) {
-    const result = await this.pool.query(`
+  async getTrend({ start, end, dailyStart = start, dailyEnd = end, preset = '7d' }) {
+    const [result, rechargeEvents] = await Promise.all([this.pool.query(`
       WITH days AS (
         SELECT generate_series($1::date,$2::date,INTERVAL '1 day')::date AS day
       ), usage AS (
-        SELECT day,source_account_id,SUM(recognized_revenue_cny) AS revenue_cny,
+        SELECT day,source_account_id,SUM(user_charge_cny) AS revenue_cny,
                SUM(user_charge_cny) AS charge_cny
         FROM ${this.schema}.fact_usage_daily
         WHERE day >= $1::date AND day <= $2::date
         GROUP BY day,source_account_id
+      ), multiplier_costs AS (
+        SELECT (occurred_at AT TIME ZONE $3)::date AS day,source_account_id,
+               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny
+        FROM ${this.schema}.usage_cost_facts
+        WHERE occurred_at >= $4 AND occurred_at < $5
+        GROUP BY (occurred_at AT TIME ZONE $3)::date,source_account_id
       ), costs AS (
         SELECT d.day,p.source_account_id,
-               SUM((p.base_amount+p.fee_amount+p.tax_amount) *
+               SUM(p.total_cost_cny *
                  GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,((d.day+1)::timestamp AT TIME ZONE $3))-
                    GREATEST(p.effective_from,(d.day::timestamp AT TIME ZONE $3)))) /
                  NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)) AS purchase_allocated_cost_cny
         FROM days d
-        JOIN ${this.schema}.account_cost_periods p ON p.status='active'
+        JOIN ${this.schema}.account_fixed_cost_periods p ON p.status='active'
           AND p.effective_from < ((d.day+1)::timestamp AT TIME ZONE $3)
           AND p.effective_to > (d.day::timestamp AT TIME ZONE $3)
         GROUP BY d.day,p.source_account_id
       ), account_daily AS (
-        SELECT COALESCE(u.day,c.day) AS day,
-               COALESCE(u.source_account_id,c.source_account_id) AS source_account_id,
+        SELECT COALESCE(u.day,c.day,m.day) AS day,
+               COALESCE(u.source_account_id,c.source_account_id,m.source_account_id) AS source_account_id,
                COALESCE(u.revenue_cny,0) AS revenue_cny,
                COALESCE(u.charge_cny,0) AS charge_cny,
-               COALESCE(c.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny
-        FROM usage u FULL JOIN costs c USING(day,source_account_id)
+               COALESCE(c.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny,
+               COALESCE(m.multiplier_cost_cny,0) AS multiplier_cost_cny,
+               COALESCE(c.purchase_allocated_cost_cny,0)+COALESCE(m.multiplier_cost_cny,0) AS effective_cost_cny
+        FROM usage u
+        FULL JOIN costs c USING(day,source_account_id)
+        FULL JOIN multiplier_costs m USING(day,source_account_id)
       ), economics AS (
-        SELECT ad.*,
-               ${effectiveCostSql(
-                 'cp.cost_type',
-                 '0',
-                 'ad.purchase_allocated_cost_cny',
-               )} AS effective_cost_cny
+        SELECT ad.*
         FROM account_daily ad
-        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=ad.source_account_id
-        LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
+      ), cash AS (
+        SELECT (occurred_at AT TIME ZONE $3)::date AS day,
+               SUM(base_amount) FILTER (
+                 WHERE transaction_type='recharge' AND direction='in' AND status <> 'void'
+               ) AS recharge_cny
+        FROM ${this.schema}.cash_transactions
+        WHERE occurred_at >= $4 AND occurred_at < $5
+        GROUP BY (occurred_at AT TIME ZONE $3)::date
       )
       SELECT d.day::text AS day,COALESCE(SUM(e.revenue_cny),0) AS revenue_cny,
              COALESCE(SUM(e.charge_cny),0) AS charge_cny,
              COALESCE(SUM(e.purchase_allocated_cost_cny),0) AS purchase_allocated_cost_cny,
+             COALESCE(SUM(e.multiplier_cost_cny),0) AS multiplier_cost_cny,
              COALESCE(SUM(e.effective_cost_cny),0) AS effective_cost_cny,
-             COALESCE(SUM(e.revenue_cny),0)-COALESCE(SUM(e.effective_cost_cny),0) AS profit_cny
-      FROM days d LEFT JOIN economics e USING(day)
-      GROUP BY d.day ORDER BY d.day`, [start, end, this.config.timezone]);
-    return result.rows.map((row) => ({
+             COALESCE(SUM(e.revenue_cny),0)-COALESCE(SUM(e.effective_cost_cny),0) AS profit_cny,
+             COALESCE(MAX(c.recharge_cny),0) AS recharge_cny
+      FROM days d
+      LEFT JOIN economics e USING(day)
+      LEFT JOIN cash c USING(day)
+      GROUP BY d.day ORDER BY d.day`, [dailyStart, dailyEnd, this.config.timezone, start, end]),
+      preset === 'today'
+        ? this.pool.query(`
+          SELECT id,occurred_at,base_amount,credited_amount,payment_method,
+                 COALESCE(NULLIF(metadata->>'reference',''),source_id::text) AS reference
+          FROM ${this.schema}.cash_transactions
+          WHERE transaction_type='recharge' AND direction='in'
+            AND status <> 'void' AND occurred_at >= $1 AND occurred_at < $2
+          ORDER BY occurred_at ASC,id ASC`, [start, end])
+        : Promise.resolve({ rows: [] }),
+    ]);
+    return {
+      items: result.rows.map((row) => ({
       day: row.day,
       revenue: number(row.revenue_cny),
       revenueCny: number(row.revenue_cny),
@@ -261,6 +339,7 @@ export class PostgresRepository {
       allocatedCost: number(row.purchase_allocated_cost_cny),
       allocatedCostCny: number(row.purchase_allocated_cost_cny),
       purchaseAllocatedCostCny: number(row.purchase_allocated_cost_cny),
+      multiplierCostCny: number(row.multiplier_cost_cny),
       effectiveCostCny: number(row.effective_cost_cny),
       fullyLoadedCostCny: number(row.effective_cost_cny),
       bookedCostCny: number(row.effective_cost_cny),
@@ -268,10 +347,20 @@ export class PostgresRepository {
       profitCny: number(row.profit_cny),
       grossProfitCny: number(row.profit_cny),
       bookedProfitCny: number(row.profit_cny),
-    }));
+      rechargeCny: number(row.recharge_cny),
+      })),
+      rechargeEvents: rechargeEvents.rows.map((row) => ({
+        id: row.id,
+        occurredAt: row.occurred_at,
+        amountCny: number(row.base_amount),
+        creditedCny: number(row.credited_amount),
+        paymentMethod: row.payment_method,
+        reference: row.reference,
+      })),
+    };
   }
 
-  async getUsageBreakdown({ start, end }) {
+  async getUsageBreakdown({ start, end, dailyStart = start, dailyEnd = end, page = 1, pageSize = 20, offset = 0 }) {
     const result = await this.pool.query(`
       WITH usage_by_model_account AS (
         SELECT model,source_account_id,
@@ -279,7 +368,7 @@ export class PostgresRepository {
                SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens)::float8 AS tokens,
                SUM(standard_cost_usd_reference) AS token_list_value_usd,
                SUM(user_charge_cny) AS charge_cny,
-               SUM(recognized_revenue_cny) AS revenue_cny,
+               SUM(user_charge_cny) AS revenue_cny,
                SUM(standard_cost_usd_reference) AS allocation_weight
         FROM ${this.schema}.fact_usage_daily
         WHERE day >= $1::date AND day <= $2::date
@@ -287,46 +376,93 @@ export class PostgresRepository {
       ), account_weight AS (
         SELECT source_account_id,SUM(allocation_weight) AS allocation_weight,SUM(tokens) AS token_weight,SUM(requests) AS request_weight
         FROM usage_by_model_account GROUP BY source_account_id
+      ), multiplier_cost AS (
+        SELECT model,source_account_id,
+               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(user_charge_cny) FILTER (
+                 WHERE cost_status NOT IN ('priced','free','fixed_cost')
+               ),0) AS unpriced_user_charge_cny,
+               MAX(cost_mode) AS cost_mode
+        FROM ${this.schema}.usage_cost_facts
+        WHERE occurred_at >= $3 AND occurred_at < $4
+        GROUP BY model,source_account_id
       ), account_cost AS (
-        SELECT p.source_account_id,COALESCE(cp.cost_type,'unconfigured') AS cost_type,
-               SUM((p.base_amount+p.fee_amount+p.tax_amount) *
-                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$2)-GREATEST(p.effective_from,$1))) /
-                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)) AS purchase_allocated_cost_cny
-        FROM ${this.schema}.account_cost_periods p
-        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
-        LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
-        WHERE p.status='active' AND p.effective_from < $2 AND p.effective_to > $1
-        GROUP BY p.source_account_id,cp.cost_type
+        SELECT p.source_account_id,
+               SUM(p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)) AS purchase_allocated_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.cost_type,'unconfigured'))='free' THEN 0 ELSE
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               END) AS effective_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='standard_cost_weight' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS standard_cost_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='token_weight' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS token_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='standard_cost_weight'
+                 AND LOWER(COALESCE(period_profile.cost_type,'unconfigured'))<>'free' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS effective_standard_cost_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='token_weight'
+                 AND LOWER(COALESCE(period_profile.cost_type,'unconfigured'))<>'free' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS effective_token_weight_cost_cny
+        FROM ${this.schema}.account_fixed_cost_periods p
+        LEFT JOIN ${this.schema}.cost_profiles period_profile ON period_profile.id=p.cost_profile_id
+        WHERE p.status='active' AND p.effective_from < $4 AND p.effective_to > $3
+        GROUP BY p.source_account_id
       ), economics AS (
         SELECT u.*,
-               COALESCE(ac.cost_type,'unconfigured') AS cost_type,
+               COALESCE(mc.cost_mode,current_profile.cost_mode,
+                 CASE WHEN current_profile.cost_type='free' THEN 'free' ELSE 'unconfigured' END
+               ) AS cost_type,
                (ac.source_account_id IS NOT NULL) AS has_cost_record,
-               CASE WHEN aw.allocation_weight > 0
-                 THEN COALESCE(ac.purchase_allocated_cost_cny,0)*u.allocation_weight/aw.allocation_weight
-                 WHEN aw.token_weight > 0
-                 THEN COALESCE(ac.purchase_allocated_cost_cny,0)*u.tokens/aw.token_weight
-                 WHEN aw.request_weight > 0
-                 THEN COALESCE(ac.purchase_allocated_cost_cny,0)*u.requests/aw.request_weight
-                 ELSE 0 END AS purchase_allocated_cost_cny
+               COALESCE(mc.multiplier_cost_cny,0) AS multiplier_cost_cny,
+               COALESCE(mc.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
+               ${allocatedCostSql("'standard_cost_weight'",'COALESCE(ac.standard_cost_weight_cost_cny,0)','u.allocation_weight','aw.allocation_weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + ${allocatedCostSql("'token_weight'",'COALESCE(ac.token_weight_cost_cny,0)','u.allocation_weight','aw.allocation_weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  AS purchase_allocated_cost_cny,
+               ${allocatedCostSql("'standard_cost_weight'",'COALESCE(ac.effective_standard_cost_weight_cost_cny,0)','u.allocation_weight','aw.allocation_weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + ${allocatedCostSql("'token_weight'",'COALESCE(ac.effective_token_weight_cost_cny,0)','u.allocation_weight','aw.allocation_weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + COALESCE(mc.multiplier_cost_cny,0) AS effective_cost_cny
         FROM usage_by_model_account u
         LEFT JOIN account_weight aw USING(source_account_id)
         LEFT JOIN account_cost ac USING(source_account_id)
+        LEFT JOIN multiplier_cost mc USING(model,source_account_id)
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=u.source_account_id
+        LEFT JOIN ${this.schema}.cost_profiles current_profile ON current_profile.id=a.cost_profile_id
       ), model_economics AS (
         SELECT model,
                SUM(requests)::float8 AS requests,SUM(tokens)::float8 AS tokens,
                SUM(token_list_value_usd) AS token_list_value_usd,
                SUM(charge_cny) AS charge_cny,SUM(revenue_cny) AS revenue_cny,
                SUM(purchase_allocated_cost_cny) AS purchase_allocated_cost_cny,
-               SUM(${effectiveCostSql('cost_type','0','purchase_allocated_cost_cny')}) AS effective_cost_cny,
-               COUNT(DISTINCT source_account_id) FILTER (WHERE cost_type <> 'free' AND NOT has_cost_record) AS unbooked_account_count
+               SUM(multiplier_cost_cny) AS multiplier_cost_cny,
+               SUM(effective_cost_cny) AS effective_cost_cny,
+               COUNT(DISTINCT source_account_id) FILTER (WHERE
+                 unpriced_user_charge_cny>0
+                 OR (cost_type='fixed_purchase' AND NOT has_cost_record)
+                 OR cost_type='unconfigured'
+               ) AS unbooked_account_count
         FROM economics GROUP BY model
       )
       SELECT model AS name,requests,tokens,token_list_value_usd,charge_cny,revenue_cny,
-             purchase_allocated_cost_cny,effective_cost_cny,unbooked_account_count,
-             revenue_cny-effective_cost_cny AS profit_cny
-      FROM model_economics ORDER BY revenue_cny DESC LIMIT 20`, [start, end]);
-    return result.rows.map((row) => ({
-      ...row,
+             purchase_allocated_cost_cny,multiplier_cost_cny,effective_cost_cny,unbooked_account_count,
+             revenue_cny-effective_cost_cny AS profit_cny,COUNT(*) OVER() AS total_count
+      FROM model_economics ORDER BY revenue_cny DESC LIMIT $5 OFFSET $6`, [dailyStart, dailyEnd, start, end, pageSize, offset]);
+    return pageResult(result.rows.map((row) => ({
+      total_count: row.total_count,
       requests: number(row.requests),
       tokens: number(row.tokens),
       tokenListValueUsd: number(row.token_list_value_usd),
@@ -335,6 +471,7 @@ export class PostgresRepository {
       revenue: number(row.revenue_cny),
       revenueCny: number(row.revenue_cny),
       purchaseAllocatedCostCny: number(row.purchase_allocated_cost_cny),
+      multiplierCostCny: number(row.multiplier_cost_cny),
       effectiveCostCny: number(row.effective_cost_cny),
       fullyLoadedCostCny: number(row.effective_cost_cny),
       bookedCostCny: number(row.effective_cost_cny),
@@ -347,14 +484,27 @@ export class PostgresRepository {
       unbookedAccountCount: number(row.unbooked_account_count),
       costCoverageStatus: number(row.unbooked_account_count) ? 'partial' : 'complete',
       margin: number(row.revenue_cny) ? number(row.profit_cny) / number(row.revenue_cny) : null,
-    }));
+    })), page, pageSize);
   }
 
-  async listUsers({ start, end, search = '', page = 1, pageSize = 20, offset = 0 }) {
+  async listUsers({ start, end, dailyStart = start, dailyEnd = end, search = '', page = 1, pageSize = 20, offset = 0, sort = 'userChargeCny', direction = 'desc' }) {
+    const sortColumns = {
+      cashPaidCny: 'cash_paid_cny',
+      adminCreditCny: 'admin_credit_cny',
+      adminDeductionCny: 'admin_deduction_cny',
+      balanceCny: 'balance_cny',
+      userChargeCny: 'charge_cny',
+      requests: 'requests',
+      tokens: 'tokens',
+      bookedCostCny: 'effective_cost_cny',
+      bookedProfitCny: 'profit_cny',
+    };
+    const orderColumn = sortColumns[sort] || sortColumns.userChargeCny;
+    const orderDirection = direction === 'asc' ? 'ASC' : 'DESC';
     const result = await this.pool.query(`
       WITH usage_by_user_account AS (
         SELECT source_user_id,source_account_id,
-               SUM(recognized_revenue_cny) AS revenue_cny,
+               SUM(user_charge_cny) AS revenue_cny,
                SUM(user_charge_cny) AS charge_cny,
                SUM(standard_cost_usd_reference) AS token_list_value_usd,
                SUM(standard_cost_usd_reference) AS weight,
@@ -366,37 +516,86 @@ export class PostgresRepository {
       ), account_weight AS (
         SELECT source_account_id,SUM(weight) AS weight,SUM(tokens) AS token_weight,SUM(requests) AS request_weight
         FROM usage_by_user_account GROUP BY source_account_id
+      ), multiplier_cost AS (
+        SELECT source_user_id,source_account_id,
+               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(user_charge_cny) FILTER (
+                 WHERE cost_status NOT IN ('priced','free','fixed_cost')
+               ),0) AS unpriced_user_charge_cny,
+               MAX(cost_mode) AS cost_mode
+        FROM ${this.schema}.usage_cost_facts
+        WHERE occurred_at >= $3 AND occurred_at < $4
+        GROUP BY source_user_id,source_account_id
       ), account_cost AS (
         SELECT p.source_account_id,
-               COALESCE(cp.cost_type,'unconfigured') AS cost_type,
-               SUM((p.base_amount+p.fee_amount+p.tax_amount) *
-                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$2)-GREATEST(p.effective_from,$1))) /
-                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)) AS period_cost
-        FROM ${this.schema}.account_cost_periods p
-        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
-        LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
-        WHERE p.status='active' AND p.effective_from < $2 AND p.effective_to > $1
-        GROUP BY p.source_account_id,cp.cost_type
+               SUM(p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)) AS period_cost,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.cost_type,'unconfigured'))='free' THEN 0 ELSE
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               END) AS effective_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='standard_cost_weight' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS standard_cost_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='token_weight' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS token_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='standard_cost_weight'
+                 AND LOWER(COALESCE(period_profile.cost_type,'unconfigured'))<>'free' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS effective_standard_cost_weight_cost_cny,
+               SUM(CASE WHEN LOWER(COALESCE(period_profile.allocation_method,'standard_cost_weight'))='token_weight'
+                 AND LOWER(COALESCE(period_profile.cost_type,'unconfigured'))<>'free' THEN
+                 p.total_cost_cny *
+                 GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+                 NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0)
+               ELSE 0 END) AS effective_token_weight_cost_cny
+        FROM ${this.schema}.account_fixed_cost_periods p
+        LEFT JOIN ${this.schema}.cost_profiles period_profile ON period_profile.id=p.cost_profile_id
+        WHERE p.status='active' AND p.effective_from < $4 AND p.effective_to > $3
+        GROUP BY p.source_account_id
       ), user_account_economics AS (
         SELECT u.source_user_id,u.source_account_id,u.revenue_cny,u.charge_cny,u.token_list_value_usd,
                u.requests,u.tokens,
-               COALESCE(ac.cost_type,'unconfigured') AS cost_type,
+               COALESCE(mc.cost_mode,current_profile.cost_mode,
+                 CASE WHEN current_profile.cost_type='free' THEN 'free' ELSE 'unconfigured' END
+               ) AS cost_type,
                (ac.source_account_id IS NOT NULL) AS has_cost_record,
-               CASE WHEN aw.weight > 0 THEN COALESCE(ac.period_cost,0)*u.weight/aw.weight
-                 WHEN aw.token_weight > 0 THEN COALESCE(ac.period_cost,0)*u.tokens/aw.token_weight
-                 WHEN aw.request_weight > 0 THEN COALESCE(ac.period_cost,0)*u.requests/aw.request_weight
-                 ELSE 0 END AS purchase_allocated_cost_cny
+               COALESCE(mc.multiplier_cost_cny,0) AS multiplier_cost_cny,
+               COALESCE(mc.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
+               ${allocatedCostSql("'standard_cost_weight'",'COALESCE(ac.standard_cost_weight_cost_cny,0)','u.weight','aw.weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + ${allocatedCostSql("'token_weight'",'COALESCE(ac.token_weight_cost_cny,0)','u.weight','aw.weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  AS purchase_allocated_cost_cny,
+               ${allocatedCostSql("'standard_cost_weight'",'COALESCE(ac.effective_standard_cost_weight_cost_cny,0)','u.weight','aw.weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + ${allocatedCostSql("'token_weight'",'COALESCE(ac.effective_token_weight_cost_cny,0)','u.weight','aw.weight','u.tokens','aw.token_weight','u.requests','aw.request_weight')}
+                  + COALESCE(mc.multiplier_cost_cny,0) AS effective_cost_cny
         FROM usage_by_user_account u
         LEFT JOIN account_weight aw USING(source_account_id)
         LEFT JOIN account_cost ac USING(source_account_id)
+        LEFT JOIN multiplier_cost mc USING(source_user_id,source_account_id)
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=u.source_account_id
+        LEFT JOIN ${this.schema}.cost_profiles current_profile ON current_profile.id=a.cost_profile_id
       ), user_economics AS (
         SELECT source_user_id,
                SUM(revenue_cny) AS revenue_cny,
                SUM(charge_cny) AS charge_cny,
                SUM(token_list_value_usd) AS token_list_value_usd,
                SUM(purchase_allocated_cost_cny) AS purchase_allocated_cost_cny,
-               SUM(${effectiveCostSql('cost_type','0','purchase_allocated_cost_cny')}) AS effective_cost_cny,
-               COUNT(DISTINCT source_account_id) FILTER (WHERE cost_type <> 'free' AND NOT has_cost_record) AS unbooked_account_count,
+               SUM(multiplier_cost_cny) AS multiplier_cost_cny,
+               SUM(effective_cost_cny) AS effective_cost_cny,
+               COUNT(DISTINCT source_account_id) FILTER (WHERE
+                 unpriced_user_charge_cny>0
+                 OR (cost_type='fixed_purchase' AND NOT has_cost_record)
+                 OR cost_type='unconfigured'
+               ) AS unbooked_account_count,
                SUM(requests)::float8 AS requests,SUM(tokens)::float8 AS tokens
         FROM user_account_economics GROUP BY source_user_id
       ), cash AS (
@@ -404,23 +603,37 @@ export class PostgresRepository {
                COALESCE(SUM(base_amount) FILTER (WHERE transaction_type='recharge' AND direction='in' AND status <> 'void'),0) AS cash_paid_cny,
                COALESCE(SUM(credited_amount) FILTER (WHERE transaction_type='recharge' AND direction='in' AND status <> 'void'),0) AS credited_cny
         FROM ${this.schema}.cash_transactions
-        WHERE occurred_at >= $1 AND occurred_at < $2
+        WHERE occurred_at >= $3 AND occurred_at < $4
+        GROUP BY source_user_id
+      ), adjustments AS (
+        SELECT source_user_id,
+               COALESCE(SUM(credit_amount) FILTER (WHERE event_type='admin_adjustment' AND direction='in'),0) AS admin_credit_cny,
+               COALESCE(SUM(credit_amount) FILTER (WHERE event_type='admin_adjustment' AND direction='out'),0) AS admin_deduction_cny,
+               COALESCE(SUM(credit_amount) FILTER (WHERE event_type='redeem' AND direction='in'),0) AS redeemed_credit_cny,
+               COALESCE(SUM(credit_amount) FILTER (WHERE event_type='affiliate_rebate' AND direction='in'),0) AS affiliate_credit_cny
+        FROM ${this.schema}.credit_events
+        WHERE occurred_at >= $3 AND occurred_at < $4
         GROUP BY source_user_id
       )
       SELECT u.source_user_id AS id,u.email,u.username,u.tags,u.current_balance AS balance_cny,
              COALESCE(us.revenue_cny,0) AS revenue_cny,COALESCE(us.charge_cny,0) AS charge_cny,
              COALESCE(us.token_list_value_usd,0) AS token_list_value_usd,
              COALESCE(us.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny,
+             COALESCE(us.multiplier_cost_cny,0) AS multiplier_cost_cny,
              COALESCE(us.effective_cost_cny,0) AS effective_cost_cny,
              COALESCE(us.unbooked_account_count,0) AS unbooked_account_count,
              COALESCE(us.requests,0)::float8 AS requests,COALESCE(us.tokens,0)::float8 AS tokens,
              COALESCE(c.cash_paid_cny,0) AS cash_paid_cny,COALESCE(c.credited_cny,0) AS credited_cny,
+             COALESCE(ad.admin_credit_cny,0) AS admin_credit_cny,COALESCE(ad.admin_deduction_cny,0) AS admin_deduction_cny,
+             COALESCE(ad.redeemed_credit_cny,0) AS redeemed_credit_cny,COALESCE(ad.affiliate_credit_cny,0) AS affiliate_credit_cny,
+             COALESCE(us.revenue_cny,0)-COALESCE(us.effective_cost_cny,0) AS profit_cny,
              COUNT(*) OVER() AS total_count
       FROM ${this.schema}.dim_users u
       LEFT JOIN user_economics us ON us.source_user_id=u.source_user_id
       LEFT JOIN cash c ON c.source_user_id=u.source_user_id
-      WHERE ($3='' OR u.email ILIKE '%'||$3||'%' OR u.username ILIKE '%'||$3||'%')
-      ORDER BY revenue_cny DESC LIMIT $4 OFFSET $5`, [start, end, search, pageSize, offset]);
+      LEFT JOIN adjustments ad ON ad.source_user_id=u.source_user_id
+        WHERE ($5='' OR u.email ILIKE '%'||$5||'%' OR u.username ILIKE '%'||$5||'%')
+      ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset]);
     return pageResult(result.rows.map((row) => {
       const recognizedRevenueCny = number(row.revenue_cny);
       const purchaseAllocatedCostCny = number(row.purchase_allocated_cost_cny);
@@ -435,6 +648,7 @@ export class PostgresRepository {
         tokenListValueUsd: number(row.token_list_value_usd),
         purchaseAllocatedCostCny,
         allocatedCost: purchaseAllocatedCostCny,
+        multiplierCostCny: number(row.multiplier_cost_cny),
         effectiveCostCny: effectiveCost,
         fullyLoadedCostCny: effectiveCost,
         bookedCostCny: effectiveCost,
@@ -448,16 +662,142 @@ export class PostgresRepository {
         grossMargin: recognizedRevenueCny ? grossProfit / recognizedRevenueCny : null,
         cashPaidCny: number(row.cash_paid_cny),
         creditedCny: number(row.credited_cny),
+        adminCreditCny: number(row.admin_credit_cny),
+        adminDeductionCny: number(row.admin_deduction_cny),
+        redeemedCreditCny: number(row.redeemed_credit_cny),
+        affiliateCreditCny: number(row.affiliate_credit_cny),
         balanceCny: number(row.balance_cny),
         balanceCurrency: 'CNY',
       };
     }), page, pageSize);
   }
 
-  async listAccounts({ start, end, search = '', page = 1, pageSize = 20, offset = 0 }) {
+  async getUserDetails({ userId, start, end, dailyStart = start, dailyEnd = end, recharge, usage }) {
+    const [profileResult, trendResult, rechargeResult, usageResult] = await Promise.all([
+      this.pool.query(`
+        WITH totals AS (
+          SELECT
+            COALESCE(SUM(user_charge_cny),0) AS consumption_cny,
+            COUNT(*)::int AS requests,
+            COALESCE(SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens
+          FROM ${this.schema}.fact_usage_events
+          WHERE source_user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
+        ), cash AS (
+          SELECT COALESCE(SUM(base_amount),0) AS recharge_cny,
+                 COALESCE(SUM(credited_amount),0) AS credited_cny
+          FROM ${this.schema}.cash_transactions
+          WHERE source_user_id=$1 AND transaction_type='recharge' AND direction='in'
+            AND status <> 'void' AND occurred_at >= $2 AND occurred_at < $3
+        ), adjustments AS (
+          SELECT COALESCE(SUM(credit_amount) FILTER (WHERE event_type='admin_adjustment' AND direction='in'),0) AS admin_credit_cny,
+                 COALESCE(SUM(credit_amount) FILTER (WHERE event_type='admin_adjustment' AND direction='out'),0) AS admin_deduction_cny
+          FROM ${this.schema}.credit_events
+          WHERE source_user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
+        )
+        SELECT u.source_user_id AS id,u.email,u.username,u.tags,u.status,u.current_balance AS balance_cny,
+               t.consumption_cny,t.requests,t.tokens,c.recharge_cny,c.credited_cny,
+               a.admin_credit_cny,a.admin_deduction_cny
+        FROM ${this.schema}.dim_users u
+        CROSS JOIN totals t CROSS JOIN cash c CROSS JOIN adjustments a
+        WHERE u.source_user_id=$1`, [userId, start, end]),
+      this.pool.query(`
+        WITH days AS (
+          SELECT generate_series($2::date,$3::date,INTERVAL '1 day')::date AS day
+        ), usage_by_day AS (
+          SELECT (occurred_at AT TIME ZONE $4)::date AS day,
+                 SUM(user_charge_cny) AS consumption_cny
+          FROM ${this.schema}.fact_usage_events
+          WHERE source_user_id=$1 AND occurred_at >= $5 AND occurred_at < $6
+          GROUP BY (occurred_at AT TIME ZONE $4)::date
+        ), recharge_by_day AS (
+          SELECT (occurred_at AT TIME ZONE $4)::date AS day,
+                 SUM(base_amount) AS recharge_cny
+          FROM ${this.schema}.cash_transactions
+          WHERE source_user_id=$1 AND transaction_type='recharge' AND direction='in'
+            AND status <> 'void' AND occurred_at >= $5 AND occurred_at < $6
+          GROUP BY (occurred_at AT TIME ZONE $4)::date
+        )
+        SELECT d.day::text AS day,COALESCE(u.consumption_cny,0) AS consumption_cny,
+               COALESCE(c.recharge_cny,0) AS recharge_cny
+        FROM days d
+        LEFT JOIN usage_by_day u USING(day)
+        LEFT JOIN recharge_by_day c USING(day)
+        ORDER BY d.day`, [userId, dailyStart, dailyEnd, this.config.timezone, start, end]),
+      this.pool.query(`
+        SELECT id,occurred_at,base_amount,credited_amount,payment_method,status,
+               COALESCE(NULLIF(metadata->>'reference',''),source_id::text) AS reference,
+               COUNT(*) OVER() AS total_count
+        FROM ${this.schema}.cash_transactions
+        WHERE source_user_id=$1 AND transaction_type='recharge' AND direction='in'
+          AND status <> 'void' AND occurred_at >= $2 AND occurred_at < $3
+        ORDER BY occurred_at DESC,id DESC LIMIT $4 OFFSET $5`, [userId, start, end, recharge.pageSize, recharge.offset]),
+      this.pool.query(`
+        SELECT source_usage_id,occurred_at,model,requested_model,upstream_model,source_account_id,
+               user_charge_cny,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
+               duration_ms,COUNT(*) OVER() AS total_count
+        FROM ${this.schema}.fact_usage_events
+        WHERE source_user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
+        ORDER BY occurred_at DESC,source_usage_id DESC LIMIT $4 OFFSET $5`, [userId, start, end, usage.pageSize, usage.offset]),
+    ]);
+    if (!profileResult.rowCount) throw httpError('user not found; run synchronization first', 404);
+    const profile = profileResult.rows[0];
+    return {
+      user: {
+        id: profile.id,
+        email: profile.email,
+        username: profile.username,
+        tags: profile.tags || [],
+        status: profile.status,
+        balanceCny: number(profile.balance_cny),
+        consumptionCny: number(profile.consumption_cny),
+        requests: number(profile.requests),
+        tokens: number(profile.tokens),
+        rechargeCny: number(profile.recharge_cny),
+        creditedCny: number(profile.credited_cny),
+        adminCreditCny: number(profile.admin_credit_cny),
+        adminDeductionCny: number(profile.admin_deduction_cny),
+      },
+      trend: trendResult.rows.map((row) => ({
+        day: row.day,
+        consumptionCny: number(row.consumption_cny),
+        rechargeCny: number(row.recharge_cny),
+      })),
+      recharges: pageResult(rechargeResult.rows.map((row) => ({
+        total_count: row.total_count,
+        id: row.id,
+        occurredAt: row.occurred_at,
+        amountCny: number(row.base_amount),
+        creditedCny: number(row.credited_amount),
+        paymentMethod: row.payment_method,
+        reference: row.reference,
+        status: row.status,
+      })), recharge.page, recharge.pageSize),
+      usage: pageResult(usageResult.rows.map((row) => ({
+        total_count: row.total_count,
+        sourceUsageId: row.source_usage_id,
+        occurredAt: row.occurred_at,
+        model: row.model,
+        requestedModel: row.requested_model,
+        upstreamModel: row.upstream_model,
+        accountId: row.source_account_id,
+        userChargeCny: number(row.user_charge_cny),
+        tokens: number(row.input_tokens) + number(row.output_tokens) + number(row.cache_creation_tokens) + number(row.cache_read_tokens),
+        durationMs: number(row.duration_ms),
+      })), usage.page, usage.pageSize),
+    };
+  }
+
+  async listAccounts({
+    start, end, dailyStart = start, dailyEnd = end, search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,
+  }) {
+    const scopePredicate = {
+      current: "a.source_deleted_at IS NULL AND a.status='active'",
+      deleted: 'a.source_deleted_at IS NOT NULL',
+      all: 'TRUE',
+    }[scope] || "a.source_deleted_at IS NULL AND a.status='active'";
     const result = await this.pool.query(`
       WITH usage AS (
-        SELECT source_account_id,SUM(recognized_revenue_cny) AS revenue_cny,
+        SELECT source_account_id,SUM(user_charge_cny) AS revenue_cny,
                SUM(user_charge_cny) AS user_charge_cny,
                SUM(standard_cost_usd_reference) AS token_list_value_usd,
                SUM(requests)::float8 AS requests,
@@ -466,37 +806,102 @@ export class PostgresRepository {
         WHERE day >= $1::date AND day <= $2::date
         GROUP BY source_account_id
       ), costs AS (
-        SELECT source_account_id,SUM((base_amount+fee_amount+tax_amount) *
-          GREATEST(0,EXTRACT(EPOCH FROM LEAST(effective_to,$2)-GREATEST(effective_from,$1))) /
-          NULLIF(EXTRACT(EPOCH FROM effective_to-effective_from),0))::float8 AS period_cost,
+        SELECT p.source_account_id,SUM(p.total_cost_cny *
+          GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+          NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0))::float8 AS period_cost,
           COUNT(*) AS cost_record_count
-        FROM ${this.schema}.account_cost_periods
-        WHERE status='active' AND effective_from < $2 AND effective_to > $1
+        FROM ${this.schema}.account_fixed_cost_periods p
+        WHERE p.status='active' AND p.effective_from < $4 AND p.effective_to > $3
+        GROUP BY p.source_account_id
+      ), multiplier_costs AS (
+        SELECT source_account_id,
+               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(user_charge_cny) FILTER (
+                 WHERE cost_status NOT IN ('priced','free','fixed_cost')
+               ),0) AS unpriced_user_charge_cny,
+               MAX(cost_mode) AS cost_mode,
+               MAX(upstream_multiplier) AS upstream_multiplier,
+               MAX(selling_multiplier) AS selling_multiplier,
+               MAX(upstream_multiplier_source) AS upstream_multiplier_source
+        FROM ${this.schema}.usage_cost_facts
+        WHERE occurred_at >= $3 AND occurred_at < $4
         GROUP BY source_account_id
       )
-      SELECT a.source_account_id AS id,a.name,a.platform,a.supplier,a.purchase_batch,a.status,a.expires_at,a.tags,
-             COALESCE(cp.cost_type,'unconfigured') AS cost_type,COALESCE(u.revenue_cny,0) AS revenue_cny,
-             COALESCE(u.user_charge_cny,0) AS user_charge_cny,COALESCE(u.token_list_value_usd,0) AS token_list_value_usd,
-             COALESCE(c.period_cost,0) AS period_cost_cny,COALESCE(c.cost_record_count,0) AS cost_record_count,
-             COALESCE(u.requests,0)::float8 AS requests,COALESCE(u.tokens,0)::float8 AS tokens,
+      SELECT a.source_account_id AS id,a.name,a.platform,a.supplier,a.purchase_batch,a.status,a.expires_at,
+             a.source_deleted_at,a.tags,a.cost_profile_id,
+              COALESCE(m.cost_mode,rule.cost_mode,cp.cost_mode,
+                CASE
+                  WHEN cp.cost_type='free' THEN 'free'
+                  WHEN COALESCE(c.cost_record_count,0)>0 THEN 'fixed_purchase'
+                  ELSE 'unconfigured'
+                END
+              ) AS cost_type,COALESCE(u.revenue_cny,0) AS revenue_cny,
+              COALESCE(u.user_charge_cny,0) AS user_charge_cny,COALESCE(u.token_list_value_usd,0) AS token_list_value_usd,
+              COALESCE(c.period_cost,0) AS period_cost_cny,COALESCE(m.multiplier_cost_cny,0) AS multiplier_cost_cny,
+              COALESCE(c.period_cost,0)+COALESCE(m.multiplier_cost_cny,0) AS effective_cost_cny,
+              COALESCE(m.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
+              COALESCE(m.upstream_multiplier,rule.upstream_multiplier,probe.effective_rate_multiplier) AS upstream_multiplier,
+              COALESCE(m.selling_multiplier,rule.selling_multiplier) AS selling_multiplier,
+              COALESCE(rule.basis_mode,'revenue_backsolve') AS basis_mode,
+              rule.cny_per_reference_unit AS cny_per_reference_unit,
+              COALESCE(m.upstream_multiplier_source,
+                CASE WHEN probe.id IS NOT NULL THEN 'probe_snapshot' ELSE '' END
+              ) AS upstream_multiplier_source,
+              probe.status AS probe_status,probe.observed_at AS probe_observed_at,probe.fresh_until AS probe_fresh_until,
+              COALESCE(c.cost_record_count,0) AS cost_record_count,
+              period.id AS current_cost_period_id,period.cost_profile_id AS current_cost_profile_id,
+              period.original_amount AS current_original_amount,period.fee_amount AS current_fee_amount,
+              period.tax_amount AS current_tax_amount,period.effective_from AS current_effective_from,
+              period.effective_to AS current_effective_to,period.notes AS current_cost_notes,
+              COALESCE(u.requests,0)::float8 AS requests,COALESCE(u.tokens,0)::float8 AS tokens,
              COUNT(*) OVER() AS total_count
       FROM ${this.schema}.dim_accounts a
       LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
       LEFT JOIN usage u ON u.source_account_id=a.source_account_id
       LEFT JOIN costs c ON c.source_account_id=a.source_account_id
-      WHERE ($3='' OR a.name ILIKE '%'||$3||'%' OR a.platform ILIKE '%'||$3||'%' OR a.supplier ILIKE '%'||$3||'%')
-      ORDER BY revenue_cny DESC LIMIT $4 OFFSET $5`, [start, end, search, pageSize, offset]);
+      LEFT JOIN multiplier_costs m ON m.source_account_id=a.source_account_id
+        LEFT JOIN LATERAL (
+        SELECT r.*
+        FROM ${this.schema}.account_cost_rules r
+        WHERE r.source_account_id=a.source_account_id AND r.status='active'
+          AND (r.effective_to IS NULL OR r.effective_to > NOW())
+        ORDER BY r.effective_from DESC,r.id DESC LIMIT 1
+      ) rule ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT s.*
+        FROM ${this.schema}.upstream_billing_snapshots s
+        WHERE s.source_account_id=a.source_account_id
+        ORDER BY COALESCE(s.observed_at,s.received_at,s.last_attempt_at) DESC,s.id DESC LIMIT 1
+      ) probe ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT p.id,p.cost_profile_id,p.original_amount,p.fee_amount,p.tax_amount,p.effective_from,p.effective_to,p.notes
+        FROM ${this.schema}.account_fixed_cost_periods p
+        WHERE p.source_account_id=a.source_account_id AND p.status='active'
+        ORDER BY p.effective_from DESC,p.id DESC LIMIT 1
+      ) period ON TRUE
+      WHERE ${scopePredicate}
+        AND ($5='' OR a.name ILIKE '%'||$5||'%' OR a.platform ILIKE '%'||$5||'%' OR a.supplier ILIKE '%'||$5||'%')
+      ORDER BY revenue_cny DESC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset]);
     return pageResult(result.rows.map((row) => {
       const revenue = number(row.revenue_cny);
       const purchaseAllocatedCostCny = number(row.period_cost_cny);
       const requests = number(row.requests);
-      const effectiveCost = effectiveCostCny(row.cost_type, 0, purchaseAllocatedCostCny);
+      const effectiveCost = number(row.effective_cost_cny);
       const grossProfit = revenue - effectiveCost;
       const hasCostRecord = number(row.cost_record_count) > 0;
-      const costCoverageStatus = row.cost_type === 'free' || hasCostRecord ? 'complete' : requests ? 'missing' : 'pending';
+      const unpricedUserChargeCny = number(row.unpriced_user_charge_cny);
+      const costCoverageStatus = row.cost_type === 'free'
+        || (row.cost_type === 'fixed_purchase' && hasCostRecord)
+        || (['probe_multiplier','manual_multiplier'].includes(row.cost_type) && !unpricedUserChargeCny)
+        ? 'complete'
+        : requests
+          ? row.source_deleted_at ? 'historical_unpriced' : 'missing'
+          : 'pending';
       return {
         ...row,
+        costMode: row.cost_type,
         costType: row.cost_type,
+        costProfileId: row.cost_profile_id ? number(row.cost_profile_id) : null,
         revenue,
         revenueCny: revenue,
         recognizedRevenueCny: revenue,
@@ -505,6 +910,7 @@ export class PostgresRepository {
         periodCost: purchaseAllocatedCostCny,
         periodCostCny: purchaseAllocatedCostCny,
         purchaseAllocatedCostCny,
+        multiplierCostCny: number(row.multiplier_cost_cny),
         effectiveCostCny: effectiveCost,
         fullyLoadedCost: effectiveCost,
         fullyLoadedCostCny: effectiveCost,
@@ -514,20 +920,74 @@ export class PostgresRepository {
         grossProfitCny: grossProfit,
         bookedProfitCny: grossProfit,
         costCoverageStatus,
+        unpricedUserChargeCny,
         hasCostRecord,
-        costConfigurationConflict: row.cost_type === 'free' && hasCostRecord,
+        costConfigurationConflict: false,
         grossMargin: revenue ? grossProfit / revenue : null,
         requests,
         tokens: number(row.tokens),
+        currentCostPeriodId: row.current_cost_period_id ? number(row.current_cost_period_id) : null,
+        currentCostProfileId: row.current_cost_profile_id ? number(row.current_cost_profile_id) : null,
+        currentOriginalAmount: number(row.current_original_amount),
+        currentFeeAmount: number(row.current_fee_amount),
+        currentTaxAmount: number(row.current_tax_amount),
+        currentEffectiveFrom: row.current_effective_from || null,
+        currentEffectiveTo: row.current_effective_to || null,
+        currentCostNotes: row.current_cost_notes || '',
+        sourceDeletedAt: row.source_deleted_at || null,
+        lifecycle: row.source_deleted_at ? 'deleted' : row.status === 'active' ? 'current' : 'inactive',
+        upstreamMultiplier: number(row.upstream_multiplier) || null,
+        sellingMultiplier: number(row.selling_multiplier) || null,
+        basisMode: row.basis_mode || 'revenue_backsolve',
+        cnyPerReferenceUnit: number(row.cny_per_reference_unit) || null,
+        upstreamMultiplierSource: row.upstream_multiplier_source || '',
+        probeStatus: row.probe_status || '',
+        probeObservedAt: row.probe_observed_at || null,
+        probeFreshUntil: row.probe_fresh_until || null,
       };
     }), page, pageSize);
   }
 
-  async getSupplierOverview({ start, end, search = '' }) {
+  async listAccountCostPeriods({ accountId, page = 1, pageSize = 10, offset = 0 }) {
+    const result = await this.pool.query(`
+      SELECT p.id,p.source_account_id,p.cost_profile_id,
+             COALESCE(cp.name,cp.cost_type,'未绑定模板') AS cost_profile,
+             COALESCE(NULLIF(p.supplier,''),NULLIF(a.supplier,''),'未标记供应商') AS supplier,
+             COALESCE(NULLIF(p.purchase_batch,''),NULLIF(a.purchase_batch,''),'未标记批次') AS purchase_batch,
+             p.original_amount,p.fee_amount,p.tax_amount,p.total_cost_cny,
+             p.original_currency,p.effective_from,p.effective_to,p.status,p.notes,
+             COUNT(*) OVER() AS total_count
+      FROM ${this.schema}.account_cost_periods p
+      JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
+      LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=p.cost_profile_id
+      WHERE p.source_account_id=$1
+      ORDER BY p.effective_from DESC,p.id DESC
+      LIMIT $2 OFFSET $3`, [accountId, pageSize, offset]);
+    return pageResult(result.rows.map((row) => ({
+      total_count: row.total_count,
+      id: Number(row.id),
+      accountId: Number(row.source_account_id),
+      costProfileId: row.cost_profile_id ? Number(row.cost_profile_id) : null,
+      costProfile: row.cost_profile,
+      supplier: row.supplier,
+      purchaseBatch: row.purchase_batch,
+      originalAmount: number(row.original_amount),
+      feeAmount: number(row.fee_amount),
+      taxAmount: number(row.tax_amount),
+      totalCost: number(row.total_cost_cny),
+      originalCurrency: 'CNY',
+      effectiveFrom: row.effective_from,
+      effectiveTo: row.effective_to,
+      status: row.status,
+      notes: row.notes || '',
+    })), page, pageSize);
+  }
+
+  async getSupplierOverview({ start, end, dailyStart = start, dailyEnd = end, search = '' }) {
     const [supplierResult, purchaseResult] = await Promise.all([
       this.pool.query(`
         WITH usage AS (
-          SELECT source_account_id,SUM(recognized_revenue_cny) AS revenue_cny,
+          SELECT source_account_id,SUM(user_charge_cny) AS revenue_cny,
                  SUM(user_charge_cny) AS user_charge_cny,
                  SUM(standard_cost_usd_reference) AS token_list_value_usd,
                  SUM(requests)::float8 AS requests,
@@ -536,33 +996,55 @@ export class PostgresRepository {
           WHERE day >= $1::date AND day <= $2::date
           GROUP BY source_account_id
         ), costs AS (
-          SELECT source_account_id,SUM((base_amount+fee_amount+tax_amount) *
-            GREATEST(0,EXTRACT(EPOCH FROM LEAST(effective_to,$2)-GREATEST(effective_from,$1))) /
-            NULLIF(EXTRACT(EPOCH FROM effective_to-effective_from),0))::float8 AS purchase_allocated_cost_cny,
+          SELECT p.source_account_id,SUM(p.total_cost_cny *
+            GREATEST(0,EXTRACT(EPOCH FROM LEAST(p.effective_to,$4)-GREATEST(p.effective_from,$3))) /
+            NULLIF(EXTRACT(EPOCH FROM p.effective_to-p.effective_from),0))::float8 AS purchase_allocated_cost_cny,
             COUNT(*) AS cost_record_count
-          FROM ${this.schema}.account_cost_periods
-          WHERE status='active' AND effective_from < $2 AND effective_to > $1
+          FROM ${this.schema}.account_fixed_cost_periods p
+          WHERE p.status='active' AND p.effective_from < $4 AND p.effective_to > $3
+          GROUP BY p.source_account_id
+        ), multiplier_costs AS (
+          SELECT source_account_id,
+                 COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
+                 COALESCE(SUM(user_charge_cny) FILTER (
+                   WHERE cost_status NOT IN ('priced','free','fixed_cost')
+                 ),0) AS unpriced_user_charge_cny,
+                 MAX(cost_mode) AS cost_mode
+          FROM ${this.schema}.usage_cost_facts
+          WHERE occurred_at >= $3 AND occurred_at < $4
           GROUP BY source_account_id
         ), account_economics AS (
           SELECT a.source_account_id,a.platform,a.status,a.expires_at,a.cost_profile_id,
                  COALESCE(NULLIF(a.supplier,''),'未标记供应商') AS supplier,
-                 COALESCE(cp.cost_type,'unconfigured') AS cost_type,
+                 COALESCE(m.cost_mode,rule.cost_mode,cp.cost_mode,
+                   CASE
+                     WHEN cp.cost_type='free' THEN 'free'
+                     WHEN COALESCE(c.cost_record_count,0)>0 THEN 'fixed_purchase'
+                     ELSE 'unconfigured'
+                   END
+                 ) AS cost_type,
                  COALESCE(u.requests,0) AS requests,COALESCE(u.tokens,0) AS tokens,
                  COALESCE(u.revenue_cny,0) AS revenue_cny,COALESCE(u.user_charge_cny,0) AS user_charge_cny,
                  COALESCE(u.token_list_value_usd,0) AS token_list_value_usd,
                  COALESCE(c.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny,
+                 COALESCE(m.multiplier_cost_cny,0) AS multiplier_cost_cny,
+                 COALESCE(c.purchase_allocated_cost_cny,0)+COALESCE(m.multiplier_cost_cny,0) AS effective_cost_cny,
                  COALESCE(c.cost_record_count,0) AS cost_record_count,
-                 ${effectiveCostSql(
-                   'cp.cost_type',
-                   '0',
-                   'COALESCE(c.purchase_allocated_cost_cny,0)',
-                 )} AS effective_cost_cny
+                 COALESCE(m.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny
           FROM ${this.schema}.dim_accounts a
           LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
           LEFT JOIN usage u ON u.source_account_id=a.source_account_id
           LEFT JOIN costs c ON c.source_account_id=a.source_account_id
-          WHERE ($3='' OR a.name ILIKE '%'||$3||'%' OR a.platform ILIKE '%'||$3||'%'
-            OR a.supplier ILIKE '%'||$3||'%' OR a.purchase_batch ILIKE '%'||$3||'%')
+          LEFT JOIN multiplier_costs m ON m.source_account_id=a.source_account_id
+          LEFT JOIN LATERAL (
+            SELECT r.cost_mode
+            FROM ${this.schema}.account_cost_rules r
+            WHERE r.source_account_id=a.source_account_id AND r.status='active'
+              AND (r.effective_to IS NULL OR r.effective_to > NOW())
+            ORDER BY r.effective_from DESC,r.id DESC LIMIT 1
+          ) rule ON TRUE
+          WHERE ($5='' OR a.name ILIKE '%'||$5||'%' OR a.platform ILIKE '%'||$5||'%'
+            OR a.supplier ILIKE '%'||$5||'%' OR a.purchase_batch ILIKE '%'||$5||'%')
         )
         SELECT supplier,ARRAY_AGG(DISTINCT platform) FILTER (WHERE platform <> '') AS platforms,
                COUNT(*)::int AS account_count,
@@ -573,20 +1055,25 @@ export class PostgresRepository {
                COALESCE(SUM(revenue_cny),0) AS revenue_cny,COALESCE(SUM(user_charge_cny),0) AS user_charge_cny,
                COALESCE(SUM(token_list_value_usd),0) AS token_list_value_usd,
                COALESCE(SUM(purchase_allocated_cost_cny),0) AS purchase_allocated_cost_cny,
+               COALESCE(SUM(multiplier_cost_cny),0) AS multiplier_cost_cny,
                COALESCE(SUM(effective_cost_cny),0) AS effective_cost_cny,
-               COUNT(*) FILTER (WHERE requests>0 AND cost_type <> 'free' AND cost_record_count=0)::int AS unbooked_account_count,
-               COUNT(*) FILTER (WHERE cost_type='free' AND cost_record_count>0)::int AS cost_conflict_count
+               COUNT(*) FILTER (WHERE requests>0 AND (
+                 unpriced_user_charge_cny>0
+                 OR (cost_type='fixed_purchase' AND cost_record_count=0)
+                 OR cost_type='unconfigured'
+               ))::int AS unbooked_account_count,
+               0::int AS cost_conflict_count
         FROM account_economics GROUP BY supplier
-        ORDER BY purchase_allocated_cost_cny DESC,revenue_cny DESC`, [start, end, search]),
+        ORDER BY purchase_allocated_cost_cny DESC,revenue_cny DESC`, [dailyStart, dailyEnd, start, end, search]),
       this.pool.query(`
         SELECT p.id,p.source_account_id AS account_id,a.name AS account_name,
                COALESCE(NULLIF(p.supplier,''),NULLIF(a.supplier,''),'未标记供应商') AS supplier,
                COALESCE(NULLIF(p.purchase_batch,''),NULLIF(a.purchase_batch,''),'未标记批次') AS purchase_batch,
                COALESCE(cp.name,cp.cost_type,'未绑定模板') AS cost_profile,
                p.original_amount::float8,p.original_currency,
-               (p.base_amount+p.fee_amount+p.tax_amount)::float8 AS total_cost,
+               p.total_cost_cny::float8 AS total_cost,
                p.effective_from,p.effective_to,p.status
-        FROM ${this.schema}.account_cost_periods p
+        FROM ${this.schema}.account_fixed_cost_periods p
         JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
         LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=p.cost_profile_id
         WHERE p.effective_from < $2 AND p.effective_to > $1
@@ -617,6 +1104,7 @@ export class PostgresRepository {
         tokenListValueUsd: number(row.token_list_value_usd),
         purchaseSpend: purchaseAllocatedCostCny,
         purchaseAllocatedCostCny,
+        multiplierCostCny: number(row.multiplier_cost_cny),
         effectiveCostCny: effectiveCost,
         fullyLoadedCostCny: effectiveCost,
         bookedCostCny: effectiveCost,
@@ -720,9 +1208,10 @@ export class PostgresRepository {
     return result.rows.map((row) => {
       const sourceType = String(row.type || '');
       const type = sourceType.includes('wallet') && sourceType.includes('credit') ? 'credit_usage_cny' : sourceType;
+      const label = type === 'wallet_balance_cny' ? '用户余额对账' : labels[type] || type;
       return {
         type,
-        label: labels[type] || type,
+        label,
         status: row.status,
         sourceTotal: number(row.source_total),
         finopsTotal: number(row.finops_total),
@@ -736,13 +1225,20 @@ export class PostgresRepository {
 
   async listCostProfiles() {
     const result = await this.pool.query(`
-      SELECT cp.id,cp.name,cp.cost_type,cp.currency,cp.allocation_method,cp.version,
+      SELECT cp.id,cp.name,cp.cost_type,cp.cost_mode,cp.basis_mode,cp.variable_multiplier,
+             cp.cny_per_reference_unit,cp.default_selling_multiplier,
+             cp.currency,cp.allocation_method,cp.version,
              COUNT(a.source_account_id)::int AS account_count
       FROM ${this.schema}.cost_profiles cp
       LEFT JOIN ${this.schema}.dim_accounts a ON a.cost_profile_id=cp.id
       GROUP BY cp.id ORDER BY cp.updated_at DESC`);
     return result.rows.map((row) => ({
       costType: row.cost_type,
+      costMode: row.cost_mode,
+      basisMode: row.basis_mode,
+      variableMultiplier: row.variable_multiplier === null ? null : number(row.variable_multiplier),
+      cnyPerReferenceUnit: row.cny_per_reference_unit === null ? null : number(row.cny_per_reference_unit),
+      defaultSellingMultiplier: row.default_selling_multiplier === null ? null : number(row.default_selling_multiplier),
       id: row.id,
       name: row.name,
       allocationMethod: row.allocation_method,
@@ -755,8 +1251,15 @@ export class PostgresRepository {
   async createCostProfile(input, actor='admin') {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`
-        INSERT INTO ${this.schema}.cost_profiles(name,cost_type,currency,allocation_method,notes,created_by)
-        VALUES($1,$2,$3,$4,$5,$6) RETURNING *`, [input.name,input.costType,input.currency,input.allocationMethod,input.notes||'',actor]);
+        INSERT INTO ${this.schema}.cost_profiles(
+          name,cost_type,cost_mode,basis_mode,variable_multiplier,cny_per_reference_unit,
+          default_selling_multiplier,currency,allocation_method,notes,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [
+        input.name,input.costType,input.costMode,input.basisMode,input.variableMultiplier,
+        input.cnyPerReferenceUnit,input.defaultSellingMultiplier,input.currency,input.allocationMethod,
+        input.notes||'',actor,
+      ]);
       const created = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'create','cost_profile',$2,$3::jsonb)`, [actor,String(created.id),JSON.stringify(created)]);
@@ -764,33 +1267,463 @@ export class PostgresRepository {
     });
   }
 
-  async createAccountCostPeriod(input, actor='admin') {
+  async listMonitorGroups() {
+    const result = await this.pool.query(`
+      WITH recent AS (
+        SELECT monitor_group_id,
+               COUNT(*)::int AS observation_count,
+               COUNT(*) FILTER (WHERE status IN ('healthy','degraded'))::int AS available_count
+        FROM ${this.schema}.monitor_group_observations
+        WHERE observed_at >= NOW() - INTERVAL '7 days'
+        GROUP BY monitor_group_id
+      ), latest AS (
+        SELECT DISTINCT ON (monitor_group_id)
+               monitor_group_id,status,available_account_count,total_account_count,
+               group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,observed_at
+        FROM ${this.schema}.monitor_group_observations
+        ORDER BY monitor_group_id,observed_at DESC,id DESC
+      )
+      SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
+             l.status,l.available_account_count,l.total_account_count,
+             l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,l.observed_at,
+             r.observation_count,r.available_count
+      FROM ${this.schema}.monitor_groups g
+      LEFT JOIN latest l ON l.monitor_group_id=g.id
+      LEFT JOIN recent r ON r.monitor_group_id=g.id
+      ORDER BY g.display_order,g.id`);
+    return result.rows.map((row) => ({
+      id: number(row.id),
+      name: row.name,
+      sourceGroupId: number(row.source_group_id),
+      modelLabel: row.model_label || '',
+      displayOrder: number(row.display_order),
+      enabled: Boolean(row.enabled),
+      status: row.status || 'unknown',
+      availableAccountCount: number(row.available_account_count),
+      totalAccountCount: number(row.total_account_count),
+      groupMultiplier: nullableNumber(row.group_multiplier),
+      userMultiplier: nullableNumber(row.user_multiplier),
+      effectiveMultiplier: nullableNumber(row.effective_multiplier),
+      averageLatencyMs: nullableNumber(row.average_latency_ms),
+      lastObservedAt: row.observed_at || null,
+      availabilityPercent: number(row.observation_count)
+        ? Number((number(row.available_count) * 100 / number(row.observation_count)).toFixed(2))
+        : null,
+    }));
+  }
+
+  async listMonitorGroupCandidates() {
+    const result = await this.pool.query(`
+      SELECT source_group_id,
+             COUNT(*)::int AS requests,
+             MAX(occurred_at) AS last_used_at,
+             (array_agg(model ORDER BY occurred_at DESC))[1] AS latest_model
+      FROM ${this.schema}.fact_usage_events
+      WHERE source_group_id > 0
+      GROUP BY source_group_id
+      ORDER BY MAX(occurred_at) DESC,source_group_id`);
+    return result.rows.map((row) => ({
+      sourceGroupId: number(row.source_group_id),
+      requests: number(row.requests),
+      lastUsedAt: row.last_used_at || null,
+      latestModel: row.latest_model || '',
+    }));
+  }
+
+  async createMonitorGroup(input, actor='admin') {
     return inTransaction(this.pool, async (client) => {
-      const account = await client.query(`SELECT a.source_account_id,cp.cost_type
-        FROM ${this.schema}.dim_accounts a
-        LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
-        WHERE a.source_account_id=$1 FOR UPDATE OF a`, [input.accountId]);
-      if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
-      let selectedCostType = account.rows[0].cost_type;
-      if (input.costProfileId) {
-        const profile = await client.query(`SELECT id,cost_type FROM ${this.schema}.cost_profiles WHERE id=$1`, [input.costProfileId]);
-        if (!profile.rowCount) throw httpError('cost profile not found', 404);
-        selectedCostType = profile.rows[0].cost_type;
-      }
-      if (selectedCostType === 'free') throw httpError('free accounts cannot have a CNY cost period', 409);
       const result = await client.query(`
-        INSERT INTO ${this.schema}.account_cost_periods(source_account_id,cost_profile_id,supplier,purchase_batch,original_amount,original_currency,fx_rate,base_amount,fee_amount,tax_amount,effective_from,effective_to,notes,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-      [input.accountId,input.costProfileId||null,input.supplier||'',input.purchaseBatch||'',input.originalAmount,input.originalCurrency,input.fxRate||1,input.baseAmount,input.feeAmount||0,input.taxAmount||0,input.effectiveFrom,input.effectiveTo,input.notes||'',actor]);
+        INSERT INTO ${this.schema}.monitor_groups(name,source_group_id,model_label,display_order,enabled,created_by)
+        VALUES($1,$2,$3,$4,$5,$6)
+        RETURNING *`,
+      [input.name,input.sourceGroupId,input.modelLabel,input.displayOrder,input.enabled,actor]);
       const created = result.rows[0];
-      await client.query(`UPDATE ${this.schema}.dim_accounts SET
-        cost_profile_id=COALESCE($2,cost_profile_id),supplier=COALESCE(NULLIF($3,''),supplier),
-        purchase_batch=COALESCE(NULLIF($4,''),purchase_batch),
-        tags=CASE WHEN $5::jsonb IS NULL THEN tags ELSE $5::jsonb END,synced_at=NOW()
-        WHERE source_account_id=$1`, [input.accountId,input.costProfileId||null,input.supplier||'',input.purchaseBatch||'',Array.isArray(input.tags)?JSON.stringify(input.tags):null]);
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
-        VALUES($1,'create','account_cost_period',$2,$3::jsonb)`, [actor,String(created.id),JSON.stringify(created)]);
-      return created;
+        VALUES($1,'create','monitor_group',$2,$3::jsonb)`,
+      [actor,String(created.id),JSON.stringify(created)]);
+      return {
+        id: number(created.id),
+        name: created.name,
+        sourceGroupId: number(created.source_group_id),
+        modelLabel: created.model_label || '',
+        displayOrder: number(created.display_order),
+        enabled: Boolean(created.enabled),
+      };
+    });
+  }
+
+  async updateMonitorGroup(id, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const beforeResult = await client.query(
+        `SELECT * FROM ${this.schema}.monitor_groups WHERE id=$1 FOR UPDATE`,
+        [id],
+      );
+      if (!beforeResult.rowCount) throw httpError('monitor group not found', 404);
+      const before = beforeResult.rows[0];
+      const result = await client.query(`
+        UPDATE ${this.schema}.monitor_groups
+        SET name=$2,source_group_id=$3,model_label=$4,display_order=$5,enabled=$6,updated_at=NOW()
+        WHERE id=$1
+        RETURNING *`,
+      [id,input.name,input.sourceGroupId,input.modelLabel,input.displayOrder,input.enabled]);
+      const updated = result.rows[0];
+      if (Number(before.source_group_id) !== Number(updated.source_group_id)) {
+        await client.query(`DELETE FROM ${this.schema}.monitor_group_observations WHERE monitor_group_id=$1`, [id]);
+      }
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value,after_value)
+        VALUES($1,'update','monitor_group',$2,$3::jsonb,$4::jsonb)`,
+      [actor,String(id),JSON.stringify(before),JSON.stringify(updated)]);
+      return {
+        id: number(updated.id),
+        name: updated.name,
+        sourceGroupId: number(updated.source_group_id),
+        modelLabel: updated.model_label || '',
+        displayOrder: number(updated.display_order),
+        enabled: Boolean(updated.enabled),
+      };
+    });
+  }
+
+  async getPublicMonitorDashboard() {
+    const groups = (await this.listMonitorGroups()).filter((group) => group.enabled);
+    if (!groups.length) return { generatedAt: new Date().toISOString(), groups: [] };
+    const publicGroups = groups.map(({ availableAccountCount: _availableAccountCount, totalAccountCount: _totalAccountCount, ...group }) => group);
+    const result = await this.pool.query(`
+      WITH ranked AS (
+        SELECT monitor_group_id,observed_at,status,
+               ROW_NUMBER() OVER (PARTITION BY monitor_group_id ORDER BY observed_at DESC,id DESC) AS row_number
+        FROM ${this.schema}.monitor_group_observations
+        WHERE monitor_group_id=ANY($1::bigint[])
+      )
+      SELECT monitor_group_id,observed_at,status
+      FROM ranked
+      WHERE row_number <= 60
+      ORDER BY monitor_group_id,observed_at`,
+    [groups.map((group) => group.id)]);
+    const history = new Map();
+    for (const row of result.rows) {
+      const id = number(row.monitor_group_id);
+      if (!history.has(id)) history.set(id, []);
+      history.get(id).push({
+        observedAt: row.observed_at,
+        status: row.status,
+      });
+    }
+    return {
+      generatedAt: new Date().toISOString(),
+      groups: publicGroups.map((group) => ({ ...group, history: history.get(group.id) || [] })),
+    };
+  }
+
+  async ensureSupplierInTransaction(client, name, actor='admin') {
+    const normalized = String(name || '').trim();
+    if (!normalized) return null;
+    const existing = await client.query(
+      `SELECT id FROM ${this.schema}.suppliers WHERE LOWER(name)=LOWER($1) LIMIT 1`,
+      [normalized],
+    );
+    if (existing.rowCount) return Number(existing.rows[0].id);
+    const result = await client.query(`
+      INSERT INTO ${this.schema}.suppliers(name,created_by,updated_at)
+      VALUES($1,$2,NOW()) RETURNING id`,
+    [normalized, actor]);
+    return Number(result.rows[0].id);
+  }
+
+  async ensurePurchaseBatchInTransaction(client, input, supplierId, actor='admin') {
+    const batchNumber = String(input.purchaseBatch || '').trim();
+    if (!batchNumber) return null;
+    const existing = await client.query(`
+      SELECT id FROM ${this.schema}.purchase_batches
+      WHERE supplier_id IS NOT DISTINCT FROM $1 AND batch_number=$2
+      LIMIT 1`, [supplierId, batchNumber]);
+    if (existing.rowCount) return Number(existing.rows[0].id);
+    const result = await client.query(`
+      INSERT INTO ${this.schema}.purchase_batches(
+        supplier_id,batch_number,total_amount_cny,fee_amount_cny,tax_amount_cny,
+        allocation_strategy,purchased_at,effective_from,effective_to,notes,created_by)
+      VALUES($1,$2,0,0,0,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [
+      supplierId,batchNumber,input.allocationStrategy || 'equal',input.effectiveFrom,input.effectiveFrom,input.effectiveTo,
+      input.notes || '',actor,
+    ]);
+    return Number(result.rows[0].id);
+  }
+
+  async refreshPurchaseBatchTotalsInTransaction(client, purchaseBatchId) {
+    if (!purchaseBatchId) return;
+    await client.query(`
+      UPDATE ${this.schema}.purchase_batches b
+      SET total_amount_cny=COALESCE((
+            SELECT SUM(p.base_amount)
+            FROM ${this.schema}.account_cost_periods p
+            WHERE p.purchase_batch_id=b.id AND p.status <> 'void'
+          ),0),
+          fee_amount_cny=COALESCE((
+            SELECT SUM(p.fee_amount)
+            FROM ${this.schema}.account_cost_periods p
+            WHERE p.purchase_batch_id=b.id AND p.status <> 'void'
+          ),0),
+          tax_amount_cny=COALESCE((
+            SELECT SUM(p.tax_amount)
+            FROM ${this.schema}.account_cost_periods p
+            WHERE p.purchase_batch_id=b.id AND p.status <> 'void'
+          ),0),
+          updated_at=NOW()
+      WHERE b.id=$1`, [purchaseBatchId]);
+  }
+
+  async upsertAccountCostRule(client, accountId, input, profile, actor='admin') {
+    const costMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : 'fixed_purchase');
+    const basisMode = input.basisMode || profile?.basis_mode || 'revenue_backsolve';
+    const upstreamMultiplier = input.upstreamMultiplier ?? (
+      costMode === 'manual_multiplier' ? profile?.variable_multiplier : null
+    );
+    const sellingMultiplier = input.sellingMultiplier ?? profile?.default_selling_multiplier ?? null;
+    const cnyPerReferenceUnit = input.cnyPerReferenceUnit ?? profile?.cny_per_reference_unit ?? null;
+    assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, sellingMultiplier, cnyPerReferenceUnit });
+    await client.query(`
+      UPDATE ${this.schema}.account_cost_rules
+      SET effective_to=NOW(),status='superseded',updated_at=NOW()
+      WHERE source_account_id=$1 AND status='active' AND effective_to IS NULL`,
+    [accountId]);
+    const result = await client.query(`
+      INSERT INTO ${this.schema}.account_cost_rules(
+        source_account_id,cost_profile_id,cost_mode,basis_mode,upstream_multiplier,
+        selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),'active',$8,$9) RETURNING *`,
+    [
+      accountId,input.costProfileId || profile?.id || null,costMode,basisMode,
+      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,input.notes || '',actor,
+    ]);
+    return result.rows[0];
+  }
+
+  async createAccountCostPeriod(input, actor='admin') {
+    return inTransaction(this.pool, (client) => this.createAccountCostPeriodInTransaction(client, input, actor));
+  }
+
+  async createAccountCostPeriodInTransaction(client, input, actor='admin') {
+    const account = await client.query(`SELECT a.source_account_id,a.cost_profile_id,cp.cost_type,cp.cost_mode,
+        active_rule.cost_mode AS active_rule_cost_mode
+      FROM ${this.schema}.dim_accounts a
+      LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
+      LEFT JOIN LATERAL (
+        SELECT r.cost_mode
+        FROM ${this.schema}.account_cost_rules r
+        WHERE r.source_account_id=a.source_account_id AND r.status='active'
+          AND (r.effective_to IS NULL OR r.effective_to > NOW())
+        ORDER BY r.effective_from DESC,r.id DESC LIMIT 1
+      ) active_rule ON TRUE
+      WHERE a.source_account_id=$1 FOR UPDATE OF a`, [input.accountId]);
+    if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
+    let selectedCostType = account.rows[0].cost_type;
+    let selectedCostMode = account.rows[0].active_rule_cost_mode || account.rows[0].cost_mode;
+    let selectedCostProfileId = account.rows[0].cost_profile_id;
+    let selectedProfile = null;
+    if (input.costProfileId) {
+      const profile = await client.query(`SELECT * FROM ${this.schema}.cost_profiles WHERE id=$1`, [input.costProfileId]);
+      if (!profile.rowCount) throw httpError('cost profile not found', 404);
+      selectedCostType = profile.rows[0].cost_type;
+      selectedCostMode = profile.rows[0].cost_mode;
+      selectedCostProfileId = profile.rows[0].id;
+      selectedProfile = profile.rows[0];
+    }
+    if (account.rows[0].active_rule_cost_mode && account.rows[0].active_rule_cost_mode !== 'fixed_purchase') {
+      throw httpError('change the account ledger to fixed_purchase before registering a fixed cost period', 409);
+    }
+    if (selectedCostType === 'free' || selectedCostMode === 'free') throw httpError('free accounts cannot have a CNY cost period', 409);
+    if (selectedCostMode && selectedCostMode !== 'fixed_purchase') {
+      throw httpError('multiplier accounts use the account ledger rule instead of a fixed cost period', 409);
+    }
+    const supplierId = input._supplierId ?? await this.ensureSupplierInTransaction(client, input.supplier, actor);
+    const purchaseBatchId = input._purchaseBatchId ?? await this.ensurePurchaseBatchInTransaction(client, input, supplierId, actor);
+    const totalCost = cnySum(input.baseAmount, input.feeAmount, input.taxAmount);
+    const result = await client.query(`
+      INSERT INTO ${this.schema}.account_cost_periods(
+        source_account_id,cost_profile_id,supplier,purchase_batch,supplier_id,purchase_batch_id,
+        original_amount,original_currency,fx_rate,base_amount,fee_amount,tax_amount,allocated_cost_cny,
+        effective_from,effective_to,notes,created_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+    [
+      input.accountId,selectedCostProfileId||null,input.supplier||'',input.purchaseBatch||'',supplierId,purchaseBatchId,
+      input.originalAmount,input.originalCurrency,input.fxRate||1,input.baseAmount,input.feeAmount||0,input.taxAmount||0,
+      totalCost,input.effectiveFrom,input.effectiveTo,input.notes||'',actor,
+    ]);
+    const created = result.rows[0];
+    if (purchaseBatchId) {
+      await client.query(`
+        INSERT INTO ${this.schema}.purchase_batch_allocations(
+          purchase_batch_id,source_account_id,allocated_amount_cny,effective_from,effective_to,notes,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT(purchase_batch_id,source_account_id) DO UPDATE SET
+          allocated_amount_cny=EXCLUDED.allocated_amount_cny,effective_from=EXCLUDED.effective_from,
+          effective_to=EXCLUDED.effective_to,notes=EXCLUDED.notes,updated_at=NOW()`,
+      [purchaseBatchId,input.accountId,totalCost,input.effectiveFrom,input.effectiveTo,input.notes||'',actor]);
+      await this.refreshPurchaseBatchTotalsInTransaction(client, purchaseBatchId);
+    }
+    await client.query(`UPDATE ${this.schema}.dim_accounts SET
+      cost_profile_id=COALESCE($2,cost_profile_id),supplier=COALESCE(NULLIF($3,''),supplier),
+      purchase_batch=COALESCE(NULLIF($4,''),purchase_batch),
+      tags=CASE WHEN $5::jsonb IS NULL THEN tags ELSE $5::jsonb END,synced_at=NOW()
+      WHERE source_account_id=$1`, [input.accountId,input.costProfileId||null,input.supplier||'',input.purchaseBatch||'',Array.isArray(input.tags)?JSON.stringify(input.tags):null]);
+    await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+      VALUES($1,'create','account_cost_period',$2,$3::jsonb)`, [actor,String(created.id),JSON.stringify(created)]);
+    return created;
+  }
+
+  async createBulkAccountCostPeriods(input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const weights = {};
+      if (input.allocationStrategy !== 'equal') {
+        const weightColumn = input.allocationStrategy === 'token_weight'
+          ? '(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens)'
+          : 'standard_cost_usd_reference';
+        const result = await client.query(`
+          SELECT source_account_id,COALESCE(SUM(${weightColumn}),0) AS weight
+          FROM ${this.schema}.fact_usage_events
+          WHERE source_account_id=ANY($1::bigint[])
+            AND occurred_at >= $2 AND occurred_at < $3
+          GROUP BY source_account_id`,
+        [input.accountIds,input.effectiveFrom,input.effectiveTo]);
+        for (const row of result.rows) weights[Number(row.source_account_id)] = row.weight;
+      }
+      const originalAllocations = splitFixedCostCny(input.originalAmount, input.accountIds, input.allocationStrategy, weights);
+      const feeAllocations = splitFixedCostCny(input.feeAmount, input.accountIds, input.allocationStrategy, weights);
+      const taxAllocations = splitFixedCostCny(input.taxAmount, input.accountIds, input.allocationStrategy, weights);
+      const allocationByAccount = new Map(originalAllocations.map((item, index) => [
+        item.accountId,
+        {
+          originalAmount: item.amountCny,
+          feeAmount: feeAllocations[index].amountCny,
+          taxAmount: taxAllocations[index].amountCny,
+        },
+      ]));
+      const supplierId = await this.ensureSupplierInTransaction(client, input.supplier, actor);
+      const purchaseBatchId = await this.ensurePurchaseBatchInTransaction(client, input, supplierId, actor);
+      const periods = [];
+      for (const accountId of input.accountIds) {
+        const allocation = allocationByAccount.get(accountId);
+        periods.push(await this.createAccountCostPeriodInTransaction(client, {
+          ...input,
+          ...allocation,
+          accountId,
+          baseAmount: allocation.originalAmount,
+          _supplierId: supplierId,
+          _purchaseBatchId: purchaseBatchId,
+        }, actor));
+      }
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'create_bulk','account_cost_period',$2,$3::jsonb)`,
+      [
+        actor, input.accountIds.join(','),
+        JSON.stringify({
+          accountIds: input.accountIds,
+          periodIds: periods.map((period) => period.id),
+          allocationStrategy: input.allocationStrategy,
+          originalAmount: input.originalAmount,
+          feeAmount: input.feeAmount,
+          taxAmount: input.taxAmount,
+        }),
+      ]);
+      return {
+        accountIds: input.accountIds,
+        created: periods.length,
+        periods,
+        allocatedTotalCny: number(cnySum(input.originalAmount, input.feeAmount, input.taxAmount)),
+      };
+    });
+  }
+
+  async updateAccountLedger(accountId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const account = await client.query(`SELECT source_account_id FROM ${this.schema}.dim_accounts
+        WHERE source_account_id=$1 FOR UPDATE`, [accountId]);
+      if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
+      let profile = null;
+      if (input.costProfileId) {
+        const profileResult = await client.query(`SELECT * FROM ${this.schema}.cost_profiles WHERE id=$1`, [input.costProfileId]);
+        if (!profileResult.rowCount) throw httpError('cost profile not found', 404);
+        profile = profileResult.rows[0];
+      }
+      const selectedMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : null);
+      if (selectedMode === 'free') {
+        const periods = await client.query(`SELECT 1 FROM ${this.schema}.account_cost_periods
+          WHERE source_account_id=$1 AND status='active' LIMIT 1`, [accountId]);
+        if (periods.rowCount) throw httpError('free accounts cannot retain active CNY cost periods', 409);
+      }
+      let rule = null;
+      if (selectedMode) {
+        rule = await this.upsertAccountCostRule(client, accountId, input, profile, actor);
+      }
+      const result = await client.query(`UPDATE ${this.schema}.dim_accounts
+        SET cost_profile_id=$2,supplier=$3,purchase_batch=$4,tags=$5::jsonb,synced_at=NOW()
+        WHERE source_account_id=$1 RETURNING *`,
+      [accountId, input.costProfileId, input.supplier, input.purchaseBatch, JSON.stringify(input.tags)]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update','account_ledger',$2,$3::jsonb)`,
+      [actor, String(accountId), JSON.stringify({ account: result.rows[0], rule })]);
+      return { ...result.rows[0], costRule: rule };
+    });
+  }
+
+  async updateAccountCostPeriod(periodId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const existing = await client.query(`SELECT p.source_account_id,p.purchase_batch_id,
+          a.cost_profile_id AS account_cost_profile_id
+        FROM ${this.schema}.account_cost_periods p
+        JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
+        WHERE p.id=$1 FOR UPDATE OF p,a`, [periodId]);
+      if (!existing.rowCount) throw httpError('account cost period not found', 404);
+      let selectedCostProfileId = input.costProfileId || existing.rows[0].account_cost_profile_id || null;
+      if (input.costProfileId) {
+        const profile = await client.query(`SELECT cost_type,cost_mode FROM ${this.schema}.cost_profiles WHERE id=$1`, [input.costProfileId]);
+        if (!profile.rowCount) throw httpError('cost profile not found', 404);
+        if (profile.rows[0].cost_type === 'free' || profile.rows[0].cost_mode !== 'fixed_purchase') {
+          throw httpError('only fixed_purchase profiles can have a CNY cost period', 409);
+        }
+      }
+      const supplierId = await this.ensureSupplierInTransaction(client, input.supplier, actor);
+      const purchaseBatchId = await this.ensurePurchaseBatchInTransaction(client, input, supplierId, actor);
+      const totalCost = cnySum(input.baseAmount, input.feeAmount, input.taxAmount);
+      const result = await client.query(`UPDATE ${this.schema}.account_cost_periods SET
+        cost_profile_id=$2,supplier=$3,purchase_batch=$4,supplier_id=$5,purchase_batch_id=$6,
+        original_amount=$7,original_currency=$8,fx_rate=$9,
+        base_amount=$10,fee_amount=$11,tax_amount=$12,allocated_cost_cny=$13,
+        effective_from=$14,effective_to=$15,notes=$16,updated_at=NOW()
+        WHERE id=$1 RETURNING *`,
+      [
+        periodId,selectedCostProfileId,input.supplier,input.purchaseBatch,supplierId,purchaseBatchId,
+        input.originalAmount,input.originalCurrency,input.fxRate,input.baseAmount,input.feeAmount,input.taxAmount,
+        totalCost,input.effectiveFrom,input.effectiveTo,input.notes,
+      ]);
+      if (purchaseBatchId) {
+        await client.query(`
+          INSERT INTO ${this.schema}.purchase_batch_allocations(
+            purchase_batch_id,source_account_id,allocated_amount_cny,effective_from,effective_to,notes,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7)
+          ON CONFLICT(purchase_batch_id,source_account_id) DO UPDATE SET
+            allocated_amount_cny=EXCLUDED.allocated_amount_cny,effective_from=EXCLUDED.effective_from,
+            effective_to=EXCLUDED.effective_to,notes=EXCLUDED.notes,updated_at=NOW()`,
+        [purchaseBatchId,existing.rows[0].source_account_id,totalCost,input.effectiveFrom,input.effectiveTo,input.notes||'',actor]);
+      }
+      const previousPurchaseBatchId = existing.rows[0].purchase_batch_id ? Number(existing.rows[0].purchase_batch_id) : null;
+      if (previousPurchaseBatchId && previousPurchaseBatchId !== purchaseBatchId) {
+        await client.query(`DELETE FROM ${this.schema}.purchase_batch_allocations
+          WHERE purchase_batch_id=$1 AND source_account_id=$2`,
+        [previousPurchaseBatchId,existing.rows[0].source_account_id]);
+        await this.refreshPurchaseBatchTotalsInTransaction(client, previousPurchaseBatchId);
+      }
+      if (purchaseBatchId) await this.refreshPurchaseBatchTotalsInTransaction(client, purchaseBatchId);
+      await client.query(`UPDATE ${this.schema}.dim_accounts SET
+        cost_profile_id=COALESCE($2,cost_profile_id),supplier=$3,purchase_batch=$4,
+        tags=CASE WHEN $5::jsonb IS NULL THEN tags ELSE $5::jsonb END,synced_at=NOW()
+        WHERE source_account_id=$1`,
+      [existing.rows[0].source_account_id, input.costProfileId, input.supplier, input.purchaseBatch,
+        Array.isArray(input.tags) ? JSON.stringify(input.tags) : null]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update','account_cost_period',$2,$3::jsonb)`, [actor, String(periodId), JSON.stringify(result.rows[0])]);
+      return result.rows[0];
     });
   }
 
@@ -863,7 +1796,9 @@ export class PostgresRepository {
     const cursorBySource = new Map(cursorResult.rows.map((row) => [row.source_name, row]));
     const cursorSourceNames = [
       ...REQUIRED_SYNC_SOURCES,
-      ...cursorResult.rows.map((row) => row.source_name).filter((sourceName) => !REQUIRED_SYNC_SOURCES.includes(sourceName)),
+      ...cursorResult.rows.map((row) => row.source_name).filter((sourceName) => (
+        sourceName !== 'user_subscriptions' && !REQUIRED_SYNC_SOURCES.includes(sourceName)
+      )),
     ];
     const sources = cursorSourceNames.map((sourceName) => {
       const row = cursorBySource.get(sourceName);

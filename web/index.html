@@ -35,6 +35,7 @@
         </section>
         <section class="nav-group" aria-labelledby="nav-system">
           <h2 class="nav-group-label" id="nav-system">系统治理</h2>
+          <button class="nav-item" data-page="monitor"><img src="/icons/server-cog.svg" alt="">分组监控</button>
           <button class="nav-item" data-page="sync"><img src="/icons/database-zap.svg" alt="">数据同步</button>
           <button class="nav-item" data-page="alerts"><img src="/icons/triangle-alert.svg" alt="">告警中心</button>
         </section>
@@ -57,8 +58,15 @@
             <button type="button" class="active" data-range="7d" aria-pressed="true">近 7 天</button>
             <button type="button" data-range="30d" aria-pressed="false">近 30 天</button>
             <button type="button" data-range="month" aria-pressed="false">本月</button>
+            <button type="button" data-range="custom" aria-pressed="false">自定义</button>
           </div>
-          <label class="range-control mobile-range"><span>周期</span><select id="range-select"><option value="today">今天</option><option value="7d" selected>近 7 天</option><option value="30d">近 30 天</option><option value="month">本月</option></select></label>
+          <div class="custom-range" id="custom-range" hidden>
+            <input id="range-start" type="date" aria-label="开始日期">
+            <span>至</span>
+            <input id="range-end" type="date" aria-label="结束日期">
+            <button type="button" class="button" id="range-apply">查询</button>
+          </div>
+          <label class="range-control mobile-range"><span>周期</span><select id="range-select"><option value="today">今天</option><option value="7d" selected>近 7 天</option><option value="30d">近 30 天</option><option value="month">本月</option><option value="custom">自定义</option></select></label>
           <button class="icon-button" id="refresh-button" title="刷新数据"><img src="/icons/refresh-cw.svg" alt=""></button>
           <button class="icon-button" id="export-button" title="导出当前数据"><img src="/icons/download.svg" alt=""></button>
           <div class="user-chip" aria-label="当前管理员">
@@ -79,5 +87,6 @@
   </div>
   <div class="toast" id="toast" hidden></div>
   <script type="module" src="/app.js?v=0.1.1"></script>
+  <script type="module" src="/session.js?v=0.2.0"></script>
 </body>
 </html>

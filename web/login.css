@@ -1,0 +1,105 @@
+:root {
+  color: #172033;
+  background: #f4f8fc;
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-synthesis: none;
+  letter-spacing: 0;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+
+button,
+input { font: inherit; letter-spacing: 0; }
+
+button:focus-visible,
+input:focus-visible { outline: 2px solid rgba(37, 99, 235, .32); outline-offset: 2px; }
+
+.login-shell {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: #f4f8fc;
+}
+
+.login-panel {
+  width: min(100%, 408px);
+  padding: 30px;
+  border: 1px solid #d5e2f0;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 20px 56px rgba(32, 70, 111, .12);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #243751;
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 12px;
+}
+
+.intro { margin: 30px 0 24px; }
+.eyebrow { margin: 0 0 7px; color: #287c5d; font-size: 11px; font-weight: 700; }
+h1 { margin: 0; color: #172033; font-size: 24px; line-height: 32px; }
+.intro > p:last-child { margin: 7px 0 0; color: #64748b; font-size: 13px; line-height: 20px; }
+
+form { display: grid; gap: 15px; }
+.field { display: grid; gap: 7px; color: #40536a; font-size: 12px; font-weight: 650; }
+.field input {
+  width: 100%;
+  height: 42px;
+  padding: 0 11px;
+  border: 1px solid #bfcee0;
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  font-size: 14px;
+  outline: 0;
+}
+.field input:focus { border-color: #4a83df; box-shadow: 0 0 0 3px #e7f0ff; }
+.field input:disabled { background: #f6f8fb; color: #7b8797; }
+.form-error {
+  margin: -3px 0 0;
+  padding: 9px 10px;
+  border: 1px solid #f2c6ce;
+  border-radius: 6px;
+  background: #fff4f5;
+  color: #ad2335;
+  font-size: 12px;
+  line-height: 17px;
+}
+.submit-button {
+  width: 100%;
+  height: 42px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+.submit-button:hover { background: #1d56ca; border-color: #1d56ca; }
+.submit-button:disabled { cursor: wait; opacity: .7; }
+.security-note { margin: 22px 0 0; color: #7a899c; font-size: 11px; line-height: 18px; }
+
+@media (max-width: 480px) {
+  .login-shell { padding: 14px; background: #f4f8fc; }
+  .login-panel { padding: 24px 20px; }
+}

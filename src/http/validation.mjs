@@ -2,6 +2,9 @@ import Decimal from 'decimal.js/decimal.mjs';
 
 const COST_TYPES = new Set(['metered', 'prepaid', 'subscription', 'one_time', 'free', 'hybrid']);
 const ALLOCATION_METHODS = new Set(['standard_cost_weight', 'token_weight', 'none']);
+const COST_MODES = new Set(['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free']);
+const BASIS_MODES = new Set(['revenue_backsolve', 'reference_cny']);
+const FIXED_ALLOCATION_STRATEGIES = new Set(['equal', 'standard_cost_weight', 'token_weight']);
 const CASH_TYPES = new Set([
   'other_expense', 'other_income', 'gateway_fee', 'account_purchase', 'supplier_topup',
   'subscription_renewal', 'affiliate_rebate', 'manual_adjustment', 'refund',
@@ -74,6 +77,31 @@ function optionalId(value, field) {
   return parsed;
 }
 
+function optionalDecimal(value, field, { min = 0, allowZero = false } = {}) {
+  if (value === undefined || value === null || value === '') return null;
+  return decimalValue(value, field, { min, allowZero });
+}
+
+function optionalEnum(value, field, allowed) {
+  if (value === undefined || value === null || value === '') return null;
+  return enumValue(value, field, allowed);
+}
+
+function integerValue(value, field, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/.test(normalized)) throw badRequest(`invalid ${field}`);
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw badRequest(`invalid ${field}`);
+  return parsed;
+}
+
+function booleanValue(value, field) {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  throw badRequest(`invalid ${field}`);
+}
+
 function tagValues(value) {
   if (value === undefined || value === null || value === '') return null;
   const source = Array.isArray(value) ? value : String(value).split(',');
@@ -83,22 +111,44 @@ function tagValues(value) {
 }
 
 export function normalizeCostProfile(input) {
+  const costType = enumValue(input.costType, 'costType', COST_TYPES);
+  const costMode = optionalEnum(input.costMode, 'costMode', COST_MODES) || (costType === 'free' ? 'free' : 'fixed_purchase');
+  const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES) || 'revenue_backsolve';
+  const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
+  const variableMultiplier = optionalDecimal(input.variableMultiplier, 'variableMultiplier', { min: 0, allowZero: false });
+  if (costType === 'free' && costMode !== 'free') {
+    throw badRequest('free costType requires free costMode');
+  }
+  if (costMode === 'free' && costType !== 'free') {
+    throw badRequest('free costMode requires free costType');
+  }
+  if (costMode === 'manual_multiplier' && !variableMultiplier) {
+    throw badRequest('manual_multiplier requires variableMultiplier');
+  }
+  if (basisMode === 'reference_cny' && !cnyPerReferenceUnit) {
+    throw badRequest('reference_cny requires cnyPerReferenceUnit');
+  }
   return {
     name: textValue(input.name, 'name', { max: 120 }),
-    costType: enumValue(input.costType, 'costType', COST_TYPES),
+    costType,
+    costMode,
+    basisMode,
+    cnyPerReferenceUnit,
+    variableMultiplier,
+    defaultSellingMultiplier: optionalDecimal(input.defaultSellingMultiplier, 'defaultSellingMultiplier', { min: 0, allowZero: false }),
     currency: cnyCurrency(input.currency, 'currency'),
     allocationMethod: enumValue(input.allocationMethod, 'allocationMethod', ALLOCATION_METHODS),
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
   };
 }
 
-export function normalizeAccountCostPeriod(input) {
+function normalizeAccountCostPeriodFields(input, accountId) {
   const effectiveFrom = dateValue(input.effectiveFrom, 'effectiveFrom');
   const effectiveTo = dateValue(input.effectiveTo, 'effectiveTo');
   if (new Date(effectiveTo) <= new Date(effectiveFrom)) throw badRequest('effectiveTo must be after effectiveFrom');
   return {
     ...cnyAmounts(input),
-    accountId: optionalId(input.accountId, 'accountId') ?? (() => { throw badRequest('missing field: accountId'); })(),
+    ...(accountId === null ? {} : { accountId }),
     costProfileId: optionalId(input.costProfileId, 'costProfileId'),
     feeAmount: decimalValue(input.feeAmount ?? 0, 'feeAmount'),
     taxAmount: decimalValue(input.taxAmount ?? 0, 'taxAmount'),
@@ -107,7 +157,55 @@ export function normalizeAccountCostPeriod(input) {
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags),
+    allocationStrategy: optionalEnum(input.allocationStrategy, 'allocationStrategy', FIXED_ALLOCATION_STRATEGIES) || 'equal',
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
+  };
+}
+
+export function normalizeAccountCostPeriod(input) {
+  const accountId = optionalId(input.accountId, 'accountId') ?? (() => { throw badRequest('missing field: accountId'); })();
+  return normalizeAccountCostPeriodFields(input, accountId);
+}
+
+export function normalizeAccountCostPeriodUpdate(input) {
+  return normalizeAccountCostPeriodFields(input, null);
+}
+
+export function normalizeBulkAccountCostPeriods(input) {
+  const source = Array.isArray(input.accountIds) ? input.accountIds : [];
+  const accountIds = [...new Set(source.map((value) => optionalId(value, 'accountIds')).filter(Boolean))];
+  if (!accountIds.length || accountIds.length > 100) throw badRequest('invalid accountIds');
+  return { ...normalizeAccountCostPeriodFields(input, null), accountIds };
+}
+
+export function normalizeAccountLedger(input) {
+  const costMode = optionalEnum(input.costMode, 'costMode', COST_MODES);
+  const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES);
+  const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
+  const sellingMultiplier = optionalDecimal(input.sellingMultiplier, 'sellingMultiplier', { min: 0, allowZero: false });
+  const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
+  return {
+    costProfileId: optionalId(input.costProfileId, 'costProfileId'),
+    costMode,
+    basisMode,
+    upstreamMultiplier,
+    sellingMultiplier,
+    cnyPerReferenceUnit,
+    supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
+    purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
+    tags: tagValues(input.tags) || [],
+  };
+}
+
+export function normalizeMonitorGroup(input) {
+  return {
+    name: textValue(input.name, 'name', { max: 120 }),
+    sourceGroupId: integerValue(input.sourceGroupId, 'sourceGroupId', { min: 1, max: Number.MAX_SAFE_INTEGER }),
+    modelLabel: textValue(input.modelLabel, 'modelLabel', { required: false, max: 120 }),
+    displayOrder: input.displayOrder === undefined || input.displayOrder === ''
+      ? 0
+      : integerValue(input.displayOrder, 'displayOrder', { min: 0, max: 100000 }),
+    enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
   };
 }
 

@@ -1,5 +1,9 @@
 import Decimal from 'decimal.js/decimal.mjs';
 import { inTransaction } from '../db.mjs';
+import {
+  calculateMultiplierCostCny,
+  normalizeUpstreamBillingSnapshot,
+} from './cost-accounting.mjs';
 
 Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_UP });
 
@@ -16,25 +20,34 @@ const USAGE_COLUMNS = [
 // usage batches before constructing the INSERT statement.
 export const USAGE_COLUMN_COUNT = USAGE_COLUMNS.length;
 export const MAX_USAGE_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / USAGE_COLUMN_COUNT));
+export const COST_SNAPSHOT_BATCH_SIZE = 10_000;
+export const COST_SNAPSHOT_OPEN_DAYS = 3;
+export const COST_SNAPSHOT_COLUMN_COUNT = 23;
+export const MAX_COST_SNAPSHOT_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / COST_SNAPSHOT_COLUMN_COUNT));
 
 export const REQUIRED_SOURCE_COLUMNS = {
   usage_logs: [
     'id', 'user_id', 'api_key_id', 'account_id', 'request_id', 'model', 'requested_model',
-    'upstream_model', 'channel_id', 'group_id', 'subscription_id', 'billing_mode', 'billing_type',
+    'upstream_model', 'channel_id', 'group_id', 'billing_mode',
     'input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'total_cost',
     'actual_cost', 'rate_multiplier', 'account_rate_multiplier',
     'duration_ms', 'first_token_ms', 'created_at',
   ],
   users: ['id', 'email', 'username', 'status', 'balance', 'total_recharged', 'updated_at', 'deleted_at'],
-  accounts: ['id', 'name', 'platform', 'type', 'status', 'expires_at', 'updated_at', 'deleted_at'],
+  accounts: ['id', 'name', 'platform', 'type', 'status', 'expires_at', 'updated_at', 'deleted_at', 'extra'],
   payment_orders: [
     'id', 'user_id', 'pay_amount', 'amount', 'provider_snapshot', 'payment_type', 'order_type',
-    'plan_id', 'subscription_group_id', 'subscription_days', 'status', 'refund_amount', 'paid_at',
+    'status', 'refund_amount', 'paid_at',
     'refund_at', 'fee_rate', 'recharge_code', 'updated_at',
   ],
   redeem_codes: ['id', 'code', 'type', 'value', 'status', 'used_by', 'used_at', 'notes', 'created_at'],
   user_affiliate_ledger: ['id', 'user_id', 'action', 'amount', 'source_user_id', 'source_order_id', 'created_at', 'updated_at'],
   payment_audit_logs: ['id', 'order_id', 'action', 'detail', 'operator', 'created_at'],
+};
+
+export const OPTIONAL_SOURCE_COLUMNS = {
+  usage_logs: ['subscription_id', 'billing_type'],
+  payment_orders: ['plan_id', 'subscription_group_id', 'subscription_days'],
   user_subscriptions: [
     'id', 'user_id', 'group_id', 'starts_at', 'expires_at', 'status', 'daily_usage_usd',
     'weekly_usage_usd', 'monthly_usage_usd', 'updated_at', 'deleted_at',
@@ -84,21 +97,36 @@ function sourceTimestamp(cursor) {
 }
 
 export class SyncService {
-  constructor(pool, config, logger = console) {
-    this.pool = pool;
-    this.config = config;
-    this.logger = logger;
-    this.schema = `"${config.finopsSchema}"`;
-    this.source = `"${config.sourceSchema}"`;
-    this.balanceSettings = `"${config.sourceSettingsSchema || 'finops_source'}"."balance_recharge_multiplier"`;
+  constructor(sourcePool, finopsPoolOrConfig, configOrLogger, logger = console) {
+    // Keep the legacy three-argument form for unit tests only. Production
+    // callers pass distinct source and FinOps pools.
+    if (finopsPoolOrConfig && typeof finopsPoolOrConfig.finopsSchema === 'string') {
+      this.sourcePool = sourcePool;
+      this.finopsPool = sourcePool;
+      this.config = finopsPoolOrConfig;
+      this.logger = configOrLogger || console;
+    } else {
+      this.sourcePool = sourcePool;
+      this.finopsPool = finopsPoolOrConfig;
+      this.config = configOrLogger;
+      this.logger = logger;
+    }
+    this.schema = `"${this.config.finopsSchema}"`;
+    this.source = `"${this.config.sourceSchema}"`;
+    this.balanceSettings = `"${this.config.sourceSettingsSchema || 'finops_source'}"."balance_recharge_multiplier"`;
     this.running = false;
     this.timer = null;
   }
 
   async validateSourceSchema() {
     assertSourceUnitContract(this.config);
-    const tables = Object.keys(REQUIRED_SOURCE_COLUMNS);
-    const result = await this.pool.query(
+    const sourceColumns = this.config.subscriptionsEnabled
+      ? Object.fromEntries(Object.entries(REQUIRED_SOURCE_COLUMNS).map(([table, columns]) => [
+        table, [...columns, ...(OPTIONAL_SOURCE_COLUMNS[table] || [])],
+      ]).concat([['user_subscriptions', OPTIONAL_SOURCE_COLUMNS.user_subscriptions]]))
+      : REQUIRED_SOURCE_COLUMNS;
+    const tables = Object.keys(sourceColumns);
+    const result = await this.sourcePool.query(
       `SELECT table_name,column_name FROM information_schema.columns
        WHERE table_schema=$1 AND table_name=ANY($2::text[])`,
       [this.config.sourceSchema, tables],
@@ -109,11 +137,11 @@ export class SyncService {
       found.get(row.table_name).add(row.column_name);
     }
     const missing = [];
-    for (const [table, columns] of Object.entries(REQUIRED_SOURCE_COLUMNS)) {
+    for (const [table, columns] of Object.entries(sourceColumns)) {
       for (const column of columns) if (!found.get(table)?.has(column)) missing.push(`${table}.${column}`);
     }
     if (missing.length) throw new Error(`ApiStation source schema is incompatible; missing: ${missing.join(', ')}`);
-    const multiplierResult = await this.pool.query(`
+    const multiplierResult = await this.sourcePool.query(`
       SELECT value FROM ${this.balanceSettings}
       WHERE key='BALANCE_RECHARGE_MULTIPLIER' LIMIT 1`);
     const rawMultiplier = multiplierResult.rows[0]?.value;
@@ -144,7 +172,7 @@ export class SyncService {
 
   async markSourceError(sourceName, error) {
     try {
-      await this.pool.query(`
+      await this.finopsPool.query(`
         INSERT INTO ${this.schema}.sync_cursors(source_name,last_error,updated_at)
         VALUES($1,$2,NOW())
         ON CONFLICT(source_name) DO UPDATE SET last_error=EXCLUDED.last_error,updated_at=NOW()`,
@@ -178,16 +206,48 @@ export class SyncService {
     const started = Date.now();
     try {
       await this.syncDimensions();
+      const historicalCostSnapshotRows = await inTransaction(
+        this.finopsPool,
+        (client) => this.freezePendingUsageCostSnapshots(client, 'historical_backfill'),
+      );
+      const historicalFixedCostSnapshotRows = await inTransaction(
+        this.finopsPool,
+        (client) => this.captureFixedCostDailySnapshots(client, 'historical_backfill'),
+      );
       const paymentRows = await this.drain('payment_orders', () => this.syncPayments());
       const redeemRows = await this.drain('redeem_codes', () => this.syncRedeemCodes());
       const affiliateRows = await this.drain('user_affiliate_ledger', () => this.syncAffiliateLedger());
       const auditRows = await this.drain('payment_audit_logs', () => this.syncPaymentAuditLogs());
-      const subscriptionRows = await this.drain('user_subscriptions', () => this.syncSubscriptions());
+      const subscriptionRows = this.config.subscriptionsEnabled
+        ? await this.drain('user_subscriptions', () => this.syncSubscriptions())
+        : 0;
       const usageRows = await this.drain('usage_logs', () => this.syncUsage());
       await this.refreshRecentUsage();
-      await this.reconcileRecentUsage();
+      const monitorObservationRows = await this.captureMonitorGroupObservations();
+      const liveCostSnapshotRows = await inTransaction(
+        this.finopsPool,
+        (client) => this.freezePendingUsageCostSnapshots(client, 'live_sync'),
+      );
+      const liveFixedCostSnapshotRows = await inTransaction(
+        this.finopsPool,
+        async (client) => {
+          const rows = await this.captureFixedCostDailySnapshots(client, 'live_sync');
+          await this.finalizeCostDailySnapshots(client);
+          return rows;
+        },
+      );
+      try {
+        await this.reconcileRecentUsage();
+        await this.reconcileWalletBalances();
+      } catch (error) {
+        await this.markSourceError('credit_reconciliation', error);
+        throw error;
+      }
       const result = {
         skipped: false, usageRows, paymentRows, redeemRows, affiliateRows, auditRows, subscriptionRows,
+        monitorObservationRows,
+        historicalCostSnapshotRows, historicalFixedCostSnapshotRows,
+        liveCostSnapshotRows, liveFixedCostSnapshotRows,
         durationMs: Date.now() - started,
       };
       this.logger.info('[sync] cycle complete', result);
@@ -199,28 +259,41 @@ export class SyncService {
 
   async syncDimensions() {
     try {
-      await inTransaction(this.pool, async (client) => {
-        await client.query(`
+      const [users, accounts] = await Promise.all([
+        this.sourcePool.query(`
+          SELECT id,email,COALESCE(username,'') AS username,status,balance,
+            COALESCE(total_recharged,0) AS total_recharged,deleted_at,updated_at
+          FROM ${this.source}.users`),
+        this.sourcePool.query(`
+          SELECT id,name,platform,type,status,expires_at,deleted_at,updated_at,
+            extra->'upstream_billing_probe' AS upstream_billing_probe
+          FROM ${this.source}.accounts`),
+      ]);
+      await inTransaction(this.finopsPool, async (client) => {
+        for (const row of users.rows) await client.query(`
           INSERT INTO ${this.schema}.dim_users(
             source_user_id,email,username,status,current_balance,total_recharged,balance_currency,
             source_deleted_at,source_updated_at,synced_at)
-          SELECT id,email,COALESCE(username,''),status,balance,COALESCE(total_recharged,0),'CNY',
-                 deleted_at,updated_at,NOW()
-          FROM ${this.source}.users
+          VALUES($1,$2,$3,$4,$5,$6,'CNY',$7,$8,NOW())
           ON CONFLICT(source_user_id) DO UPDATE SET
             email=EXCLUDED.email,username=EXCLUDED.username,status=EXCLUDED.status,
             current_balance=EXCLUDED.current_balance,total_recharged=EXCLUDED.total_recharged,
-            source_deleted_at=EXCLUDED.source_deleted_at,source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`);
-        await client.query(`
-          INSERT INTO ${this.schema}.dim_accounts(
-            source_account_id,name,platform,account_type,status,expires_at,source_deleted_at,
-            source_updated_at,synced_at)
-          SELECT id,name,platform,type,status,expires_at,deleted_at,updated_at,NOW()
-          FROM ${this.source}.accounts
-          ON CONFLICT(source_account_id) DO UPDATE SET
-            name=EXCLUDED.name,platform=EXCLUDED.platform,account_type=EXCLUDED.account_type,
-            status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,source_deleted_at=EXCLUDED.source_deleted_at,
-            source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`);
+            source_deleted_at=EXCLUDED.source_deleted_at,source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
+        [row.id, row.email, row.username, row.status, row.balance, row.total_recharged, row.deleted_at, row.updated_at]);
+        for (const row of accounts.rows) {
+          await client.query(`
+            INSERT INTO ${this.schema}.dim_accounts(
+              source_account_id,name,platform,account_type,status,expires_at,source_deleted_at,
+              source_updated_at,synced_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+            ON CONFLICT(source_account_id) DO UPDATE SET
+              name=EXCLUDED.name,platform=EXCLUDED.platform,account_type=EXCLUDED.account_type,
+              status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,source_deleted_at=EXCLUDED.source_deleted_at,
+              source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
+          [row.id, row.name, row.platform, row.type, row.status, row.expires_at, row.deleted_at, row.updated_at]);
+          const rateObservation = await this.upsertUpstreamBillingSnapshot(client, row.id, row.upstream_billing_probe);
+          await this.upsertAccountDailySnapshot(client, row, rateObservation);
+        }
       });
     } catch (error) {
       await this.markSourceError('dimensions', error);
@@ -232,6 +305,470 @@ export class SyncService {
     await client.query(`INSERT INTO ${this.schema}.sync_cursors(source_name) VALUES($1) ON CONFLICT DO NOTHING`, [sourceName]);
     const result = await client.query(
       `SELECT cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1 FOR UPDATE`,
+      [sourceName],
+    );
+    return result.rows[0];
+  }
+
+  async captureMonitorGroupObservations() {
+    const result = await this.finopsPool.query(`
+      WITH enabled_groups AS (
+        SELECT id,source_group_id
+        FROM ${this.schema}.monitor_groups
+        WHERE enabled
+      ), group_accounts AS (
+        SELECT eg.id AS monitor_group_id,e.source_account_id
+        FROM enabled_groups eg
+        JOIN ${this.schema}.fact_usage_events e
+          ON e.source_group_id=eg.source_group_id
+         AND e.source_account_id > 0
+         AND e.occurred_at >= NOW() - INTERVAL '30 days'
+        GROUP BY eg.id,e.source_account_id
+      ), account_states AS (
+        SELECT ga.monitor_group_id,ga.source_account_id,
+               a.status AS account_status,a.source_deleted_at,
+               p.status AS probe_status,p.fresh_until,p.group_rate_multiplier,
+               p.user_rate_multiplier,p.effective_rate_multiplier,
+               COALESCE(p.observed_at,p.received_at,p.last_attempt_at,p.synced_at) AS probe_time
+        FROM group_accounts ga
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=ga.source_account_id
+        LEFT JOIN LATERAL (
+          SELECT status,fresh_until,group_rate_multiplier,user_rate_multiplier,
+                 effective_rate_multiplier,observed_at,received_at,last_attempt_at,synced_at
+          FROM ${this.schema}.upstream_billing_snapshots
+          WHERE source_account_id=ga.source_account_id
+          ORDER BY COALESCE(observed_at,received_at,last_attempt_at,synced_at) DESC,id DESC
+          LIMIT 1
+        ) p ON TRUE
+      ), group_rollup AS (
+        SELECT monitor_group_id,
+               COUNT(*)::int AS total_account_count,
+               COUNT(*) FILTER (
+                 WHERE account_status='active' AND source_deleted_at IS NULL
+                   AND probe_status='ok'
+                   AND (fresh_until IS NULL OR fresh_until > NOW())
+               )::int AS available_account_count,
+               (array_agg(group_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
+                 FILTER (WHERE group_rate_multiplier IS NOT NULL))[1] AS group_multiplier,
+               (array_agg(user_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
+                 FILTER (WHERE user_rate_multiplier IS NOT NULL))[1] AS probe_user_multiplier,
+               (array_agg(effective_rate_multiplier ORDER BY probe_time DESC NULLS LAST)
+                 FILTER (WHERE effective_rate_multiplier IS NOT NULL))[1] AS effective_multiplier
+        FROM account_states
+        GROUP BY monitor_group_id
+      ), usage_metrics AS (
+        SELECT eg.id AS monitor_group_id,
+               AVG(e.duration_ms) FILTER (WHERE e.occurred_at >= NOW() - INTERVAL '30 minutes')::int AS average_latency_ms,
+               (array_agg(e.user_rate_multiplier ORDER BY e.occurred_at DESC)
+                 FILTER (WHERE e.user_rate_multiplier IS NOT NULL))[1] AS usage_user_multiplier
+        FROM enabled_groups eg
+        LEFT JOIN ${this.schema}.fact_usage_events e
+          ON e.source_group_id=eg.source_group_id
+         AND e.occurred_at >= NOW() - INTERVAL '30 days'
+        GROUP BY eg.id
+      )
+      INSERT INTO ${this.schema}.monitor_group_observations(
+        monitor_group_id,status,available_account_count,total_account_count,
+        group_multiplier,user_multiplier,effective_multiplier,average_latency_ms)
+      SELECT eg.id,
+             CASE
+               WHEN COALESCE(gr.total_account_count,0)=0 THEN 'unknown'
+               WHEN COALESCE(gr.available_account_count,0)=0 THEN 'unavailable'
+               WHEN gr.available_account_count < gr.total_account_count THEN 'degraded'
+               ELSE 'healthy'
+             END,
+             COALESCE(gr.available_account_count,0),
+             COALESCE(gr.total_account_count,0),
+             gr.group_multiplier,
+             COALESCE(gr.probe_user_multiplier,um.usage_user_multiplier),
+             COALESCE(gr.effective_multiplier,gr.group_multiplier,gr.probe_user_multiplier,um.usage_user_multiplier),
+             um.average_latency_ms
+      FROM enabled_groups eg
+      LEFT JOIN group_rollup gr ON gr.monitor_group_id=eg.id
+      LEFT JOIN usage_metrics um ON um.monitor_group_id=eg.id
+    `);
+    return result.rowCount;
+  }
+
+  async upsertUpstreamBillingSnapshot(client, accountId, rawSnapshot) {
+    const snapshot = normalizeUpstreamBillingSnapshot(rawSnapshot);
+    if (!snapshot) return { id: null, snapshot: null };
+    await client.query(`
+      INSERT INTO ${this.schema}.upstream_billing_snapshots(
+        source_account_id,snapshot_key,status,billing_scope,observed_at,received_at,fresh_until,
+        last_attempt_at,next_probe_at,failure_count,http_status,last_error,
+        group_rate_multiplier,user_rate_multiplier,resolved_rate_multiplier,effective_rate_multiplier,
+        peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data,synced_at)
+      VALUES(
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+        $13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,NOW()
+      )
+      ON CONFLICT(source_account_id,snapshot_key) DO UPDATE SET
+        status=EXCLUDED.status,billing_scope=EXCLUDED.billing_scope,observed_at=EXCLUDED.observed_at,
+        received_at=EXCLUDED.received_at,fresh_until=EXCLUDED.fresh_until,last_attempt_at=EXCLUDED.last_attempt_at,
+        next_probe_at=EXCLUDED.next_probe_at,failure_count=EXCLUDED.failure_count,http_status=EXCLUDED.http_status,
+        last_error=EXCLUDED.last_error,group_rate_multiplier=EXCLUDED.group_rate_multiplier,
+        user_rate_multiplier=EXCLUDED.user_rate_multiplier,resolved_rate_multiplier=EXCLUDED.resolved_rate_multiplier,
+        effective_rate_multiplier=EXCLUDED.effective_rate_multiplier,peak_rate_enabled=EXCLUDED.peak_rate_enabled,
+        peak_rate_multiplier=EXCLUDED.peak_rate_multiplier,applied_peak_multiplier=EXCLUDED.applied_peak_multiplier,
+        timezone=EXCLUDED.timezone,snapshot_data=EXCLUDED.snapshot_data,synced_at=NOW()`,
+    [
+      accountId, snapshot.snapshotKey, snapshot.status, snapshot.billingScope, snapshot.observedAt,
+      snapshot.receivedAt, snapshot.freshUntil, snapshot.lastAttemptAt, snapshot.nextProbeAt,
+      snapshot.failureCount, snapshot.httpStatus, snapshot.lastError, snapshot.groupRateMultiplier,
+      snapshot.userRateMultiplier, snapshot.resolvedRateMultiplier, snapshot.effectiveRateMultiplier,
+      snapshot.peakRateEnabled, snapshot.peakRateMultiplier, snapshot.appliedPeakMultiplier, snapshot.timezone,
+      JSON.stringify(snapshot.data),
+    ]);
+    const observation = await client.query(`
+      INSERT INTO ${this.schema}.account_rate_observations(
+        source_account_id,observation_key,source_kind,status,billing_scope,observed_at,received_at,
+        fresh_until,last_attempt_at,next_probe_at,failure_count,http_status,last_error,
+        group_rate_multiplier,user_rate_multiplier,resolved_rate_multiplier,effective_rate_multiplier,
+        peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data)
+      VALUES(
+        $1,$2,'sub2api_cached_probe',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+        $13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)
+      ON CONFLICT(source_account_id,observation_key) DO NOTHING
+      RETURNING id`,
+    [
+      accountId, snapshot.snapshotKey, snapshot.status, snapshot.billingScope, snapshot.observedAt,
+      snapshot.receivedAt, snapshot.freshUntil, snapshot.lastAttemptAt, snapshot.nextProbeAt,
+      snapshot.failureCount, snapshot.httpStatus, snapshot.lastError, snapshot.groupRateMultiplier,
+      snapshot.userRateMultiplier, snapshot.resolvedRateMultiplier, snapshot.effectiveRateMultiplier,
+      snapshot.peakRateEnabled, snapshot.peakRateMultiplier, snapshot.appliedPeakMultiplier, snapshot.timezone,
+      JSON.stringify(snapshot.data),
+    ]);
+    let id = observation.rows[0]?.id || null;
+    if (!id) {
+      const existing = await client.query(`
+        SELECT id
+        FROM ${this.schema}.account_rate_observations
+        WHERE source_account_id=$1 AND observation_key=$2
+        LIMIT 1`, [accountId, snapshot.snapshotKey]);
+      id = existing.rows[0]?.id || null;
+    }
+    return { id, snapshot };
+  }
+
+  async upsertAccountDailySnapshot(client, sourceAccount, rateObservation) {
+    const day = dateKey(new Date(), this.config.timezone || 'UTC');
+    const snapshot = rateObservation?.snapshot || null;
+    const observationId = rateObservation?.id || null;
+    const rateStatus = snapshot?.status || 'unknown';
+    const effectiveRate = snapshot?.effectiveRateMultiplier ?? null;
+    const isAvailable = sourceAccount.deleted_at == null && sourceAccount.status === 'active';
+    const existingResult = await client.query(`
+      SELECT *
+      FROM ${this.schema}.account_daily_snapshots
+      WHERE day=$1 AND source_account_id=$2
+      FOR UPDATE`, [day, sourceAccount.id]);
+    const existing = existingResult.rows[0];
+    if (!existing) {
+      await client.query(`
+        INSERT INTO ${this.schema}.account_daily_snapshots(
+          day,source_account_id,name,platform,account_type,status,expires_at,source_deleted_at,
+          source_updated_at,is_available,rate_observation_id,first_rate_observation_id,
+          rate_status,effective_rate_multiplier,rate_change_count)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,0)`,
+      [
+        day, sourceAccount.id, sourceAccount.name || '', sourceAccount.platform || '',
+        sourceAccount.type || '', sourceAccount.status || '', sourceAccount.expires_at || null,
+        sourceAccount.deleted_at || null, sourceAccount.updated_at || null, isAvailable,
+        observationId, rateStatus, effectiveRate,
+      ]);
+      return;
+    }
+
+    const rateChanged = effectiveRate !== null
+      && (existing.effective_rate_multiplier === null
+        || !decimal(existing.effective_rate_multiplier).eq(decimal(effectiveRate)));
+    const stateChanged = existing.name !== (sourceAccount.name || '')
+      || existing.platform !== (sourceAccount.platform || '')
+      || existing.account_type !== (sourceAccount.type || '')
+      || existing.status !== (sourceAccount.status || '')
+      || new Date(existing.expires_at || 0).getTime() !== new Date(sourceAccount.expires_at || 0).getTime()
+      || new Date(existing.source_deleted_at || 0).getTime() !== new Date(sourceAccount.deleted_at || 0).getTime()
+      || Boolean(existing.is_available) !== isAvailable
+      || (snapshot && existing.rate_status !== rateStatus)
+      || rateChanged;
+    await client.query(`
+      UPDATE ${this.schema}.account_daily_snapshots
+      SET name=$3,platform=$4,account_type=$5,status=$6,expires_at=$7,source_deleted_at=$8,
+          source_updated_at=$9,is_available=$10,
+          rate_observation_id=COALESCE($11,rate_observation_id),
+          first_rate_observation_id=COALESCE(first_rate_observation_id,$11),
+          rate_status=CASE WHEN $11 IS NULL THEN rate_status ELSE $12 END,
+          effective_rate_multiplier=CASE WHEN $11 IS NULL THEN effective_rate_multiplier ELSE $13 END,
+          rate_change_count=rate_change_count+$14,
+          last_state_changed_at=CASE WHEN $15::boolean THEN NOW() ELSE last_state_changed_at END
+      WHERE day=$1 AND source_account_id=$2`,
+    [
+      day, sourceAccount.id, sourceAccount.name || '', sourceAccount.platform || '',
+      sourceAccount.type || '', sourceAccount.status || '', sourceAccount.expires_at || null,
+      sourceAccount.deleted_at || null, sourceAccount.updated_at || null, isAvailable,
+      observationId, rateStatus, effectiveRate, rateChanged ? 1 : 0, stateChanged,
+    ]);
+  }
+
+  async freezePendingUsageCostSnapshots(client, origin) {
+    let total = 0;
+    for (;;) {
+      const pending = await client.query(`
+        SELECT
+          f.source_usage_id,f.source_account_id,f.source_user_id,f.source_group_id,f.model,
+          f.occurred_at,f.user_charge_cny,f.standard_cost_usd_reference,
+          f.user_rate_multiplier AS source_selling_multiplier,
+          f.account_rate_multiplier AS source_account_multiplier,
+          COALESCE(rule.cost_mode,rule_profile.cost_mode,account_profile.cost_mode,
+            CASE
+              WHEN account_profile.cost_type='free' THEN 'free'
+              WHEN fixed_period.id IS NOT NULL THEN 'fixed_purchase'
+              ELSE 'unconfigured'
+            END) AS configured_cost_mode,
+          COALESCE(rule.basis_mode,rule_profile.basis_mode,account_profile.basis_mode,'revenue_backsolve') AS basis_mode,
+          COALESCE(
+            rule.selling_multiplier,
+            rule_profile.default_selling_multiplier,
+            account_profile.default_selling_multiplier,
+            NULLIF(f.user_rate_multiplier,0)
+          ) AS selling_multiplier,
+          COALESCE(rule.upstream_multiplier,rule_profile.variable_multiplier,account_profile.variable_multiplier)
+            AS manual_upstream_multiplier,
+          COALESCE(
+            rule.cny_per_reference_unit,
+            rule_profile.cny_per_reference_unit,
+            account_profile.cny_per_reference_unit
+          ) AS cny_per_reference_unit,
+          COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
+          rule.id AS account_cost_rule_id,
+          fixed_period.id AS fixed_period_id,
+          observation.id AS rate_observation_id,
+          observation.effective_rate_multiplier AS observed_upstream_multiplier
+        FROM ${this.schema}.fact_usage_events f
+        LEFT JOIN ${this.schema}.dim_accounts account
+          ON account.source_account_id=f.source_account_id
+        LEFT JOIN ${this.schema}.cost_profiles account_profile
+          ON account_profile.id=account.cost_profile_id
+        LEFT JOIN LATERAL (
+          SELECT r.*
+          FROM ${this.schema}.account_cost_rules r
+          WHERE r.source_account_id=f.source_account_id
+            AND r.status IN ('active','superseded')
+            AND r.effective_from <= f.occurred_at
+            AND (r.effective_to IS NULL OR r.effective_to > f.occurred_at)
+          ORDER BY r.effective_from DESC,r.id DESC
+          LIMIT 1
+        ) rule ON TRUE
+        LEFT JOIN ${this.schema}.cost_profiles rule_profile
+          ON rule_profile.id=rule.cost_profile_id
+        LEFT JOIN LATERAL (
+          SELECT p.id,p.cost_profile_id
+          FROM ${this.schema}.account_cost_periods p
+          WHERE p.source_account_id=f.source_account_id
+            AND p.status='active'
+            AND p.effective_from <= f.occurred_at
+            AND p.effective_to > f.occurred_at
+          ORDER BY p.effective_from DESC,p.id DESC
+          LIMIT 1
+        ) fixed_period ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT o.id,o.effective_rate_multiplier
+          FROM ${this.schema}.account_rate_observations o
+          WHERE o.source_account_id=f.source_account_id
+            AND COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) <= f.occurred_at
+            AND o.status='ok'
+          ORDER BY COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) DESC,o.id DESC
+          LIMIT 1
+        ) observation ON TRUE
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM ${this.schema}.fact_usage_cost_snapshots snapshot
+          WHERE snapshot.source_usage_id=f.source_usage_id
+        )
+        ORDER BY f.occurred_at,f.source_usage_id
+        LIMIT $1`, [COST_SNAPSHOT_BATCH_SIZE]);
+      if (!pending.rowCount) break;
+
+      const rows = pending.rows.map((row) => {
+        let costMode = row.configured_cost_mode || 'unconfigured';
+        let upstreamMultiplier = null;
+        let upstreamSource = '';
+        if (costMode === 'manual_multiplier') {
+          upstreamMultiplier = row.manual_upstream_multiplier;
+          upstreamSource = upstreamMultiplier === null || upstreamMultiplier === undefined ? '' : 'manual_rule';
+        } else if (costMode === 'probe_multiplier') {
+          if (row.source_account_multiplier !== null && row.source_account_multiplier !== undefined) {
+            upstreamMultiplier = row.source_account_multiplier;
+            upstreamSource = 'usage_log_snapshot';
+          } else if (row.observed_upstream_multiplier !== null && row.observed_upstream_multiplier !== undefined) {
+            upstreamMultiplier = row.observed_upstream_multiplier;
+            upstreamSource = 'probe_observation';
+          }
+        }
+        if (upstreamMultiplier !== null && upstreamMultiplier !== undefined && decimal(upstreamMultiplier).eq(0)) {
+          costMode = 'free';
+        }
+        const calculation = calculateMultiplierCostCny({
+          mode: costMode,
+          basisMode: row.basis_mode,
+          userChargeCny: row.user_charge_cny,
+          standardCostReference: row.standard_cost_usd_reference,
+          sellingMultiplier: row.selling_multiplier,
+          upstreamMultiplier,
+          cnyPerReferenceUnit: row.cny_per_reference_unit,
+        });
+        return {
+          source_usage_id: row.source_usage_id,
+          source_account_id: row.source_account_id,
+          source_user_id: row.source_user_id,
+          source_group_id: row.source_group_id,
+          model: row.model || '',
+          occurred_at: row.occurred_at,
+          user_charge_cny: numeric(row.user_charge_cny),
+          standard_cost_usd_reference: numeric(row.standard_cost_usd_reference),
+          source_selling_multiplier: row.source_selling_multiplier ?? null,
+          source_account_multiplier: row.source_account_multiplier ?? null,
+          cost_mode: costMode,
+          basis_mode: row.basis_mode || 'revenue_backsolve',
+          cost_profile_id: row.cost_profile_id || null,
+          account_cost_rule_id: row.account_cost_rule_id || null,
+          rate_observation_id: row.rate_observation_id || null,
+          selling_multiplier: row.selling_multiplier ?? null,
+          upstream_multiplier: upstreamMultiplier,
+          cny_per_reference_unit: row.cny_per_reference_unit ?? null,
+          upstream_multiplier_source: upstreamSource,
+          cost_status: calculation.status,
+          calculated_cost_cny: calculation.costCny,
+          snapshot_origin: origin,
+          pricing_version: 1,
+        };
+      });
+      for (let offset = 0; offset < rows.length; offset += MAX_COST_SNAPSHOT_ROWS_PER_INSERT) {
+        const chunk = rows.slice(offset, offset + MAX_COST_SNAPSHOT_ROWS_PER_INSERT);
+        const params = [];
+        for (const row of chunk) {
+          params.push(
+            row.source_usage_id, row.source_account_id, row.source_user_id, row.source_group_id,
+            row.model, row.occurred_at, row.user_charge_cny, row.standard_cost_usd_reference,
+            row.source_selling_multiplier, row.source_account_multiplier, row.cost_mode, row.basis_mode,
+            row.cost_profile_id, row.account_cost_rule_id, row.rate_observation_id,
+            row.selling_multiplier, row.upstream_multiplier, row.cny_per_reference_unit,
+            row.upstream_multiplier_source, row.cost_status, row.calculated_cost_cny,
+            row.snapshot_origin, row.pricing_version,
+          );
+        }
+        const inserted = await client.query(`
+          INSERT INTO ${this.schema}.fact_usage_cost_snapshots(
+            source_usage_id,source_account_id,source_user_id,source_group_id,model,occurred_at,
+            user_charge_cny,standard_cost_usd_reference,source_selling_multiplier,
+            source_account_multiplier,cost_mode,basis_mode,cost_profile_id,account_cost_rule_id,
+            rate_observation_id,selling_multiplier,upstream_multiplier,cny_per_reference_unit,
+            upstream_multiplier_source,cost_status,calculated_cost_cny,snapshot_origin,pricing_version)
+          VALUES ${valuesPlaceholders(chunk.length, COST_SNAPSHOT_COLUMN_COUNT)}
+          ON CONFLICT(source_usage_id) DO NOTHING`, params);
+        total += inserted.rowCount;
+      }
+    }
+    return total;
+  }
+
+  async captureFixedCostDailySnapshots(client, origin) {
+    const result = await client.query(`
+      WITH eligible_periods AS (
+        SELECT
+          p.id,p.source_account_id,p.cost_profile_id,p.effective_from,p.effective_to,p.status,
+          COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount) AS period_total_cost_cny,
+          COALESCE(profile.cost_type,'prepaid') AS cost_type,
+          COALESCE(profile.allocation_method,'standard_cost_weight') AS allocation_method,
+          COALESCE(
+            rule.cost_mode,
+            profile.cost_mode,
+            CASE WHEN profile.cost_type='free' THEN 'free' ELSE 'fixed_purchase' END
+          ) AS resolved_cost_mode
+        FROM ${this.schema}.account_cost_periods p
+        LEFT JOIN ${this.schema}.cost_profiles profile ON profile.id=p.cost_profile_id
+        LEFT JOIN LATERAL (
+          SELECT r.cost_mode
+          FROM ${this.schema}.account_cost_rules r
+          WHERE r.source_account_id=p.source_account_id
+            AND r.status IN ('active','superseded')
+            AND r.effective_from <= p.effective_from
+            AND (r.effective_to IS NULL OR r.effective_to > p.effective_from)
+          ORDER BY r.effective_from DESC,r.id DESC
+          LIMIT 1
+        ) rule ON TRUE
+        WHERE p.status='active'
+          AND COALESCE(
+            rule.cost_mode,
+            profile.cost_mode,
+            CASE WHEN profile.cost_type='free' THEN 'free' ELSE 'fixed_purchase' END
+          )='fixed_purchase'
+      ), daily AS (
+        SELECT
+          p.*,
+          gs::date AS day,
+          (gs AT TIME ZONE $1) AS day_started_at,
+          ((gs + INTERVAL '1 day') AT TIME ZONE $1) AS day_ended_at
+        FROM eligible_periods p
+        CROSS JOIN LATERAL generate_series(
+          date_trunc('day',p.effective_from AT TIME ZONE $1),
+          date_trunc('day',(p.effective_to - INTERVAL '1 microsecond') AT TIME ZONE $1),
+          INTERVAL '1 day'
+        ) gs
+      ), apportioned AS (
+        SELECT
+          d.*,
+          GREATEST(d.effective_from,d.day_started_at) AS overlap_started_at,
+          LEAST(d.effective_to,d.day_ended_at) AS overlap_ended_at
+        FROM daily d
+      )
+      INSERT INTO ${this.schema}.account_cost_daily_snapshots(
+        day,account_cost_period_id,source_account_id,day_started_at,day_ended_at,
+        cost_profile_id,cost_type,cost_mode,allocation_method,period_total_cost_cny,
+        daily_cost_cny,effective_from,effective_to,status,snapshot_origin)
+      SELECT
+        day,id,source_account_id,day_started_at,day_ended_at,
+        cost_profile_id,cost_type,'fixed_purchase',allocation_method,period_total_cost_cny,
+        CASE
+          WHEN effective_to > effective_from
+            THEN period_total_cost_cny
+              * EXTRACT(EPOCH FROM (overlap_ended_at-overlap_started_at))
+              / EXTRACT(EPOCH FROM (effective_to-effective_from))
+          ELSE 0
+        END,
+        effective_from,effective_to,status,$2
+      FROM apportioned
+      WHERE overlap_ended_at > overlap_started_at
+      ON CONFLICT(day,account_cost_period_id) DO UPDATE SET
+        source_account_id=EXCLUDED.source_account_id,
+        day_started_at=EXCLUDED.day_started_at,day_ended_at=EXCLUDED.day_ended_at,
+        cost_profile_id=EXCLUDED.cost_profile_id,cost_type=EXCLUDED.cost_type,
+        cost_mode=EXCLUDED.cost_mode,allocation_method=EXCLUDED.allocation_method,
+        period_total_cost_cny=EXCLUDED.period_total_cost_cny,
+        daily_cost_cny=EXCLUDED.daily_cost_cny,effective_from=EXCLUDED.effective_from,
+        effective_to=EXCLUDED.effective_to,status=EXCLUDED.status,
+        snapshot_origin=EXCLUDED.snapshot_origin,updated_at=NOW()
+      WHERE NOT account_cost_daily_snapshots.finalized
+      RETURNING day,account_cost_period_id`,
+    [this.config.timezone || 'UTC', origin]);
+    return result.rowCount;
+  }
+
+  async finalizeCostDailySnapshots(client) {
+    const today = dateKey(new Date(), this.config.timezone || 'UTC');
+    const result = await client.query(`
+      UPDATE ${this.schema}.account_cost_daily_snapshots
+      SET finalized=TRUE,finalized_at=COALESCE(finalized_at,NOW()),updated_at=NOW()
+      WHERE finalized=FALSE
+        AND day < ($1::date - ($2::int * INTERVAL '1 day'))`,
+    [today, COST_SNAPSHOT_OPEN_DAYS]);
+    return result.rowCount;
+  }
+
+  async readCursor(sourceName) {
+    const result = await this.finopsPool.query(
+      `SELECT cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1`,
       [sourceName],
     );
     return result.rows[0];
@@ -253,25 +790,29 @@ export class SyncService {
   }
 
   async syncUsage() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'usage_logs');
-      const sourceRows = await client.query(`
-        SELECT id AS source_usage_id,
-          COALESCE(request_id,'usage:'||id::text) AS request_id,
-          user_id AS source_user_id,api_key_id AS source_api_key_id,
-          account_id AS source_account_id,COALESCE(group_id,0) AS source_group_id,
-          COALESCE(channel_id,0) AS source_channel_id,model,
-          COALESCE(requested_model,'') AS requested_model,COALESCE(upstream_model,'') AS upstream_model,
-          COALESCE(billing_mode,'token') AS billing_mode,COALESCE(billing_type,0) AS billing_type,
-          subscription_id,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
-          total_cost AS standard_cost_usd_reference,actual_cost AS user_charge_cny,
-          COALESCE(rate_multiplier,1) AS user_rate_multiplier,
-          COALESCE(account_rate_multiplier,1) AS account_rate_multiplier,
-          duration_ms,first_token_ms,created_at AS occurred_at
-        FROM ${this.source}.usage_logs
-        WHERE (created_at,id)>($1,$2)
-        ORDER BY created_at,id LIMIT $3`,
-      [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('usage_logs');
+    const billingColumns = this.config.subscriptionsEnabled
+      ? 'COALESCE(billing_type,0) AS billing_type,subscription_id,'
+      : '0::smallint AS billing_type,NULL::bigint AS subscription_id,';
+    const sourceRows = await this.sourcePool.query(`
+      SELECT id AS source_usage_id,
+        COALESCE(request_id,'usage:'||id::text) AS request_id,
+        user_id AS source_user_id,api_key_id AS source_api_key_id,
+        account_id AS source_account_id,COALESCE(group_id,0) AS source_group_id,
+        COALESCE(channel_id,0) AS source_channel_id,model,
+        COALESCE(requested_model,'') AS requested_model,COALESCE(upstream_model,'') AS upstream_model,
+        COALESCE(billing_mode,'token') AS billing_mode,${billingColumns}
+        input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
+        total_cost AS standard_cost_usd_reference,actual_cost AS user_charge_cny,
+        COALESCE(rate_multiplier,1) AS user_rate_multiplier,
+        account_rate_multiplier,
+        duration_ms,first_token_ms,created_at AS occurred_at
+      FROM ${this.source}.usage_logs
+      WHERE (created_at,id)>($1,$2)
+      ORDER BY created_at,id LIMIT $3`,
+    [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'usage_logs');
       if (!sourceRows.rowCount) {
         await this.markSuccess(client, 'usage_logs', null, 0);
         return 0;
@@ -418,33 +959,41 @@ export class SyncService {
 
   async refreshRecentUsage() {
     if (!this.config.syncLookbackSeconds) return;
-    await inTransaction(this.pool, async (client) => {
-      const since = new Date(Date.now() - this.config.syncLookbackSeconds * 1000);
-      const rows = await client.query(`
-        SELECT id AS source_usage_id,COALESCE(request_id,'usage:'||id::text) AS request_id,
-          user_id AS source_user_id,api_key_id AS source_api_key_id,account_id AS source_account_id,
-          COALESCE(group_id,0) AS source_group_id,COALESCE(channel_id,0) AS source_channel_id,model,
-          COALESCE(requested_model,'') AS requested_model,COALESCE(upstream_model,'') AS upstream_model,
-          COALESCE(billing_mode,'token') AS billing_mode,COALESCE(billing_type,0) AS billing_type,subscription_id,
-          input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
-          total_cost AS standard_cost_usd_reference,actual_cost AS user_charge_cny,
-          COALESCE(rate_multiplier,1) AS user_rate_multiplier,COALESCE(account_rate_multiplier,1) AS account_rate_multiplier,
-          duration_ms,first_token_ms,created_at AS occurred_at
-        FROM ${this.source}.usage_logs WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2`, [since, this.config.syncBatchSize]);
+    const since = new Date(Date.now() - this.config.syncLookbackSeconds * 1000);
+    const billingColumns = this.config.subscriptionsEnabled
+      ? 'COALESCE(billing_type,0) AS billing_type,subscription_id,'
+      : '0::smallint AS billing_type,NULL::bigint AS subscription_id,';
+    const rows = await this.sourcePool.query(`
+      SELECT id AS source_usage_id,COALESCE(request_id,'usage:'||id::text) AS request_id,
+        user_id AS source_user_id,api_key_id AS source_api_key_id,account_id AS source_account_id,
+        COALESCE(group_id,0) AS source_group_id,COALESCE(channel_id,0) AS source_channel_id,model,
+        COALESCE(requested_model,'') AS requested_model,COALESCE(upstream_model,'') AS upstream_model,
+        COALESCE(billing_mode,'token') AS billing_mode,${billingColumns}
+        input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
+        total_cost AS standard_cost_usd_reference,actual_cost AS user_charge_cny,
+        COALESCE(rate_multiplier,1) AS user_rate_multiplier,account_rate_multiplier,
+        duration_ms,first_token_ms,created_at AS occurred_at
+      FROM ${this.source}.usage_logs WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2`, [since, this.config.syncBatchSize]);
+    await inTransaction(this.finopsPool, async (client) => {
       if (rows.rowCount) await this.upsertUsageRows(client, rows.rows);
     });
   }
 
   async syncPayments() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'payment_orders');
-      const sourceRows = await client.query(`
-        SELECT id,user_id,pay_amount,amount,COALESCE(provider_snapshot->>'currency','CNY') AS currency,
-          provider_snapshot,payment_type,order_type,plan_id,subscription_group_id,subscription_days,status,
-          refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at
-        FROM ${this.source}.payment_orders
-        WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
-      [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('payment_orders');
+    const orderFilter = this.config.subscriptionsEnabled ? '' : " AND COALESCE(order_type,'balance')='balance'";
+    const subscriptionColumns = this.config.subscriptionsEnabled
+      ? ',plan_id,subscription_group_id,subscription_days'
+      : '';
+    const sourceRows = await this.sourcePool.query(`
+      SELECT id,user_id,pay_amount,amount,COALESCE(provider_snapshot->>'currency','CNY') AS currency,
+        provider_snapshot,payment_type,order_type${subscriptionColumns},status,
+        refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at
+      FROM ${this.source}.payment_orders
+      WHERE (updated_at,id)>($1,$2)${orderFilter} ORDER BY updated_at,id LIMIT $3`,
+    [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'payment_orders');
       const users = new Set();
       for (const row of sourceRows.rows) {
         const affectedUsers = await this.upsertPaymentRow(client, row);
@@ -466,7 +1015,7 @@ export class SyncService {
       WHERE source_table='payment_orders' AND source_id=$1`, [row.id]);
     const affectedUsers = new Set([Number(row.user_id)]);
     for (const previous of previousEvents.rows) affectedUsers.add(Number(previous.source_user_id));
-    const orderType = row.order_type || 'balance';
+    const orderType = this.config.subscriptionsEnabled ? (row.order_type || 'balance') : 'balance';
     const currency = String(row.currency || 'CNY').toUpperCase();
     const pay = decimal(row.pay_amount);
     const credited = orderType === 'balance' ? decimal(row.amount) : new Decimal(0);
@@ -475,8 +1024,10 @@ export class SyncService {
     const paymentType = String(row.payment_type || '');
     const transactionType = orderType === 'subscription' ? 'subscription_purchase' : 'recharge';
     const metadata = JSON.stringify({
-      credited_amount: credited.toString(), order_type: orderType, plan_id: row.plan_id,
-      subscription_group_id: row.subscription_group_id, subscription_days: row.subscription_days,
+      credited_amount: credited.toString(), order_type: orderType,
+      ...(this.config.subscriptionsEnabled ? {
+        plan_id: row.plan_id, subscription_group_id: row.subscription_group_id, subscription_days: row.subscription_days,
+      } : {}),
       fee_rate: row.fee_rate, recharge_code: row.recharge_code || '', provider_snapshot: row.provider_snapshot || {},
     });
     await client.query(`
@@ -580,17 +1131,18 @@ export class SyncService {
   }
 
   async syncRedeemCodes() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'redeem_codes');
-      const sourceRows = await client.query(`
-        SELECT rc.id,rc.code,rc.type,rc.value,rc.status,rc.used_by,rc.used_at,rc.notes,rc.created_at,
-          po.id AS payment_order_id,po.amount AS payment_amount,po.pay_amount AS payment_pay_amount,
-          COALESCE(po.provider_snapshot->>'currency','CNY') AS payment_currency
-        FROM ${this.source}.redeem_codes rc
-        LEFT JOIN ${this.source}.payment_orders po ON po.recharge_code=rc.code AND po.order_type='balance' AND po.paid_at IS NOT NULL
-        WHERE (COALESCE(rc.used_at,rc.created_at),rc.id)>($1,$2)
-        ORDER BY COALESCE(rc.used_at,rc.created_at),rc.id LIMIT $3`,
-      [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('redeem_codes');
+    const sourceRows = await this.sourcePool.query(`
+      SELECT rc.id,rc.code,rc.type,rc.value,rc.status,rc.used_by,rc.used_at,rc.notes,rc.created_at,
+        po.id AS payment_order_id,po.amount AS payment_amount,po.pay_amount AS payment_pay_amount,
+        COALESCE(po.provider_snapshot->>'currency','CNY') AS payment_currency
+      FROM ${this.source}.redeem_codes rc
+      LEFT JOIN ${this.source}.payment_orders po ON po.recharge_code=rc.code AND po.order_type='balance' AND po.paid_at IS NOT NULL
+      WHERE (COALESCE(rc.used_at,rc.created_at),rc.id)>($1,$2)
+      ORDER BY COALESCE(rc.used_at,rc.created_at),rc.id LIMIT $3`,
+    [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'redeem_codes');
       const users = new Set();
       for (const row of sourceRows.rows) {
         if (!row.used_by || !row.used_at || !['balance', 'admin_balance'].includes(row.type)) continue;
@@ -625,13 +1177,14 @@ export class SyncService {
   }
 
   async syncAffiliateLedger() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'user_affiliate_ledger');
-      const sourceRows = await client.query(`
-        SELECT id,user_id,action,amount,source_user_id,source_order_id,created_at,updated_at
-        FROM ${this.source}.user_affiliate_ledger
-        WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
-      [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('user_affiliate_ledger');
+    const sourceRows = await this.sourcePool.query(`
+      SELECT id,user_id,action,amount,source_user_id,source_order_id,created_at,updated_at
+      FROM ${this.source}.user_affiliate_ledger
+      WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
+    [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'user_affiliate_ledger');
       const users = new Set();
       for (const row of sourceRows.rows) {
         const amount = decimal(row.amount);
@@ -659,12 +1212,13 @@ export class SyncService {
   }
 
   async syncPaymentAuditLogs() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'payment_audit_logs');
-      const rows = await client.query(`
-        SELECT id,order_id,action,detail,operator,created_at
-        FROM ${this.source}.payment_audit_logs WHERE (created_at,id)>($1,$2)
-        ORDER BY created_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('payment_audit_logs');
+    const rows = await this.sourcePool.query(`
+      SELECT id,order_id,action,detail,operator,created_at
+      FROM ${this.source}.payment_audit_logs WHERE (created_at,id)>($1,$2)
+      ORDER BY created_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'payment_audit_logs');
       for (const row of rows.rows) {
         await client.query(`
           INSERT INTO ${this.schema}.source_audit_events(source_audit_id,source_table,source_object_id,action,detail,operator,occurred_at)
@@ -682,12 +1236,13 @@ export class SyncService {
   }
 
   async syncSubscriptions() {
-    return inTransaction(this.pool, async (client) => {
-      const cursor = await this.cursor(client, 'user_subscriptions');
-      const rows = await client.query(`
-        SELECT id,user_id,group_id,starts_at,expires_at,status,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,updated_at,deleted_at
-        FROM ${this.source}.user_subscriptions WHERE (updated_at,id)>($1,$2)
-        ORDER BY updated_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    const cursor = await this.readCursor('user_subscriptions');
+    const rows = await this.sourcePool.query(`
+      SELECT id,user_id,group_id,starts_at,expires_at,status,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,updated_at,deleted_at
+      FROM ${this.source}.user_subscriptions WHERE (updated_at,id)>($1,$2)
+      ORDER BY updated_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
+    return inTransaction(this.finopsPool, async (client) => {
+      await this.cursor(client, 'user_subscriptions');
       for (const row of rows.rows) {
         await client.query(`
           INSERT INTO ${this.schema}.dim_subscriptions(source_subscription_id,source_user_id,source_group_id,starts_at,expires_at,status,
@@ -810,13 +1365,99 @@ export class SyncService {
   async reconcileRecentUsage() {
     const end = new Date();
     const start = new Date(end.getTime() - 86_400_000);
-    const source = await this.pool.query(`SELECT COALESCE(SUM(actual_cost),0) AS total FROM ${this.source}.usage_logs WHERE created_at >= $1 AND created_at < $2`, [start, end]);
-    const finops = await this.pool.query(`SELECT COALESCE(SUM(user_charge_cny),0) AS total FROM ${this.schema}.fact_usage_events WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
+    const source = await this.sourcePool.query(`SELECT COALESCE(SUM(actual_cost),0) AS total FROM ${this.source}.usage_logs WHERE created_at >= $1 AND created_at < $2`, [start, end]);
+    const finops = await this.finopsPool.query(`SELECT COALESCE(SUM(user_charge_cny),0) AS total FROM ${this.schema}.fact_usage_events WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
     const sourceTotal = source.rows[0].total;
     const finopsTotal = finops.rows[0].total;
-    await this.pool.query(`
+    await this.finopsPool.query(`
       INSERT INTO ${this.schema}.reconciliation_runs(reconciliation_type,period_start,period_end,status,source_total,finops_total,difference,details,completed_at)
       VALUES('usage_cny',$1,$2,CASE WHEN ABS($3::numeric-$4::numeric)<0.000001 THEN 'matched' ELSE 'warning' END,$3,$4,$3::numeric-$4::numeric,$5::jsonb,NOW())`,
     [start, end, sourceTotal, finopsTotal, JSON.stringify({ unit: 'CNY', sourceField: 'actual_cost', finopsField: 'user_charge_cny' })]);
+  }
+
+  async reconcileWalletBalances() {
+    return inTransaction(this.finopsPool, async (client) => {
+      const checkedAt = new Date();
+      const balances = await client.query(`
+        WITH ledger_activity AS (
+          SELECT source_user_id,COALESCE(SUM(amount),0) AS ledger_activity_cny
+          FROM (
+            SELECT source_user_id,
+              CASE WHEN direction='in' THEN credit_amount ELSE -credit_amount END AS amount
+            FROM ${this.schema}.credit_events
+            WHERE source_user_id<>0
+              AND COALESCE(metadata->>'accounting_scope','')<>'affiliate_quota'
+              AND COALESCE(metadata->>'linked_recharge','false')<>'true'
+            UNION ALL
+            SELECT source_user_id,-user_charge_cny AS amount
+            FROM ${this.schema}.fact_usage_events
+            WHERE source_user_id<>0 AND billing_type=0
+          ) events
+          GROUP BY source_user_id
+        )
+        SELECT u.source_user_id,u.current_balance AS source_balance_cny,
+               COALESCE(l.ledger_activity_cny,0) AS ledger_activity_cny
+        FROM ${this.schema}.dim_users u
+        LEFT JOIN ledger_activity l USING(source_user_id)
+        WHERE u.source_deleted_at IS NULL`);
+
+      let sourceDeltaTotal = new Decimal(0);
+      let ledgerDeltaTotal = new Decimal(0);
+      let differenceTotal = new Decimal(0);
+      let mismatchCount = 0;
+      let baselineCount = 0;
+      const users = [];
+
+      for (const row of balances.rows) {
+        const sourceBalance = decimal(row.source_balance_cny);
+        const ledgerActivity = decimal(row.ledger_activity_cny);
+        const previousResult = await client.query(`
+          SELECT source_balance_cny,ledger_activity_cny
+          FROM ${this.schema}.wallet_reconciliation_snapshots
+          WHERE source_user_id=$1 FOR UPDATE`, [row.source_user_id]);
+        const previous = previousResult.rows[0];
+        const sourceDelta = previous ? sourceBalance.minus(decimal(previous.source_balance_cny)) : new Decimal(0);
+        const ledgerDelta = previous ? ledgerActivity.minus(decimal(previous.ledger_activity_cny)) : new Decimal(0);
+        const difference = sourceDelta.minus(ledgerDelta);
+        const status = previous ? (difference.abs().lt('0.000001') ? 'matched' : 'warning') : 'baseline';
+
+        if (!previous) baselineCount += 1;
+        if (status === 'warning') mismatchCount += 1;
+        sourceDeltaTotal = sourceDeltaTotal.plus(sourceDelta);
+        ledgerDeltaTotal = ledgerDeltaTotal.plus(ledgerDelta);
+        differenceTotal = differenceTotal.plus(difference);
+        users.push({
+          sourceUserId: row.source_user_id,
+          sourceDeltaCny: sourceDelta.toString(),
+          ledgerDeltaCny: ledgerDelta.toString(),
+          differenceCny: difference.toString(),
+          status,
+        });
+
+        await client.query(`
+          INSERT INTO ${this.schema}.wallet_reconciliation_snapshots(
+            source_user_id,source_balance_cny,ledger_activity_cny,last_difference_cny,status,checked_at)
+          VALUES($1,$2,$3,$4,$5,$6)
+          ON CONFLICT(source_user_id) DO UPDATE SET
+            source_balance_cny=EXCLUDED.source_balance_cny,
+            ledger_activity_cny=EXCLUDED.ledger_activity_cny,
+            last_difference_cny=EXCLUDED.last_difference_cny,
+            status=EXCLUDED.status,checked_at=EXCLUDED.checked_at`,
+        [row.source_user_id, sourceBalance.toString(), ledgerActivity.toString(), difference.toString(), status, checkedAt]);
+      }
+
+      const status = baselineCount ? 'baseline' : mismatchCount ? 'warning' : 'matched';
+      await client.query(`
+        INSERT INTO ${this.schema}.reconciliation_runs(
+          reconciliation_type,period_start,period_end,status,source_total,finops_total,difference,details,completed_at)
+        VALUES('wallet_balance_cny',$6,$6,$1,$2,$3,$4,$5::jsonb,NOW())`,
+      [
+        status, sourceDeltaTotal.toString(), ledgerDeltaTotal.toString(), differenceTotal.toString(),
+        JSON.stringify({ unit: 'CNY', baselineCount, mismatchCount, userCount: balances.rowCount, users }),
+        checkedAt,
+      ]);
+      await this.markSuccess(client, 'credit_reconciliation', { time: checkedAt, id: 0 }, balances.rowCount);
+      return { status, userCount: balances.rowCount, mismatchCount };
+    });
   }
 }

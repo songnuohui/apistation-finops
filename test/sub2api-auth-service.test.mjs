@@ -1,0 +1,74 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  loginSub2ApiAdministrator,
+  Sub2ApiAuthError,
+} from '../src/services/sub2api-auth-service.mjs';
+
+const config = {
+  sub2apiAuthUrl: 'http://127.0.0.1:8080',
+  sub2apiAuthTimeoutMs: 1_000,
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+test('sub2api admin login verifies the issued token against the current profile', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/auth/login')) {
+      return json({ code: 0, data: { access_token: 'short-lived-token' } });
+    }
+    return json({
+      code: 0,
+      data: { id: 12, username: 'Operations', email: 'admin@example.com', role: 'admin', status: 'active' },
+    });
+  };
+
+  const result = await loginSub2ApiAdministrator(
+    { email: 'admin@example.com', password: 'not-recorded', clientIp: '203.0.113.6' },
+    config,
+    fetchImpl,
+  );
+
+  assert.deepEqual(result, {
+    requiresTwoFactor: false,
+    user: { id: 12, username: 'Operations', email: 'admin@example.com', role: 'admin' },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, 'http://127.0.0.1:8080/api/v1/auth/login');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { email: 'admin@example.com', password: 'not-recorded' });
+  assert.equal(calls[1].options.headers.Authorization, 'Bearer short-lived-token');
+  assert.equal(calls[1].options.headers['X-Forwarded-For'], '203.0.113.6');
+});
+
+test('sub2api login keeps a TOTP challenge server-side', async () => {
+  const result = await loginSub2ApiAdministrator(
+    { email: 'admin@example.com', password: 'not-recorded' },
+    config,
+    async () => json({ code: 0, data: { requires_2fa: true, temp_token: 'sub2api-pending-token', user_email_masked: 'a***@example.com' } }),
+  );
+
+  assert.deepEqual(result, {
+    requiresTwoFactor: true,
+    tempToken: 'sub2api-pending-token',
+    emailMasked: 'a***@example.com',
+  });
+});
+
+test('sub2api users without the admin role are rejected', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/auth/login')) return json({ code: 0, data: { access_token: 'short-lived-token' } });
+    return json({ code: 0, data: { id: 18, username: 'User', email: 'user@example.com', role: 'user', status: 'active' } });
+  };
+
+  await assert.rejects(
+    () => loginSub2ApiAdministrator({ email: 'user@example.com', password: 'not-recorded' }, config, fetchImpl),
+    (error) => error instanceof Sub2ApiAuthError && error.code === 'admin_required' && error.statusCode === 403,
+  );
+});

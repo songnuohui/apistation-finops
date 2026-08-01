@@ -2,21 +2,29 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.mjs';
-import { createPool, inTransaction } from '../src/db.mjs';
+import { assertDistinctDatabases, createFinopsPool, createSourcePool, inTransaction } from '../src/db.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const config = loadConfig();
-if (!config.databaseUrl) throw new Error('DATABASE_URL is required for migrations');
-const pool = createPool(config);
+if (config.demoMode) throw new Error('SOURCE_DATABASE_URL and FINOPS_DATABASE_URL are required for migrations');
+const sourcePool = createSourcePool(config);
+const pool = createFinopsPool(config);
 
 try {
+  await assertDistinctDatabases(sourcePool, pool);
+  const schema = await pool.query(
+    'SELECT 1 FROM pg_namespace WHERE nspname = $1',
+    [config.finopsSchema],
+  );
+  if (!schema.rowCount) {
+    throw new Error(`FinOps schema "${config.finopsSchema}" does not exist; create it with an administrator-owned deployment grant before running migrations`);
+  }
   const files = (await fs.readdir(path.join(root, 'migrations'))).filter((name) => name.endsWith('.sql')).sort();
   for (const file of files) {
     const version = path.basename(file, '.sql');
     const raw = await fs.readFile(path.join(root, 'migrations', file), 'utf8');
     const sql = raw.replaceAll('{{FINOPS_SCHEMA}}', `"${config.finopsSchema}"`);
     await inTransaction(pool, async (client) => {
-      await client.query(`CREATE SCHEMA IF NOT EXISTS "${config.finopsSchema}"`);
       await client.query(`CREATE TABLE IF NOT EXISTS "${config.finopsSchema}".schema_migrations (version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
       const existing = await client.query(`SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version = $1`, [version]);
       if (existing.rowCount) return;
@@ -42,5 +50,5 @@ try {
     });
   }
 } finally {
-  await pool.end();
+  await Promise.all([sourcePool.end(), pool.end()]);
 }

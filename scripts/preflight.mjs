@@ -1,38 +1,41 @@
 import { loadConfig } from '../src/config.mjs';
-import { createPool } from '../src/db.mjs';
+import { assertDistinctDatabases, createFinopsPool, createSourcePool } from '../src/db.mjs';
 import { SyncService } from '../src/services/sync-service.mjs';
 
 const config = loadConfig();
-if (!config.databaseUrl) throw new Error('DATABASE_URL is required for the read-only preflight');
+if (config.demoMode) throw new Error('SOURCE_DATABASE_URL and FINOPS_DATABASE_URL are required for the read-only preflight');
 
-const pool = createPool(config);
+const sourcePool = createSourcePool(config);
+const finopsPool = createFinopsPool(config);
 const sourceTableNames = [
   'users', 'accounts', 'usage_logs', 'payment_orders', 'redeem_codes',
-  'user_affiliate_ledger', 'payment_audit_logs', 'user_subscriptions',
+  'user_affiliate_ledger', 'payment_audit_logs',
 ];
+if (config.subscriptionsEnabled) sourceTableNames.push('user_subscriptions');
 
 try {
-  const sync = new SyncService(pool, config);
+  const isolation = await assertDistinctDatabases(sourcePool, finopsPool);
+  const sync = new SyncService(sourcePool, finopsPool, config);
   const unitContract = await sync.validateSourceSchema();
 
-  const database = await pool.query(`
+  const database = await sourcePool.query(`
     SELECT current_database() AS database_name,current_user AS role_name,
            current_setting('server_version') AS server_version,
            current_setting('TimeZone') AS server_timezone`);
-  const relations = await pool.query(`
+  const relations = await sourcePool.query(`
     SELECT c.relname AS table_name,GREATEST(c.reltuples,0)::bigint AS estimated_rows,
            pg_total_relation_size(c.oid)::bigint AS total_bytes
     FROM pg_class c
     JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname=$1 AND c.relname=ANY($2::text[]) AND c.relkind IN ('r','p')
     ORDER BY c.relname`, [config.sourceSchema, sourceTableNames]);
-  const ranges = await pool.query(`
+  const ranges = await sourcePool.query(`
     SELECT
       (SELECT MIN(created_at) FROM "${config.sourceSchema}".usage_logs) AS usage_first_at,
       (SELECT MAX(created_at) FROM "${config.sourceSchema}".usage_logs) AS usage_last_at,
       (SELECT MIN(paid_at) FROM "${config.sourceSchema}".payment_orders WHERE paid_at IS NOT NULL) AS payment_first_at,
        (SELECT MAX(paid_at) FROM "${config.sourceSchema}".payment_orders WHERE paid_at IS NOT NULL) AS payment_last_at`);
-  const rechargeRatios = await pool.query(`
+  const rechargeRatios = await sourcePool.query(`
     SELECT COUNT(*)::bigint AS sample_count,
            MIN(amount/NULLIF(pay_amount,0)) AS min_ratio,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (amount/NULLIF(pay_amount,0))::double precision) AS median_ratio,
@@ -47,9 +50,10 @@ try {
   const sourceAccounts = `${config.sourceSchema}.accounts`;
   const sourceSettings = `${config.sourceSchema}.settings`;
   const balanceSettingsView = `${config.sourceSettingsSchema}.balance_recharge_multiplier`;
-  const privileges = await pool.query(`
+  const privileges = await sourcePool.query(`
     SELECT
       has_column_privilege(current_user,$1,'credentials','SELECT') AS can_read_account_credentials,
+      has_column_privilege(current_user,$1,'extra','SELECT') AS can_read_account_extra,
       has_table_privilege(current_user,$1,'INSERT') OR
       has_table_privilege(current_user,$1,'UPDATE') OR
       has_table_privilege(current_user,$1,'DELETE') AS can_write_source_accounts,
@@ -62,6 +66,9 @@ try {
   if (security.can_read_account_credentials) {
     throw new Error('unsafe database role: accounts.credentials is readable');
   }
+  if (!security.can_read_account_extra) {
+    throw new Error('database role cannot read accounts.extra required for sanitized upstream billing probe snapshots');
+  }
   if (security.can_write_source_accounts) {
     throw new Error('unsafe database role: source tables are writable');
   }
@@ -70,6 +77,20 @@ try {
   }
   if (!security.can_read_balance_settings_view) {
     throw new Error('database role cannot read the restricted balance multiplier view');
+  }
+  const sourceWrite = await sourcePool.query(`
+    SELECT
+      has_schema_privilege(current_user,$1,'CREATE') AS can_create_in_source_schema,
+      EXISTS(
+        SELECT 1
+        FROM unnest($2::text[]) AS source_table
+        WHERE has_table_privilege(current_user,format('%I.%I',$1,source_table),'INSERT')
+          OR has_table_privilege(current_user,format('%I.%I',$1,source_table),'UPDATE')
+          OR has_table_privilege(current_user,format('%I.%I',$1,source_table),'DELETE')
+      ) AS can_write_source_tables`,
+  [config.sourceSchema, sourceTableNames]);
+  if (sourceWrite.rows[0].can_create_in_source_schema || sourceWrite.rows[0].can_write_source_tables) {
+    throw new Error('unsafe database role: source schema or source tables are writable');
   }
   const ratio = rechargeRatios.rows[0];
   const medianRatio = ratio.median_ratio === null ? null : Number(ratio.median_ratio);
@@ -93,9 +114,11 @@ try {
     status: 'compatible',
     sourceSchema: config.sourceSchema,
     database: database.rows[0],
+    isolation,
     security: {
       sourceTablesReadOnly: true,
       accountCredentialsReadable: false,
+      accountProbeExtraReadable: true,
       sourceSettingsReadable: false,
       balanceSettingsView,
     },
@@ -110,5 +133,5 @@ try {
     tables: relations.rows,
   }, null, 2));
 } finally {
-  await pool.end();
+  await Promise.all([sourcePool.end(), finopsPool.end()]);
 }

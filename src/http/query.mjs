@@ -24,27 +24,60 @@ function startOfZonedDay(date, timeZone) {
   return zonedDateTimeToUtc({ year: parts.year, month: parts.month, day: parts.day }, timeZone);
 }
 
+function zonedDateKey(date, timeZone) {
+  const parts = zonedParts(date, timeZone);
+  return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+function rangeResult(preset, start, end, timeZone) {
+  return {
+    preset,
+    start,
+    end,
+    dailyStart: zonedDateKey(start, timeZone),
+    dailyEnd: zonedDateKey(new Date(end.getTime() - 1), timeZone),
+  };
+}
+
+function dateParts(value, field) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) throw Object.assign(new Error(`invalid ${field}`), { statusCode: 400 });
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    throw Object.assign(new Error(`invalid ${field}`), { statusCode: 400 });
+  }
+  return { year, month, day };
+}
+
+function nextDateParts(parts) {
+  const next = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
+  return { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() };
+}
+
 export function resolveRange(searchParams, now = new Date(), timeZone = 'Asia/Shanghai') {
   const preset = searchParams.get('range') || '7d';
   const end = new Date(now);
   let start;
   if (preset === 'today') start = startOfZonedDay(now, timeZone);
-  else if (preset === '30d') start = new Date(end.getTime() - 30 * DAY_MS);
+  else if (preset === '30d') start = startOfZonedDay(new Date(end.getTime() - 29 * DAY_MS), timeZone);
   else if (preset === 'month') {
     const parts = zonedParts(now, timeZone);
     start = zonedDateTimeToUtc({ year: parts.year, month: parts.month, day: 1 }, timeZone);
   }
   else if (preset === 'custom') {
-    start = new Date(searchParams.get('start') || '');
-    const customEnd = new Date(searchParams.get('end') || '');
-    if (!Number.isFinite(start.getTime()) || !Number.isFinite(customEnd.getTime()) || start >= customEnd) {
-      throw Object.assign(new Error('invalid custom date range'), { statusCode: 400 });
-    }
-    return { preset, start, end: customEnd };
+    const customStart = dateParts(searchParams.get('start'), 'custom start date');
+    const customEnd = dateParts(searchParams.get('end'), 'custom end date');
+    start = zonedDateTimeToUtc(customStart, timeZone);
+    const endOfRange = zonedDateTimeToUtc(nextDateParts(customEnd), timeZone);
+    if (start >= endOfRange) throw Object.assign(new Error('invalid custom date range'), { statusCode: 400 });
+    return rangeResult(preset, start, endOfRange, timeZone);
   } else {
-    start = new Date(end.getTime() - 7 * DAY_MS);
+    start = startOfZonedDay(new Date(end.getTime() - 6 * DAY_MS), timeZone);
   }
-  return { preset, start, end };
+  return rangeResult(preset, start, end, timeZone);
 }
 
 export function pagination(searchParams) {
@@ -68,4 +101,12 @@ export function pagination(searchParams) {
 
 export function searchTerm(searchParams) {
   return (searchParams.get('search') || '').trim().slice(0, 120);
+}
+
+export function accountScope(searchParams) {
+  const scope = searchParams.get('scope') || 'current';
+  if (!['current', 'deleted', 'all'].includes(scope)) {
+    throw Object.assign(new Error('invalid account scope'), { statusCode: 400 });
+  }
+  return scope;
 }

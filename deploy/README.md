@@ -1,5 +1,7 @@
 # 部署说明
 
+完整的可执行部署流程请参阅 `docs/线上部署指南.md`。本文件保留为权限和上线边界说明。
+
 首版与 `sub2api` 共用 PostgreSQL 实例，但只在同一个数据库中新建 `finops` Schema。应用使用专用最小权限角色：对 `public` 只授予同步所需字段的 `SELECT`，禁止读取 `accounts.credentials` 和整张 `public.settings`，只允许在 `finops` Schema 内写入。充值倍率由管理员拥有的 `finops_source.balance_recharge_multiplier` 安全屏障视图暴露唯一非敏感配置行。生产库管理员密码不进入 FinOps 配置，也不需要提供给开发人员。
 
 当前阶段不需要从本地连接线上数据库。应先完成本地迁移和功能验证，再由服务器管理员在服务器内创建专用角色并配置连接串。仓库示例统一使用 `finops_app`：该角色对 `public` 源表只有列级只读权限，对 `finops` Schema 具有应用写入权限；它不是 PostgreSQL 管理员，也不能读取账号凭证。若部署方更希望使用 `finops_reader` 这一名称，可以在服务器执行授权脚本时统一重命名，但不要改变权限边界。
@@ -8,14 +10,14 @@
 
 ## 迁移边界
 
-FinOps 目前尚未部署到生产环境，正式首次部署只支持新的空 `finops` Schema，依次执行 `001_init` 和 `002_cny_accounting`。
+FinOps 目前尚未部署到生产环境，正式首次部署只支持新的空 `finops` Schema，依次执行 `001_init`、`002_cny_accounting` 和 `003_reconciliation_snapshots`。
 
 如果任何测试或历史环境的 `finops.schema_migrations` 已包含 `002_dual_ledger`，不要继续自动迁移，也不要把旧 USD Credit 字段批量更新为 CNY。迁移程序会主动拒绝该状态。正确处理流程是：
 
 1. 停止该环境的 FinOps 同步，备份完整 `finops` Schema 和迁移记录；`public` 源表始终不动。
 2. 抽样确认旧余额、扣费和收入的实际单位，导出仍需保留的手工成本与审计记录。
 3. 由数据库管理员选择新建干净 Schema，或在确认备份可恢复后手工重建旧 Schema；不要直接覆盖旧账。
-4. 重新执行只读预检、`002_cny_accounting`、历史回填和 7 天影子对账，确认 CNY 守恒后再启用报表。
+4. 重新执行只读预检、`002_cny_accounting`、`003_reconciliation_snapshots`、历史回填和 7 天影子对账，确认 CNY 守恒后再启用报表。
 
 ## 上线前检查
 
@@ -30,19 +32,19 @@ Schema 预检失败时不得开始同步。预检只查询 `information_schema`�
 ## 上线步骤
 
 1. 修改并执行 `deploy/postgres-grants.sql`，统一数据库名、角色名和强随机密码；执行后复核 `public` 权限与 `finops` Schema 所有权。
-2. 将 `.env.example` 复制为服务器上的 `.env`，配置 `DATABASE_URL`、强随机 `ADMIN_TOKEN` 和已核实的 Docker 网络名。
+2. 将 `.env.example` 复制为服务器上的 `.env`，配置 `DATABASE_URL`、本机 `SUB2API_AUTH_URL`、强随机 `SESSION_SECRET` 和已核实的 Docker 网络名。
 3. 执行只读预检：`docker compose -f deploy/docker-compose.example.yml run --rm apistation-finops pnpm preflight`。预检失败时立即停止，不执行迁移或同步。
 4. 执行迁移：`docker compose -f deploy/docker-compose.example.yml run --rm apistation-finops pnpm migrate`。
 5. 在低峰期执行可中断、可续传的历史回填：`docker compose -f deploy/docker-compose.example.yml run --rm apistation-finops pnpm backfill`。
 6. 启动服务：`docker compose -f deploy/docker-compose.example.yml up -d --build`。
-7. 检查 `/health` 确认进程存活，再检查 `/ready` 确认数据库连接、`002_cny_accounting` 迁移和同步状态正常。
+7. 检查 `/health` 确认进程存活，再检查 `/ready` 确认数据库连接、`002_cny_accounting`、`003_reconciliation_snapshots` 迁移和同步状态正常。
 8. 使用 Nginx/Caddy 将独立域名反向代理到 `127.0.0.1:8090`，并启用 HTTPS；8090 不直接暴露公网。
 9. 连续运行 7 天影子同步，只观察和对账，不把报表作为结算依据。请求数、Token、CNY 余额扣减、现金收退款和成本批次稳定后再转为正式经营报表。
 
 ## 影子同步验收
 
 - FinOps 对 `sub2api` 始终是只读旁路；停止 FinOps 不影响转发、余额扣减或支付。
-- 钱包与订阅按 `billing_type` 分开核对，订阅现金收入单列，不提前混入钱包确认收入。
+- 当前默认 `SUBSCRIPTIONS_ENABLED=false`，只核对按量计费的钱包充值、余额扣减和收入；只有源系统明确启用订阅后，才按 `billing_type` 单独核对订阅现金收入。
 - CNY 账本核对实付、入账余额、赠送/返利、当前余额、`actual_cost`、现金退款、采购、费用、确认收入和利润。
 - 钱包确认收入按 CNY 充值余额批次 FIFO 消耗；赠送、返利等现金基础为 0 的批次不能伪装成现金收入。
 - `total_cost` / `standard_cost_usd_reference` 只核对 Token 标准 USD 目录价值，不进入人民币余额、成本、收入或利润，也不自动换算为 CNY。
@@ -58,9 +60,27 @@ Schema 预检失败时不得开始同步。预检只查询 `information_schema`�
 - 上线前连续影子运行 7 天；用量、支付和成本对账稳定后再用于正式利润判断。
 - Compose 将管理端口绑定到 `127.0.0.1`，并将容器日志限制为 3 个 10MB 文件。
 
+## 分组监控嵌入
+
+迁移完成后，管理员可以在 FinOps 的“分组监控”页面配置公开分组。独立监控地址为 `/monitor`，页面本身不要求管理员会话，可直接通过 iframe 加载。
+
+生产环境请在 FinOps 的 `.env` 中配置允许嵌入的父页面来源，例如：
+
+```dotenv
+MONITOR_EMBED_ORIGINS=https://sub2api.example.com
+```
+
+然后在需要嵌入的页面使用：
+
+```html
+<iframe src="https://finops.example.com/monitor" title="分组可用性监控"></iframe>
+```
+
+监控配置和观测只写入独立 FinOps 数据库；分组 ID 只是源系统引用，FinOps 不会修改源服务或源数据库。
+
 ## 安全要求
 
-- 生产环境必须设置 `AUTH_DISABLED=false`，`ADMIN_TOKEN` 至少 24 个字符。
+- 生产环境必须设置 `AUTH_DISABLED=false`、本机 `SUB2API_AUTH_URL` 和至少 32 个字符的 `SESSION_SECRET`。
 - 生产环境必须设置非空 `DATABASE_URL`；缺失时服务拒绝启动，不允许退回演示模式。
 - 不向 FinOps 授予 `accounts.credentials` 的业务访问能力，也不在日志中输出密钥。
 - 不向 FinOps 授予 `public.settings` 表或其 `key/value` 列权限；只允许读取管理员拥有、仅返回 `BALANCE_RECHARGE_MULTIPLIER` 的 `finops_source.balance_recharge_multiplier` 安全屏障视图。
