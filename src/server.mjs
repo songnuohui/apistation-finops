@@ -24,7 +24,7 @@ import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
-  listSub2ApiAdminChannelMonitors,
+  listSub2ApiChannelMonitors,
   listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
@@ -39,7 +39,7 @@ const finopsPool=createFinopsPool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const pendingLogins=new PendingLoginStore();
-syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiAdminChannelMonitors({accessToken},config));
+syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
 syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
 
@@ -236,14 +236,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency']],
   );
-  if(migration.rowCount < 7)throw new Error('required FinOps migrations 002_cny_accounting through 008_monitor_settings are not applied');
+  if(migration.rowCount < 8)throw new Error('required FinOps migrations 002_cny_accounting through 009_monitor_ping_latency are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings'],
+     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

@@ -158,12 +158,12 @@ function optionalInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-export async function listSub2ApiAdminChannelMonitors({ accessToken }, config, fetchImpl = fetch) {
+export async function listSub2ApiChannelMonitors({ accessToken }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
   if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
   const payload = await request(
     config.sub2apiAuthUrl,
-    '/api/v1/admin/channel-monitors?page=1&page_size=100&enabled=true',
+    '/api/v1/channel-monitors',
     {
       method: 'GET',
       headers: {
@@ -189,6 +189,7 @@ export async function listSub2ApiAdminChannelMonitors({ accessToken }, config, f
       enabled: monitor.enabled !== false,
       primaryStatus: String(monitor.primary_status || '').trim().slice(0, 24),
       primaryLatencyMs: optionalInteger(monitor.primary_latency_ms),
+      primaryPingLatencyMs: optionalInteger(monitor.primary_ping_latency_ms),
       availability7d: optionalNumber(monitor.availability_7d),
       lastCheckedAt: monitor.last_checked_at || null,
     }];

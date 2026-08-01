@@ -338,15 +338,6 @@ h1 {
   text-transform: uppercase;
 }
 
-.group-card-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 20px 18px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .empty-monitor,
 .monitor-loading {
   grid-column: 1 / -1;
@@ -378,15 +369,6 @@ h1 {
   text-align: center;
 }
 
-.monitor-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 6px 0;
-  color: #82919a;
-  font-size: 11px;
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -407,5 +389,4 @@ h1 {
   .monitor-board { padding: 10px; }
   .monitor-toolbar { align-items: flex-start; flex-direction: column; gap: 6px; }
   .group-grid { grid-template-columns: 1fr; }
-  .monitor-footer { align-items: flex-start; flex-direction: column; }
 }

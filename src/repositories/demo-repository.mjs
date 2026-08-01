@@ -115,12 +115,12 @@ const demoCostProfiles = [
 ];
 
 const demoMonitorDefinitions = [
-  ['GPT PLUS【限时特惠】', 1, 'gpt-5.4', 0.08, 96.32, 2053],
-  ['GPT PLUS【稳定】', 2, 'gpt-5.4', 0.08, 97.02, 3205],
-  ['GPT pluspro 混池【应急】', 3, 'gpt-5.4', 0.12, 97.99, 1404],
-  ['GPT PRO【稳定】', 4, 'gpt-5.4', 0.16, 99.21, 1235],
-  ['GPT PRO【兜底】', 5, 'gpt-5.4', 0.20, 99.40, 2416],
-].map(([name, sourceGroupId, modelLabel, effectiveMultiplier, availabilityPercent, averageLatencyMs], index) => ({
+  ['GPT PLUS【限时特惠】', 1, 'gpt-5.4', 0.08, 96.32, 2053, 6],
+  ['GPT PLUS【稳定】', 2, 'gpt-5.4', 0.08, 97.02, 3205, 5],
+  ['GPT pluspro 混池【应急】', 3, 'gpt-5.4', 0.12, 97.99, 1404, 11],
+  ['GPT PRO【稳定】', 4, 'gpt-5.4', 0.16, 99.21, 1235, 6],
+  ['GPT PRO【兜底】', 5, 'gpt-5.4', 0.20, 99.40, 2416, 28],
+].map(([name, sourceGroupId, modelLabel, effectiveMultiplier, availabilityPercent, averageLatencyMs, averagePingLatencyMs], index) => ({
   id: index + 1,
   name,
   sourceGroupId,
@@ -135,6 +135,7 @@ const demoMonitorDefinitions = [
   userMultiplier: effectiveMultiplier,
   effectiveMultiplier,
   averageLatencyMs,
+  averagePingLatencyMs,
   availabilityPercent,
   lastObservedAt: new Date(Date.now() - (3 + index) * 60_000).toISOString(),
 }));
@@ -251,6 +252,7 @@ export class DemoRepository {
       userMultiplier: null,
       effectiveMultiplier: null,
       averageLatencyMs: null,
+      averagePingLatencyMs: null,
       availabilityPercent: null,
       lastObservedAt: null,
     };

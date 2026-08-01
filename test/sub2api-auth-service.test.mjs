@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   listSub2ApiAdminGroups,
-  listSub2ApiAdminChannelMonitors,
+  listSub2ApiChannelMonitors,
   loginSub2ApiAdministrator,
   Sub2ApiAuthError,
 } from '../src/services/sub2api-auth-service.mjs';
@@ -85,12 +85,12 @@ test('sub2api group catalog keeps only sanitized display fields', async () => {
   }]);
 });
 
-test('sub2api channel monitor list keeps only status fields needed by FinOps', async () => {
-  const result = await listSub2ApiAdminChannelMonitors(
+test('sub2api user channel monitor list keeps only public status fields needed by FinOps', async () => {
+  const result = await listSub2ApiChannelMonitors(
     { accessToken: 'short-lived-token' },
     config,
     async (url, options) => {
-      assert.equal(url, 'http://127.0.0.1:8080/api/v1/admin/channel-monitors?page=1&page_size=100&enabled=true');
+      assert.equal(url, 'http://127.0.0.1:8080/api/v1/channel-monitors');
       assert.equal(options.headers.Authorization, 'Bearer short-lived-token');
       return json({
         code: 0,
@@ -103,10 +103,9 @@ test('sub2api channel monitor list keeps only status fields needed by FinOps', a
             enabled: true,
             primary_status: 'operational',
             primary_latency_ms: 220,
+            primary_ping_latency_ms: 12,
             availability_7d: 99.1,
-            last_checked_at: '2026-08-01T06:00:00Z',
-            endpoint: 'https://secret.example.invalid',
-            api_key_masked: 'sk-***',
+            timeline: [{ status: 'operational', checked_at: '2026-08-01T06:00:00Z' }],
           }],
         },
       });
@@ -120,8 +119,9 @@ test('sub2api channel monitor list keeps only status fields needed by FinOps', a
     enabled: true,
     primaryStatus: 'operational',
     primaryLatencyMs: 220,
+    primaryPingLatencyMs: 12,
     availability7d: 99.1,
-    lastCheckedAt: '2026-08-01T06:00:00Z',
+    lastCheckedAt: null,
   }]);
 });
 

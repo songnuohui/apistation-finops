@@ -1281,7 +1281,7 @@ export class PostgresRepository {
         SELECT DISTINCT ON (monitor_group_id)
                monitor_group_id,status,available_account_count,total_account_count,
                group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
-               source_availability_percent,observed_at
+               average_ping_latency_ms,source_availability_percent,observed_at
         FROM ${this.schema}.monitor_group_observations
         WHERE observation_source='sub2api_channel_monitor'
         ORDER BY monitor_group_id,observed_at DESC,id DESC
@@ -1290,7 +1290,7 @@ export class PostgresRepository {
              l.status,l.available_account_count,l.total_account_count,
              c.rate_multiplier AS configured_group_multiplier,
              l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,
-             l.source_availability_percent,l.observed_at,
+             l.average_ping_latency_ms,l.source_availability_percent,l.observed_at,
              r.observation_count,r.available_count
       FROM ${this.schema}.monitor_groups g
       LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
@@ -1312,6 +1312,7 @@ export class PostgresRepository {
       userMultiplier: nullableNumber(row.user_multiplier),
       effectiveMultiplier: nullableNumber(row.effective_multiplier),
       averageLatencyMs: nullableNumber(row.average_latency_ms),
+      averagePingLatencyMs: nullableNumber(row.average_ping_latency_ms),
       lastObservedAt: row.observed_at || null,
       availabilityPercent: nullableNumber(row.source_availability_percent)
         ?? (row.status && row.status !== 'unknown' && number(row.observation_count)

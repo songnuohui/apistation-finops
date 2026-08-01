@@ -54,15 +54,16 @@ test('configuration rejects legacy automatic USD-to-CNY conversion', () => {
 
 test('channel monitor summaries use operational and degraded checks as available', () => {
   assert.deepEqual(summarizeChannelMonitorGroup([
-    { enabled: true, primaryStatus: 'operational', availability7d: 99.5, primaryLatencyMs: 120 },
-    { enabled: true, primaryStatus: 'degraded', availability7d: 98.5, primaryLatencyMs: 180 },
-    { enabled: false, primaryStatus: 'failed', availability7d: 0, primaryLatencyMs: 999 },
+    { enabled: true, primaryStatus: 'operational', availability7d: 99.5, primaryLatencyMs: 120, primaryPingLatencyMs: 5 },
+    { enabled: true, primaryStatus: 'degraded', availability7d: 98.5, primaryLatencyMs: 180, primaryPingLatencyMs: 7 },
+    { enabled: false, primaryStatus: 'failed', availability7d: 0, primaryLatencyMs: 999, primaryPingLatencyMs: 999 },
   ]), {
     status: 'degraded',
     availableCount: 2,
     totalCount: 2,
     availabilityPercent: 99,
     averageLatencyMs: 150,
+    averagePingLatencyMs: 6,
   });
   assert.equal(summarizeChannelMonitorGroup([{ enabled: true, primaryStatus: 'failed' }]).status, 'unavailable');
   assert.equal(summarizeChannelMonitorGroup([{ enabled: true }]).status, 'unknown');

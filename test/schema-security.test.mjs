@@ -91,6 +91,13 @@ test('monitor settings migration remains FinOps-owned and excludes account pool 
   assert.doesNotMatch(migration, /account_count|account pool/i);
 });
 
+test('monitor PING latency migration remains FinOps-owned', () => {
+  const migration = read('migrations/009_monitor_ping_latency.sql');
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS average_ping_latency_ms INTEGER/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /credentials|api_key/i);
+});
+
 test('immutable cost snapshot migration is isolated from sub2api and preserves unpriced history', () => {
   const migration = read('migrations/005_cost_snapshot_ledger.sql');
   const sync = read('src/services/sync-service.mjs');

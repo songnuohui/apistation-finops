@@ -60,6 +60,9 @@ function card(group) {
   const latency = group.averageLatencyMs === null || group.averageLatencyMs === undefined
     ? '--'
     : `${number(group.averageLatencyMs)}<span class="metric-unit">ms</span>`;
+  const pingLatency = group.averagePingLatencyMs === null || group.averagePingLatencyMs === undefined
+    ? '--'
+    : `${number(group.averagePingLatencyMs)}<span class="metric-unit">ms</span>`;
   return `<article class="group-card is-${escapeHtml(status)}">
     <header class="group-card-header">
       <div class="group-title">
@@ -73,7 +76,8 @@ function card(group) {
     </header>
     <div class="group-multiplier"><span>当前倍率</span><strong>${escapeHtml(multiplier(group.configuredGroupMultiplier))}</strong></div>
     <div class="metric-row">
-      <div class="metric-box"><span class="metric-label">响应延迟</span><strong class="metric-value">${latency}</strong></div>
+      <div class="metric-box"><span class="metric-label">对话延迟</span><strong class="metric-value">${latency}</strong></div>
+      <div class="metric-box"><span class="metric-label">站点 PING</span><strong class="metric-value">${pingLatency}</strong></div>
     </div>
     <section class="availability">
       <div class="availability-head"><span>可用性 · 7 天</span><strong>${group.availabilityPercent === null || group.availabilityPercent === undefined ? '--' : `${number(group.availabilityPercent, 2)}%`}</strong></div>
@@ -81,7 +85,6 @@ function card(group) {
       <div class="history" aria-label="近 60 次观测状态">${historyBars(group.history)}</div>
       <div class="history-labels"><span>past</span><span>now</span></div>
     </section>
-    <footer class="group-card-footer"><span>来源分组 #${escapeHtml(group.sourceGroupId)}</span><span>倍率与状态来自 FinOps 快照</span></footer>
   </article>`;
 }
 

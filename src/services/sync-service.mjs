@@ -109,6 +109,7 @@ export function summarizeChannelMonitorGroup(monitors = []) {
       totalCount: 0,
       availabilityPercent: null,
       averageLatencyMs: null,
+      averagePingLatencyMs: null,
     };
   }
   const statuses = enabled.map((monitor) => String(monitor.primaryStatus || '').trim().toLowerCase());
@@ -121,6 +122,9 @@ export function summarizeChannelMonitorGroup(monitors = []) {
     .filter(Number.isFinite);
   const latencyValues = enabled
     .map((monitor) => Number(monitor.primaryLatencyMs))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const pingLatencyValues = enabled
+    .map((monitor) => Number(monitor.primaryPingLatencyMs))
     .filter((value) => Number.isFinite(value) && value >= 0);
   let status = 'unknown';
   if (known.length) {
@@ -137,6 +141,9 @@ export function summarizeChannelMonitorGroup(monitors = []) {
       : null,
     averageLatencyMs: latencyValues.length
       ? Math.round(latencyValues.reduce((total, value) => total + value, 0) / latencyValues.length)
+      : null,
+    averagePingLatencyMs: pingLatencyValues.length
+      ? Math.round(pingLatencyValues.reduce((total, value) => total + value, 0) / pingLatencyValues.length)
       : null,
   };
 }
@@ -437,14 +444,15 @@ export class SyncService {
           INSERT INTO ${this.schema}.monitor_group_observations(
             monitor_group_id,status,available_account_count,total_account_count,
             group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
-            source_availability_percent,observation_source)
-          VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,'sub2api_channel_monitor')`,
+            average_ping_latency_ms,source_availability_percent,observation_source)
+          VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,$7,'sub2api_channel_monitor')`,
         [
           group.id,
           summary.status,
           summary.availableCount,
           summary.totalCount,
           summary.averageLatencyMs,
+          summary.averagePingLatencyMs,
           summary.availabilityPercent,
         ]);
       }
