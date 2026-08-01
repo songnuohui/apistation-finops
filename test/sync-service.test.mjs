@@ -4,6 +4,7 @@ import {
   assertSourceUnitContract, COST_SNAPSHOT_COLUMN_COUNT, MAX_USAGE_ROWS_PER_INSERT,
   REQUIRED_SOURCE_COLUMNS,
   refundCashAmount, summarizeChannelMonitorGroup, SyncService, USAGE_COLUMN_COUNT,
+  USAGE_COST_SNAPSHOT_OPEN_DAYS,
 } from '../src/services/sync-service.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { assertDistinctDatabases } from '../src/db.mjs';
@@ -22,6 +23,7 @@ test('cash refund rounds to payment currency precision and rejects invalid total
 test('large usage batches stay below PostgreSQL bind parameter limits', () => {
   assert.ok(MAX_USAGE_ROWS_PER_INSERT > 0);
   assert.ok(MAX_USAGE_ROWS_PER_INSERT * USAGE_COLUMN_COUNT <= 65000);
+  assert.equal(USAGE_COST_SNAPSHOT_OPEN_DAYS, 1);
 });
 
 test('CNY source-unit contract rejects accidental USD accounting before any sync query', async () => {

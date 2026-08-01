@@ -22,6 +22,7 @@ export const USAGE_COLUMN_COUNT = USAGE_COLUMNS.length;
 export const MAX_USAGE_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / USAGE_COLUMN_COUNT));
 export const COST_SNAPSHOT_BATCH_SIZE = 10_000;
 export const COST_SNAPSHOT_OPEN_DAYS = 3;
+export const USAGE_COST_SNAPSHOT_OPEN_DAYS = 1;
 export const COST_SNAPSHOT_COLUMN_COUNT = 24;
 export const MAX_COST_SNAPSHOT_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / COST_SNAPSHOT_COLUMN_COUNT));
 
@@ -693,7 +694,7 @@ export class SyncService {
         COST_SNAPSHOT_BATCH_SIZE,
         refreshOpenDay,
         this.config.timezone || 'UTC',
-        COST_SNAPSHOT_OPEN_DAYS,
+        USAGE_COST_SNAPSHOT_OPEN_DAYS,
         refreshStartedAt,
       ]);
       if (!pending.rowCount) break;
@@ -826,7 +827,7 @@ export class SyncService {
         AND occurred_at < (
           date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
           - (($2::int - 1) * INTERVAL '1 day')
-        )`, [this.config.timezone || 'UTC', COST_SNAPSHOT_OPEN_DAYS]);
+        )`, [this.config.timezone || 'UTC', USAGE_COST_SNAPSHOT_OPEN_DAYS]);
     return result.rowCount;
   }
 
