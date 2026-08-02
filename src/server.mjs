@@ -159,6 +159,7 @@ async function api(request,res,url){
   const range=()=>resolveRange(url.searchParams,new Date(),config.timezone),page=()=>pagination(url.searchParams);
   if(request.method==='GET'&&url.pathname==='/api/bootstrap')return json(res,200,await repository.getBootstrap());
   if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await repository.getSummary(range()));
+  if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await repository.getOverviewDashboard(range()));
   if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await repository.getTrend(range()));
   if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await repository.getUsageBreakdown({...range(),...page()}));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);

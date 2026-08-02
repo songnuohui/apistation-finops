@@ -317,6 +317,41 @@ export class DemoRepository {
     };
   }
 
+  async getOverviewDashboard() {
+    const summary = await this.getSummary();
+    const rank = (key) => this.users
+      .filter((item) => Number(item[key] || 0) > 0)
+      .sort((left, right) => Number(right[key] || 0) - Number(left[key] || 0) || Number(left.id) - Number(right.id))
+      .slice(0, 8)
+      .map((item) => ({
+        id: item.id,
+        email: item.email,
+        username: item.username,
+        tokens: Number(item.tokens || 0),
+        requests: Number(item.requests || 0),
+        cashPaidCny: Number(item.cashPaidCny || 0),
+      }));
+    const giftAmountCny = this.users.reduce((total, item) => (
+      total + Number(item.adminCreditCny || 0) + Number(item.redeemedCreditCny || 0) + Number(item.affiliateCreditCny || 0)
+    ), 0);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      summary,
+      totals: {
+        giftAmountCny,
+        giftCount: giftAmountCny ? 1 : 0,
+        balanceCny: this.users.reduce((total, item) => total + Number(item.balanceCny || 0), 0),
+        balanceUserCount: this.users.filter((item) => Number(item.balanceCny || 0) > 0).length,
+      },
+      rankings: {
+        tokenUsage: rank('tokens'),
+        cashRecharge: rank('cashPaidCny'),
+        requestActivity: rank('requests'),
+      },
+    };
+  }
+
   async getTrend({ preset = '7d', dailyStart, dailyEnd } = {}) {
     const rechargeEvents = this.cashTransactions
       .filter((item) => item.type === 'recharge' && item.direction === 'in')

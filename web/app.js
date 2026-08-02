@@ -15,6 +15,7 @@ const state = {
   userSort: 'userChargeCny',
   userSortDirection: 'desc',
   overviewTrend: null,
+  overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
   userDetail: null,
   monitorCandidates: new Map(),
 };
@@ -82,6 +83,33 @@ function dateTimeInputValue(value) {
 
 function metric(label, value, hint = '', tone = '') {
   return `<div class="metric ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
+}
+
+function maskedIdentity(value) {
+  const text = String(value || '');
+  if (!text) return '用户';
+  const at = text.indexOf('@');
+  if (at > 0) return `${text.slice(0, Math.min(2, at))}****${text.slice(at)}`;
+  return `${text.slice(0, Math.min(2, text.length))}****`;
+}
+
+function overviewIdentity(item, field = 'email') {
+  const value = item[field] || (field === 'email' ? item.username : '') || `用户 #${item.id}`;
+  return state.overviewAccountMasked ? maskedIdentity(value) : String(value);
+}
+
+function dashboardRankList(items, { value, detail }) {
+  if (!items.length) return '<div class="dashboard-rank-empty">当前周期暂无数据</div>';
+  return items.map((item, index) => {
+    const secondary = item.username && item.username !== item.email
+      ? `<small>${escapeHtml(state.overviewAccountMasked ? maskedIdentity(item.username) : item.username)}</small>`
+      : '';
+    return `<div class="dashboard-rank-item">
+      <span class="dashboard-rank-index">${index + 1}</span>
+      <div class="dashboard-rank-user"><strong>${escapeHtml(overviewIdentity(item))}</strong>${secondary}</div>
+      <div class="dashboard-rank-value"><strong>${value(item)}</strong><small>${detail(item)}</small></div>
+    </div>`;
+  }).join('');
 }
 
 function section(titleText, description) {
@@ -433,35 +461,63 @@ function applyCustomRange() {
 }
 
 async function renderOverview() {
-  const [summary, trendData, modelData] = await Promise.all([
-    api('/summary'), api('/trend'), api(`/usage/models?${queryFor('overviewModels')}`),
+  const [dashboard, trendData, modelData] = await Promise.all([
+    api('/overview-dashboard'), api('/trend'), api(`/usage/models?${queryFor('overviewModels')}`),
   ]);
+  const summary = dashboard.summary;
   const operations = summary.operations;
   const cash = summary.cash;
-  state.lastExport = modelData.items;
-  content.innerHTML = `${section('现金', '只统计支付订单实际收款、确认退款和已登记支出')}
-    <div class="metric-grid">
-      ${metric('充值实收', cny(cash.received), '已支付余额订单的 pay_amount', 'good')}
-      ${metric('现金退款', cny(cash.refunds), '按支付比例折算', 'warn')}
-      ${metric('采购支出', cny(cash.procurementSpend), '已登记的账号与供应商支出', 'warn')}
-      ${metric('现金净流入', cny(cash.netInflow), '实收减退款、手续费和采购', cash.netInflow >= 0 ? 'good' : 'bad')}
+  const totalTokens = Number(summary.usage.inputTokens || 0)
+    + Number(summary.usage.outputTokens || 0)
+    + Number(summary.usage.cacheTokens || 0);
+  const netRecharge = Number(cash.received || 0) - Number(cash.refunds || 0);
+  state.lastExport = [
+    ...dashboard.rankings.requestActivity.map((item) => ({ ranking: '请求活跃度', ...item })),
+    ...dashboard.rankings.tokenUsage.map((item) => ({ ranking: 'Token 使用排行', ...item })),
+    ...dashboard.rankings.cashRecharge.map((item) => ({ ranking: '用户充值排行', ...item })),
+  ];
+  content.innerHTML = `<div class="dashboard-meta"><span>运营看板</span><small>更新于 ${dateTime(dashboard.generatedAt)}</small></div>
+    <div class="dashboard-metric-grid">
+      ${metric('净充值', cny(netRecharge), `总充值 ${cny(cash.received)}`, netRecharge >= 0 ? 'good' : 'bad')}
+      ${metric('赠送金额', cny(dashboard.totals.giftAmountCny), `${compact(dashboard.totals.giftCount)} 笔非现金入账`)}
+      ${metric('总退款', cny(cash.refunds), '已确认退款', 'warn')}
+      ${metric('总消耗', cny(operations.consumptionCny ?? operations.userChargeCny), `${compact(summary.usage.requests)} 次请求`, 'good')}
+      ${metric('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户`)}
+      ${metric('总 Token', compact(totalTokens), '输入、输出与缓存合计')}
     </div>
-    ${section('经营核算', '收入采用 sub2api usage_logs.actual_cost，即用户实际被扣的人民币余额')}
-    <div class="metric-grid">
-      ${metric('用户实际消费', cny(operations.consumptionCny ?? operations.userChargeCny), 'sub2api 实际扣费口径', 'good')}
-      ${metric('已登记成本', cny(operations.bookedCostCny), '账号成本期间按规则摊销', 'warn')}
-      ${metric('经营毛利', cny(operations.bookedProfitCny), '实际消费减已登记成本', operations.bookedProfitCny >= 0 ? 'good' : 'bad')}
-      ${metric('经营毛利率', percent(operations.grossMargin), '成本未覆盖时仅供参考', operations.unbookedAccountCount ? 'warn' : 'good')}
-      ${metric('成本覆盖', operations.unbookedAccountCount ? `待补 ${compact(operations.unbookedAccountCount)} 个` : '已覆盖', operations.unbookedAccountCount ? `涉及消费 ${cny(operations.unbookedUserChargeCny)}` : '当前有用量账号均已登记', operations.unbookedAccountCount ? 'warn' : 'good')}
+    <div class="overview-ranking-grid">
+      <section class="panel dashboard-rank-panel">
+        <div class="panel-header"><h2>请求活跃度</h2><span>${compact(summary.usage.activeUsers)} 位活跃用户</span></div>
+        <div class="dashboard-rank-list">${
+          dashboardRankList(dashboard.rankings.requestActivity, {
+            value: (item) => `${compact(item.requests)} 次`,
+            detail: (item) => `${compact(item.tokens)} Token`,
+          })
+        }</div>
+      </section>
+      <section class="panel dashboard-rank-panel">
+        <div class="panel-header">
+          <h2>Token 使用排行</h2>
+          <label class="visibility-toggle"><input type="checkbox" data-overview-mask ${state.overviewAccountMasked ? 'checked' : ''}><span>隐藏账号</span></label>
+        </div>
+        <div class="dashboard-rank-list">${
+          dashboardRankList(dashboard.rankings.tokenUsage, {
+            value: (item) => compact(item.tokens),
+            detail: (item) => `${compact(item.requests)} 次请求`,
+          })
+        }</div>
+      </section>
+      <section class="panel dashboard-rank-panel">
+        <div class="panel-header"><h2>用户充值排行</h2><span>${compact(dashboard.rankings.cashRecharge.length)} 位用户</span></div>
+        <div class="dashboard-rank-list">${
+          dashboardRankList(dashboard.rankings.cashRecharge, {
+            value: (item) => cny(item.cashPaidCny),
+            detail: () => '现金实收',
+          })
+        }</div>
+      </section>
     </div>
-    ${section('用量', '请求和 Token 规模')}
-    <div class="metric-grid">
-      ${metric('请求', compact(summary.usage.requests), '当前周期')}
-      ${metric('输入 Token', compact(summary.usage.inputTokens), 'Input')}
-      ${metric('输出 Token', compact(summary.usage.outputTokens), 'Output')}
-      ${metric('缓存 Token', compact(summary.usage.cacheTokens), '创建与读取')}
-      ${metric('平均耗时', `${(summary.usage.averageLatencyMs / 1000).toFixed(2)}s`, `${summary.usage.activeUsers} 用户 · ${summary.usage.activeAccounts} 账号`)}
-    </div>
+    ${section('经营趋势', '实际消费、已登记成本和经营毛利按日汇总')}
     <div class="split">
       <section class="panel"><div class="panel-header"><h2>实际消费、成本与毛利趋势</h2><span>按日</span></div><div class="chart-wrap"><canvas id="trend-chart"></canvas></div></section>
       <section class="panel"><div class="panel-header"><h2>待处理事项</h2><span>${summary.alerts.length} 项</span></div><div class="alert-list">${
@@ -1621,6 +1677,13 @@ content.addEventListener('click', (event) => {
 content.addEventListener('change', (event) => {
   const sizeSelect = event.target.closest('[data-page-size]');
   const accountSelect = event.target.closest('[data-account-select]');
+  const overviewMask = event.target.closest('[data-overview-mask]');
+  if (overviewMask) {
+    state.overviewAccountMasked = overviewMask.checked;
+    window.localStorage.setItem('finops.overview-account-masked', String(state.overviewAccountMasked));
+    renderOverview();
+    return;
+  }
   if (sizeSelect) {
     const current = tableState(sizeSelect.dataset.pageSize);
     current.pageSize = Number(sizeSelect.value);

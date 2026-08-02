@@ -258,6 +258,93 @@ export class PostgresRepository {
     };
   }
 
+  async getOverviewDashboard({ start, end, dailyStart = start, dailyEnd = end }) {
+    const [summary, totals, tokenUsage, cashRecharge, requestActivity] = await Promise.all([
+      this.getSummary({ start, end }),
+      this.pool.query(`
+        SELECT
+          COALESCE(SUM(credit_amount) FILTER (
+            WHERE direction='in'
+              AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
+              AND COALESCE(cash_basis_cny,0)=0
+          ),0) AS gift_amount_cny,
+          COUNT(*) FILTER (
+            WHERE direction='in'
+              AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
+              AND COALESCE(cash_basis_cny,0)=0
+          ) AS gift_count,
+          (SELECT COALESCE(SUM(current_balance),0) FROM ${this.schema}.dim_users) AS balance_cny,
+          (SELECT COUNT(*) FILTER (WHERE current_balance > 0) FROM ${this.schema}.dim_users) AS balance_user_count
+        FROM ${this.schema}.credit_events
+        WHERE occurred_at >= $1 AND occurred_at < $2`,
+      [start, end]),
+      this.pool.query(`
+        SELECT u.source_user_id AS id,u.email,u.username,
+               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens,
+               COALESCE(SUM(d.requests),0)::float8 AS requests
+        FROM ${this.schema}.fact_usage_daily d
+        JOIN ${this.schema}.dim_users u ON u.source_user_id=d.source_user_id
+        WHERE d.day >= $1::date AND d.day <= $2::date AND d.source_user_id <> 0
+        GROUP BY u.source_user_id,u.email,u.username
+        HAVING COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0) > 0
+        ORDER BY tokens DESC,u.source_user_id ASC
+        LIMIT 8`,
+      [dailyStart, dailyEnd]),
+      this.pool.query(`
+        SELECT u.source_user_id AS id,u.email,u.username,
+               COALESCE(SUM(c.base_amount),0) AS cash_paid_cny
+        FROM ${this.schema}.cash_transactions c
+        JOIN ${this.schema}.dim_users u ON u.source_user_id=c.source_user_id
+        WHERE c.transaction_type='recharge' AND c.direction='in' AND c.status <> 'void'
+          AND c.occurred_at >= $1 AND c.occurred_at < $2
+        GROUP BY u.source_user_id,u.email,u.username
+        HAVING COALESCE(SUM(c.base_amount),0) > 0
+        ORDER BY cash_paid_cny DESC,u.source_user_id ASC
+        LIMIT 8`,
+      [start, end]),
+      this.pool.query(`
+        SELECT u.source_user_id AS id,u.email,u.username,
+               COALESCE(SUM(d.requests),0)::float8 AS requests,
+               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens
+        FROM ${this.schema}.fact_usage_daily d
+        JOIN ${this.schema}.dim_users u ON u.source_user_id=d.source_user_id
+        WHERE d.day >= $1::date AND d.day <= $2::date AND d.source_user_id <> 0
+        GROUP BY u.source_user_id,u.email,u.username
+        HAVING COALESCE(SUM(d.requests),0) > 0
+        ORDER BY requests DESC,u.source_user_id ASC
+        LIMIT 8`,
+      [dailyStart, dailyEnd]),
+    ]);
+    const total = totals.rows[0] || {};
+    const rank = (rows, fields) => rows.map((row) => ({
+      id: number(row.id),
+      email: row.email || '',
+      username: row.username || '',
+      ...Object.fromEntries(fields.map((field) => [field, number(row[field])])),
+    }));
+
+    return {
+      generatedAt: new Date().toISOString(),
+      summary,
+      totals: {
+        giftAmountCny: number(total.gift_amount_cny),
+        giftCount: number(total.gift_count),
+        balanceCny: number(total.balance_cny),
+        balanceUserCount: number(total.balance_user_count),
+      },
+      rankings: {
+        tokenUsage: rank(tokenUsage.rows, ['tokens', 'requests']),
+        cashRecharge: rank(cashRecharge.rows, ['cash_paid_cny']).map((item) => ({
+          id: item.id,
+          email: item.email,
+          username: item.username,
+          cashPaidCny: item.cash_paid_cny,
+        })),
+        requestActivity: rank(requestActivity.rows, ['requests', 'tokens']),
+      },
+    };
+  }
+
   async getTrend({ start, end, dailyStart = start, dailyEnd = end, preset = '7d' }) {
     const [result, rechargeEvents] = await Promise.all([this.pool.query(`
       WITH days AS (

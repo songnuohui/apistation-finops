@@ -31,6 +31,16 @@ test('manual cash transactions are searchable and update the funds summary', asy
   assert.equal(after.summary.outflow, before.summary.outflow + 12.5);
 });
 
+test('overview dashboard returns complete identities and real ranking metrics', async () => {
+  const repository = new DemoRepository(config);
+  const dashboard = await repository.getOverviewDashboard();
+  assert.ok(dashboard.totals.balanceCny > 0);
+  assert.equal(dashboard.rankings.tokenUsage[0].email, 'nuohuisong@gmail.com');
+  assert.ok(dashboard.rankings.tokenUsage[0].tokens > 0);
+  assert.ok(dashboard.rankings.requestActivity[0].requests > 0);
+  assert.ok(dashboard.rankings.cashRecharge[0].cashPaidCny > 0);
+});
+
 test('supplier overview groups account economics and exposes purchase rows', async () => {
   const repository = new DemoRepository(config);
   const overview = await repository.getSupplierOverview({ search: 'Cloud Seats' });
