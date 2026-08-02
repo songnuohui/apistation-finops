@@ -13,6 +13,8 @@ services:
       - "127.0.0.1:${FINOPS_PORT:-8092}:8090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - postgres
     init: true
     mem_limit: 384m
     cpus: 0.75
@@ -38,3 +40,8 @@ services:
         max-size: 10m
         max-file: "3"
     stop_grace_period: 15s
+
+networks:
+  postgres:
+    external: true
+    name: "${APISTATION_POSTGRES_NETWORK:?Set APISTATION_POSTGRES_NETWORK to the existing PostgreSQL Docker network}"
