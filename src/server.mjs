@@ -15,15 +15,20 @@ import {
 import { accountScope, resolveRange, pagination, searchTerm } from './http/query.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
-  normalizeBulkAccountCostPeriods, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
+  normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings,
+  normalizeUserBalanceStatsWhitelist,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
 import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
+import { ResponseCacheService } from './services/response-cache-service.mjs';
+import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
+  getSub2ApiRuntimeQueueStatus,
+  listSub2ApiAdministratorUserConcurrency,
   listSub2ApiChannelMonitors,
   listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
@@ -38,10 +43,18 @@ const sourcePool=createSourcePool(config);
 const finopsPool=createFinopsPool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
+const responseCache=new ResponseCacheService(config);
+const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const pendingLogins=new PendingLoginStore();
 syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
 syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
+syncService?.setRuntimeStatusReader(({accessToken})=>Promise.all([
+  getSub2ApiRuntimeQueueStatus({accessToken},config),
+  listSub2ApiAdministratorUserConcurrency({accessToken},config),
+]).then(([queue, users])=>({queue,users})));
+syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listActiveUserConcurrency());
+syncService?.setReadCacheInvalidator(()=>responseCache.invalidate());
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
 function setHeaders(res,{embeddable=false}={}){
@@ -130,6 +143,7 @@ async function login(request,res){
     syncService?.setSub2ApiAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
     await syncService?.refreshChannelMonitorSnapshots();
+    await syncService?.refreshRuntimeSnapshots();
     res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
     return json(res,200,{ok:true,user:result.user});
   }catch(error){
@@ -147,6 +161,7 @@ async function loginTwoFactor(request,res){
     syncService?.setSub2ApiAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
     await syncService?.refreshChannelMonitorSnapshots();
+    await syncService?.refreshRuntimeSnapshots();
     res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),sessionCookie(result.user,config)]);
     return json(res,200,{ok:true,user:result.user});
   }catch(error){
@@ -157,23 +172,25 @@ async function loginTwoFactor(request,res){
 async function api(request,res,url){
   const auth=authorize(request,config);if(!auth.ok)return json(res,401,{error:'unauthorized'});
   const range=()=>resolveRange(url.searchParams,new Date(),config.timezone),page=()=>pagination(url.searchParams);
-  if(request.method==='GET'&&url.pathname==='/api/bootstrap')return json(res,200,await repository.getBootstrap());
-  if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await repository.getSummary(range()));
-  if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await repository.getOverviewDashboard(range()));
-  if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await repository.getTrend(range()));
-  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await repository.getUsageBreakdown({...range(),...page()}));
+  if(request.method!=='GET')await responseCache.invalidate();
+  const cached=(scope,ttl,loader)=>responseCache.remember(scope,`${request.method}:${url.pathname}?${url.searchParams.toString()}`,ttl,loader);
+  if(request.method==='GET'&&url.pathname==='/api/bootstrap')return json(res,200,await cached('bootstrap',config.dashboardCacheTtlSeconds,()=>repository.getBootstrap()));
+  if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>repository.getSummary(range())));
+  if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>repository.getOverviewDashboard(range())));
+  if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>repository.getTrend(range())));
+  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>repository.getUsageBreakdown({...range(),...page()})));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&userDetails){
     const userId=Number(userDetails[1]);
-    return json(res,200,await repository.getUserDetails({
+    return json(res,200,await cached('user-details',config.listCacheTtlSeconds,()=>repository.getUserDetails({
       ...range(),userId,recharge:detailPagination(url.searchParams,'recharge'),
       usage:detailPagination(url.searchParams,'usage'),
-    }));
+    })));
   }
   if(request.method==='GET'&&url.pathname==='/api/users'){
-    return json(res,200,await repository.listUsers({
+    return json(res,200,await cached('users',config.listCacheTtlSeconds,()=>repository.listUsers({
       ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),
-    }));
+    })));
   }
   const accountCostHistory=/^\/api\/accounts\/(\d+)\/cost-periods$/.exec(url.pathname);
   if(request.method==='GET'&&accountCostHistory){
@@ -187,13 +204,20 @@ async function api(request,res,url){
       accountId:Number(accountRuleHistory[1]),...page(),
     }));
   }
-  if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await repository.listAccounts({
+  if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await cached('accounts',config.listCacheTtlSeconds,()=>repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
-  }));
-  if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)}));
-  if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams)}));
-  if(request.method==='GET'&&url.pathname==='/api/reconciliation')return json(res,200,await repository.getReconciliation(range()));
-  if(request.method==='GET'&&url.pathname==='/api/cost-profiles')return json(res,200,await repository.listCostProfiles());
+  })));
+  if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/runtime'){
+    if(url.searchParams.get('refresh')==='1'){
+      await syncService?.refreshRuntimeSnapshots();
+      await responseCache.invalidate();
+    }
+    return json(res,200,await cached('runtime',config.runtimeCacheTtlSeconds,()=>repository.getRuntimeDashboard()));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/reconciliation')return json(res,200,await cached('reconciliation',config.listCacheTtlSeconds,()=>repository.getReconciliation(range())));
+  if(request.method==='GET'&&url.pathname==='/api/cost-profiles')return json(res,200,await cached('cost-profiles',config.listCacheTtlSeconds,()=>repository.listCostProfiles()));
   if(request.method==='GET'&&url.pathname==='/api/sync-state')return json(res,200,await repository.getSyncState());
   if(request.method==='GET'&&url.pathname==='/api/sync-details')return json(res,200,await repository.getSyncDetails());
   if(request.method==='GET'&&url.pathname==='/api/monitor-groups')return json(res,200,await repository.listMonitorGroups());
@@ -214,6 +238,17 @@ async function api(request,res,url){
   }
   if(request.method==='POST'&&url.pathname==='/api/account-cost-periods'){
     return json(res,201,await repository.createAccountCostPeriod(normalizeAccountCostPeriod(await body(request)),auth.actor));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/users/balance-statistics-whitelist'){
+    return json(res,200,await repository.setBulkUserBalanceStatsWhitelist(
+      normalizeBulkUserBalanceStatsWhitelist(await body(request)),auth.actor,
+    ));
+  }
+  const userBalanceStatsWhitelist=/^\/api\/users\/(\d+)\/balance-statistics-whitelist$/.exec(url.pathname);
+  if(request.method==='PATCH'&&userBalanceStatsWhitelist){
+    return json(res,200,await repository.setUserBalanceStatsWhitelist(
+      Number(userBalanceStatsWhitelist[1]),normalizeUserBalanceStatsWhitelist(await body(request)),auth.actor,
+    ));
   }
   if(request.method==='POST'&&url.pathname==='/api/account-cost-periods/bulk'){
     return json(res,201,await repository.createBulkAccountCostPeriods(normalizeBulkAccountCostPeriods(await body(request)),auth.actor));
@@ -255,14 +290,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility']],
   );
-  if(migration.rowCount < 12)throw new Error('required FinOps migrations 002_cny_accounting through 013_audited_cost_repricing are not applied');
+  if(migration.rowCount < 13)throw new Error('required FinOps migrations 002_cny_accounting through 014_operational_visibility are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };
@@ -272,7 +307,7 @@ const server=http.createServer(async(request,res)=>{
   const started=Date.now();
   try{
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
-    if(url.pathname==='/health')return json(res,200,{status:'ok',mode:config.demoMode?'demo':'database',uptimeSeconds:Math.round(process.uptime())});
+    if(url.pathname==='/health')return json(res,200,{status:'ok',mode:config.demoMode?'demo':'database',uptimeSeconds:Math.round(process.uptime()),cache:responseCache.status()});
     if(url.pathname==='/ready'){
       try{return json(res,200,await readiness());}
       catch(error){console.error('[ready]',error);return json(res,503,{status:'not_ready'});}
@@ -309,6 +344,6 @@ async function start(){
   if(syncService&&config.syncEnabled){await syncService.validateSourceSchema();syncService.start();}
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

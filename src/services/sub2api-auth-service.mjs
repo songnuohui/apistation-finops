@@ -158,6 +158,12 @@ function optionalInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function pagedItems(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.items)) return value.items;
+  return [];
+}
+
 export async function listSub2ApiChannelMonitors({ accessToken }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
   if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
@@ -194,4 +200,65 @@ export async function listSub2ApiChannelMonitors({ accessToken }, config, fetchI
       lastCheckedAt: monitor.last_checked_at || null,
     }];
   });
+}
+
+export async function listSub2ApiAdministratorUserConcurrency({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+  const token = String(accessToken || '').trim();
+  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
+  const payload = await request(
+    config.sub2apiAuthUrl,
+    `/api/v1/admin/users?page=1&page_size=${config.sub2apiRuntimePageSize}&status=active&sort_by=current_concurrency&sort_order=desc`,
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
+      },
+    },
+    config.sub2apiAuthTimeoutMs,
+    fetchImpl,
+  );
+  return pagedItems(payload).flatMap((user) => {
+    const sourceUserId = optionalInteger(user?.id);
+    if (!sourceUserId || sourceUserId <= 0) return [];
+    return [{
+      sourceUserId,
+      email: String(user.email || '').trim().slice(0, 255),
+      username: String(user.username || '').trim().slice(0, 100),
+      maxConcurrency: Math.max(0, optionalInteger(user.concurrency) || 0),
+      currentConcurrency: Math.max(0, optionalInteger(user.current_concurrency) || 0),
+    }];
+  });
+}
+
+export async function getSub2ApiRuntimeQueueStatus({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+  const token = String(accessToken || '').trim();
+  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
+  const payload = await request(
+    config.sub2apiAuthUrl,
+    '/api/v1/admin/risk-control/status',
+    {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
+      },
+    },
+    config.sub2apiAuthTimeoutMs,
+    fetchImpl,
+  );
+  return {
+    enabled: payload?.enabled === true,
+    mode: String(payload?.mode || '').trim().slice(0, 32),
+    workerCount: Math.max(0, optionalInteger(payload?.worker_count) || 0),
+    activeWorkers: Math.max(0, optionalInteger(payload?.active_workers) || 0),
+    idleWorkers: Math.max(0, optionalInteger(payload?.idle_workers) || 0),
+    queueSize: Math.max(0, optionalInteger(payload?.queue_size) || 0),
+    queueLength: Math.max(0, optionalInteger(payload?.queue_length) || 0),
+    queueUsagePercent: Math.max(0, optionalNumber(payload?.queue_usage_percent) || 0),
+    processed: Math.max(0, optionalInteger(payload?.processed) || 0),
+    errors: Math.max(0, optionalInteger(payload?.errors) || 0),
+  };
 }

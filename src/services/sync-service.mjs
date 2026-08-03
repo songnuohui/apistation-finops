@@ -172,6 +172,9 @@ export class SyncService {
     this.channelMonitorReader = null;
     this.sourceGroupCatalogReader = null;
     this.sourceGroupCatalogWriter = null;
+    this.runtimeStatusReader = null;
+    this.runtimeConcurrencyReader = null;
+    this.readCacheInvalidator = null;
     this.sub2ApiAccessToken = '';
   }
 
@@ -185,6 +188,18 @@ export class SyncService {
 
   setSourceGroupCatalogWriter(writer) {
     this.sourceGroupCatalogWriter = typeof writer === 'function' ? writer : null;
+  }
+
+  setRuntimeStatusReader(reader) {
+    this.runtimeStatusReader = typeof reader === 'function' ? reader : null;
+  }
+
+  setRuntimeConcurrencyReader(reader) {
+    this.runtimeConcurrencyReader = typeof reader === 'function' ? reader : null;
+  }
+
+  setReadCacheInvalidator(invalidator) {
+    this.readCacheInvalidator = typeof invalidator === 'function' ? invalidator : null;
   }
 
   setSub2ApiAccessToken(accessToken) {
@@ -224,6 +239,85 @@ export class SyncService {
     const channelMonitors = await this.readChannelMonitors();
     if (!Array.isArray(channelMonitors)) return 0;
     return this.captureChannelMonitorGroupObservations(channelMonitors);
+  }
+
+  async refreshRuntimeSnapshots() {
+    let queue = null;
+    let users = [];
+    try {
+      if (this.runtimeStatusReader && this.sub2ApiAccessToken) {
+        const result = await this.runtimeStatusReader({ accessToken: this.sub2ApiAccessToken });
+        queue = result?.queue || null;
+        users = Array.isArray(result?.users) ? result.users : [];
+      }
+    } catch (error) {
+      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
+      await this.markSourceError('runtime_load', error);
+      this.logger.warn('[runtime] failed to read Sub2API runtime API snapshot', error?.code || error?.message || error);
+    }
+    try {
+      const redisUsers = await this.runtimeConcurrencyReader?.();
+      if (Array.isArray(redisUsers) && redisUsers.length) {
+        const userMap = new Map(users.map((user) => [Number(user.sourceUserId), user]));
+        for (const user of redisUsers) {
+          const sourceUserId = Number(user?.sourceUserId);
+          if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0) continue;
+          userMap.set(sourceUserId, {
+            ...(userMap.get(sourceUserId) || {}),
+            sourceUserId,
+            currentConcurrency: Number(user.currentConcurrency || 0),
+          });
+        }
+        users = [...userMap.values()];
+      }
+    } catch (error) {
+      this.logger.warn('[runtime] failed to read Sub2API Redis concurrency snapshot', error?.code || error?.message || error);
+    }
+    if (!queue && !users.length) return 0;
+    try {
+      return await inTransaction(this.finopsPool, async (client) => {
+        await this.cursor(client, 'runtime_load');
+        if (queue) await client.query(`
+          INSERT INTO ${this.schema}.runtime_queue_live(
+            source_name,enabled,mode,worker_count,active_workers,idle_workers,
+            queue_size,queue_length,queue_usage_percent,processed,errors,observed_at,synced_at)
+          VALUES('sub2api_risk_control',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+          ON CONFLICT(source_name) DO UPDATE SET
+            enabled=EXCLUDED.enabled,mode=EXCLUDED.mode,worker_count=EXCLUDED.worker_count,
+            active_workers=EXCLUDED.active_workers,idle_workers=EXCLUDED.idle_workers,
+            queue_size=EXCLUDED.queue_size,queue_length=EXCLUDED.queue_length,
+            queue_usage_percent=EXCLUDED.queue_usage_percent,processed=EXCLUDED.processed,
+            errors=EXCLUDED.errors,observed_at=NOW(),synced_at=NOW()`,
+        [
+          Boolean(queue.enabled), queue.mode || '', Number(queue.workerCount || 0),
+          Number(queue.activeWorkers || 0), Number(queue.idleWorkers || 0),
+          Number(queue.queueSize || 0), Number(queue.queueLength || 0),
+          Number(queue.queueUsagePercent || 0), Number(queue.processed || 0),
+          Number(queue.errors || 0),
+        ]);
+        for (const user of users) {
+          await client.query(`
+            INSERT INTO ${this.schema}.user_concurrency_live(
+              source_user_id,email,username,max_concurrency,current_concurrency,observed_at,synced_at)
+            VALUES($1,$2,$3,$4,$5,NOW(),NOW())
+            ON CONFLICT(source_user_id) DO UPDATE SET
+              email=COALESCE(NULLIF(EXCLUDED.email,''),user_concurrency_live.email),
+              username=COALESCE(NULLIF(EXCLUDED.username,''),user_concurrency_live.username),
+              max_concurrency=CASE WHEN EXCLUDED.max_concurrency>0 THEN EXCLUDED.max_concurrency ELSE user_concurrency_live.max_concurrency END,
+              current_concurrency=EXCLUDED.current_concurrency,observed_at=NOW(),synced_at=NOW()`,
+          [
+            user.sourceUserId, user.email || '', user.username || '',
+            Number(user.maxConcurrency || 0), Number(user.currentConcurrency || 0),
+          ]);
+        }
+        await this.markSuccess(client, 'runtime_load', null, users.length + 1);
+        return users.length;
+      });
+    } catch (error) {
+      await this.markSourceError('runtime_load', error);
+      this.logger.warn('[runtime] failed to persist Sub2API runtime snapshots', error?.code || error?.message || error);
+      return 0;
+    }
   }
 
   async validateSourceSchema() {
@@ -323,6 +417,7 @@ export class SyncService {
         (client) => this.captureFixedCostDailySnapshots(client, 'historical_backfill'),
       );
       const paymentRows = await this.drain('payment_orders', () => this.syncPayments());
+      const recentPaymentRows = await this.refreshRecentPayments();
       const redeemRows = await this.drain('redeem_codes', () => this.syncRedeemCodes());
       const affiliateRows = await this.drain('user_affiliate_ledger', () => this.syncAffiliateLedger());
       const auditRows = await this.drain('payment_audit_logs', () => this.syncPaymentAuditLogs());
@@ -332,6 +427,7 @@ export class SyncService {
       const usageRows = await this.drain('usage_logs', () => this.syncUsage());
       await this.refreshRecentUsage();
       const monitorObservationRows = await this.refreshChannelMonitorSnapshots();
+      const runtimeSnapshotRows = await this.refreshRuntimeSnapshots();
       const liveUsageSnapshotResult = await inTransaction(
         this.finopsPool,
         async (client) => ({
@@ -355,14 +451,20 @@ export class SyncService {
         throw error;
       }
       const result = {
-        skipped: false, usageRows, paymentRows, redeemRows, affiliateRows, auditRows, subscriptionRows,
+        skipped: false, usageRows, paymentRows, recentPaymentRows, redeemRows, affiliateRows, auditRows, subscriptionRows,
         monitorObservationRows,
+        runtimeSnapshotRows,
         historicalCostSnapshotRows, historicalFixedCostSnapshotRows,
         liveCostSnapshotRows: liveUsageSnapshotResult.rows,
         finalizedUsageCostSnapshotRows: liveUsageSnapshotResult.finalized,
         liveFixedCostSnapshotRows,
         durationMs: Date.now() - started,
       };
+      try {
+        await this.readCacheInvalidator?.();
+      } catch (error) {
+        this.logger.warn('[sync] failed to invalidate response cache', error?.message || error);
+      }
       this.logger.info('[sync] cycle complete', result);
       return result;
     } finally {
@@ -1531,6 +1633,33 @@ export class SyncService {
       INSERT INTO ${this.schema}.reconciliation_runs(reconciliation_type,period_start,period_end,status,source_total,finops_total,difference,details,completed_at)
       VALUES('usage_cny',$1,$2,CASE WHEN ABS($3::numeric-$4::numeric)<0.000001 THEN 'matched' ELSE 'warning' END,$3,$4,$3::numeric-$4::numeric,$5::jsonb,NOW())`,
     [start, end, sourceTotal, finopsTotal, JSON.stringify({ unit: 'CNY', sourceField: 'actual_cost', finopsField: 'user_charge_cny' })]);
+  }
+
+  async refreshRecentPayments() {
+    if (!this.config.syncLookbackSeconds) return 0;
+    const since = new Date(Date.now() - this.config.syncLookbackSeconds * 1000);
+    const orderFilter = this.config.subscriptionsEnabled ? '' : " AND COALESCE(order_type,'balance')='balance'";
+    const subscriptionColumns = this.config.subscriptionsEnabled
+      ? ',plan_id,subscription_group_id,subscription_days'
+      : '';
+    const sourceRows = await this.sourcePool.query(`
+      SELECT id,user_id,pay_amount,amount,COALESCE(provider_snapshot->>'currency','CNY') AS currency,
+        provider_snapshot,payment_type,order_type${subscriptionColumns},status,
+        refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at
+      FROM ${this.source}.payment_orders
+      WHERE updated_at >= $1${orderFilter}
+      ORDER BY updated_at DESC,id DESC LIMIT $2`,
+    [since, this.config.syncBatchSize]);
+    if (!sourceRows.rowCount) return 0;
+    return inTransaction(this.finopsPool, async (client) => {
+      const users = new Set();
+      for (const row of sourceRows.rows) {
+        const affectedUsers = await this.upsertPaymentRow(client, row);
+        for (const userId of affectedUsers) users.add(Number(userId));
+      }
+      for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
+      return sourceRows.rowCount;
+    });
   }
 
   async reconcileWalletBalances() {

@@ -121,10 +121,12 @@ export class PostgresRepository {
       FROM ${this.schema}.fact_usage_events
       WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
     const cash = await this.pool.query(`
-      SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='recharge' AND status <> 'void'),0) AS received,
+      SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND status <> 'void'),0) AS inflow,
+             COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='recharge' AND status <> 'void'),0) AS recharge_received,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='refund' AND status <> 'void'),0) AS refunds,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='gateway_fee'),0) AS gateway_fees,
-             COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type IN ('account_purchase','supplier_topup','subscription_renewal')),0) AS procurement_spend
+             COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type IN ('account_purchase','supplier_topup','subscription_renewal')),0) AS procurement_spend,
+             COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND status <> 'void'),0) AS outflow
       FROM ${this.schema}.cash_transactions
       WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
     const costs = await this.pool.query(`
@@ -201,10 +203,12 @@ export class PostgresRepository {
     const multiplierCostCny = number(cost.multiplier_cost_cny);
     const effectiveCost = number(cost.effective_cost_cny);
     const grossProfitCny = userChargeCny - effectiveCost;
-    const received = number(c.received);
+    const received = number(c.inflow);
+    const rechargeReceived = number(c.recharge_received);
     const refunds = number(c.refunds);
     const gatewayFees = number(c.gateway_fees);
     const procurementSpend = number(c.procurement_spend);
+    const outflow = number(c.outflow);
     const missingCount = number(missing.rows[0].count);
     const unbookedAccountCount = number(cost.unbooked_account_count);
     const unbookedUserChargeCny = number(cost.unbooked_user_charge_cny);
@@ -228,9 +232,9 @@ export class PostgresRepository {
 
     return {
       cash: {
-        received, rechargeReceived: received, totalReceived: received,
+        received, rechargeReceived, totalReceived: received,
         refunds, gatewayFees, procurementSpend,
-        netInflow: received - refunds - gatewayFees - procurementSpend,
+        outflow, netInflow: received - outflow,
       },
       operations: {
         consumptionCny: userChargeCny,
@@ -273,8 +277,8 @@ export class PostgresRepository {
               AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
               AND COALESCE(cash_basis_cny,0)=0
           ) AS gift_count,
-          (SELECT COALESCE(SUM(current_balance),0) FROM ${this.schema}.dim_users) AS balance_cny,
-          (SELECT COUNT(*) FILTER (WHERE current_balance > 0) FROM ${this.schema}.dim_users) AS balance_user_count
+          (SELECT COALESCE(SUM(current_balance) FILTER (WHERE NOT exclude_from_balance_stats),0) FROM ${this.schema}.dim_users) AS balance_cny,
+          (SELECT COUNT(*) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats) FROM ${this.schema}.dim_users) AS balance_user_count
         FROM ${this.schema}.credit_events
         WHERE occurred_at >= $1 AND occurred_at < $2`,
       [start, end]),
@@ -703,6 +707,7 @@ export class PostgresRepository {
         GROUP BY source_user_id
       )
       SELECT u.source_user_id AS id,u.email,u.username,u.tags,u.current_balance AS balance_cny,
+             u.exclude_from_balance_stats,
              COALESCE(us.revenue_cny,0) AS revenue_cny,COALESCE(us.charge_cny,0) AS charge_cny,
              COALESCE(us.token_list_value_usd,0) AS token_list_value_usd,
              COALESCE(us.purchase_allocated_cost_cny,0) AS purchase_allocated_cost_cny,
@@ -754,6 +759,7 @@ export class PostgresRepository {
         redeemedCreditCny: number(row.redeemed_credit_cny),
         affiliateCreditCny: number(row.affiliate_credit_cny),
         balanceCny: number(row.balance_cny),
+        excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats),
         balanceCurrency: 'CNY',
       };
     }), page, pageSize);
@@ -782,6 +788,7 @@ export class PostgresRepository {
           WHERE source_user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
         )
         SELECT u.source_user_id AS id,u.email,u.username,u.tags,u.status,u.current_balance AS balance_cny,
+               u.exclude_from_balance_stats,
                t.consumption_cny,t.requests,t.tokens,c.recharge_cny,c.credited_cny,
                a.admin_credit_cny,a.admin_deduction_cny
         FROM ${this.schema}.dim_users u
@@ -836,6 +843,7 @@ export class PostgresRepository {
         tags: profile.tags || [],
         status: profile.status,
         balanceCny: number(profile.balance_cny),
+        excludeFromBalanceStats: Boolean(profile.exclude_from_balance_stats),
         consumptionCny: number(profile.consumption_cny),
         requests: number(profile.requests),
         tokens: number(profile.tokens),
@@ -2373,6 +2381,103 @@ export class PostgresRepository {
         occurredAt: created.occurred_at,
       };
     });
+  }
+
+  async setUserBalanceStatsWhitelist(userId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.dim_users
+        SET exclude_from_balance_stats=$2,synced_at=NOW()
+        WHERE source_user_id=$1
+        RETURNING source_user_id,email,username,exclude_from_balance_stats`,
+      [userId, input.excludeFromBalanceStats]);
+      if (!result.rowCount) throw httpError('user not found; run synchronization first', 404);
+      const user = result.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_balance_statistics_whitelist','user',$2,$3::jsonb)`,
+      [actor, String(userId), JSON.stringify({
+        sourceUserId: Number(user.source_user_id),
+        excludeFromBalanceStats: Boolean(user.exclude_from_balance_stats),
+      })]);
+      return {
+        id: Number(user.source_user_id),
+        email: user.email || '',
+        username: user.username || '',
+        excludeFromBalanceStats: Boolean(user.exclude_from_balance_stats),
+      };
+    });
+  }
+
+  async setBulkUserBalanceStatsWhitelist(input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.dim_users
+        SET exclude_from_balance_stats=$2,synced_at=NOW()
+        WHERE source_user_id=ANY($1::bigint[])
+        RETURNING source_user_id`,
+      [input.userIds, input.excludeFromBalanceStats]);
+      if (result.rowCount !== input.userIds.length) {
+        const found = new Set(result.rows.map((row) => Number(row.source_user_id)));
+        const missing = input.userIds.filter((id) => !found.has(id));
+        throw httpError(`users not found; run synchronization first: ${missing.join(',')}`, 404);
+      }
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'bulk_update_balance_statistics_whitelist','user',$2,$3::jsonb)`,
+      [actor, input.userIds.join(','), JSON.stringify({
+        sourceUserIds: input.userIds,
+        excludeFromBalanceStats: input.excludeFromBalanceStats,
+      })]);
+      return {
+        userIds: input.userIds,
+        updated: result.rowCount,
+        excludeFromBalanceStats: input.excludeFromBalanceStats,
+      };
+    });
+  }
+
+  async getRuntimeDashboard() {
+    const [queueResult, usersResult] = await Promise.all([
+      this.pool.query(`
+        SELECT enabled,mode,worker_count,active_workers,idle_workers,queue_size,queue_length,
+               queue_usage_percent,processed,errors,observed_at
+        FROM ${this.schema}.runtime_queue_live
+        WHERE source_name='sub2api_risk_control' LIMIT 1`),
+      this.pool.query(`
+        SELECT source_user_id,email,username,max_concurrency,current_concurrency,observed_at
+        FROM ${this.schema}.user_concurrency_live
+        ORDER BY current_concurrency DESC,max_concurrency DESC,source_user_id ASC
+        LIMIT 100`),
+    ]);
+    const queue = queueResult.rows[0];
+    return {
+      queue: queue ? {
+        available: true,
+        enabled: Boolean(queue.enabled),
+        mode: queue.mode || '',
+        workerCount: number(queue.worker_count),
+        activeWorkers: number(queue.active_workers),
+        idleWorkers: number(queue.idle_workers),
+        queueSize: number(queue.queue_size),
+        queueLength: number(queue.queue_length),
+        queueUsagePercent: number(queue.queue_usage_percent),
+        processed: number(queue.processed),
+        errors: number(queue.errors),
+        observedAt: queue.observed_at,
+      } : { available: false },
+      users: usersResult.rows.map((row) => {
+        const maxConcurrency = number(row.max_concurrency);
+        const currentConcurrency = number(row.current_concurrency);
+        return {
+          id: number(row.source_user_id),
+          email: row.email || '',
+          username: row.username || '',
+          maxConcurrency,
+          currentConcurrency,
+          usagePercent: maxConcurrency > 0 ? Math.min(100, currentConcurrency * 100 / maxConcurrency) : null,
+          observedAt: row.observed_at,
+        };
+      }),
+    };
   }
 
   async getSyncState() {

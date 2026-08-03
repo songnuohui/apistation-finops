@@ -45,6 +45,52 @@ function httpUrl(value, name) {
   return parsed.origin;
 }
 
+function redisUrl(value, name) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`invalid URL for ${name}`);
+  }
+  if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.search || parsed.hash) {
+    throw new Error(`invalid URL for ${name}`);
+  }
+  const database = parsed.pathname.replace(/^\/+/, '');
+  if (!/^\d+$/.test(database) || Number(database) === 0) {
+    throw new Error(`${name} must select a non-default isolated Redis database`);
+  }
+  return parsed.toString();
+}
+
+function sourceRedisUrl(value, name) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`invalid URL for ${name}`);
+  }
+  if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.search || parsed.hash) {
+    throw new Error(`invalid URL for ${name}`);
+  }
+  const database = parsed.pathname.replace(/^\/+/, '');
+  if (database && !/^\d+$/.test(database)) {
+    throw new Error(`${name} must use a numeric Redis database`);
+  }
+  return parsed.toString();
+}
+
+function redisKeyPrefix(value) {
+  const prefix = String(value || 'finops:cache:').trim();
+  if (!/^[a-zA-Z0-9:_-]{3,80}$/.test(prefix) || !prefix.endsWith(':')) {
+    throw new Error('FINOPS_REDIS_KEY_PREFIX must be a simple prefix ending with ":"');
+  }
+  return prefix;
+}
+
 function embedOrigins(value) {
   const raw = String(value || '').trim();
   if (!raw) return [];
@@ -112,6 +158,16 @@ export function loadConfig(env = process.env) {
     authDisabled,
     sub2apiAuthUrl: authDisabled ? null : httpUrl(env.SUB2API_AUTH_URL, 'SUB2API_AUTH_URL'),
     sub2apiAuthTimeoutMs: intValue(env.SUB2API_AUTH_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
+    sub2apiRuntimePageSize: intValue(env.SUB2API_RUNTIME_PAGE_SIZE, 100, { min: 10, max: 100 }),
+    finopsRedisUrl: redisUrl(env.FINOPS_REDIS_URL, 'FINOPS_REDIS_URL'),
+    finopsRedisKeyPrefix: redisKeyPrefix(env.FINOPS_REDIS_KEY_PREFIX),
+    finopsRedisConnectTimeoutMs: intValue(env.FINOPS_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
+    dashboardCacheTtlSeconds: intValue(env.DASHBOARD_CACHE_TTL_SECONDS, 5, { min: 1, max: 60 }),
+    listCacheTtlSeconds: intValue(env.LIST_CACHE_TTL_SECONDS, 3, { min: 1, max: 60 }),
+    runtimeCacheTtlSeconds: intValue(env.RUNTIME_CACHE_TTL_SECONDS, 2, { min: 1, max: 30 }),
+    sub2apiRedisUrl: sourceRedisUrl(env.SUB2API_REDIS_URL, 'SUB2API_REDIS_URL'),
+    sub2apiRedisConnectTimeoutMs: intValue(env.SUB2API_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
+    sub2apiRedisRuntimeUserLimit: intValue(env.SUB2API_REDIS_RUNTIME_USER_LIMIT, 500, { min: 1, max: 5_000 }),
     sessionSecret,
     sessionTtlSeconds: intValue(env.SESSION_TTL_SECONDS, 43_200, { min: 900, max: 86_400 }),
     sessionCookieSecure,

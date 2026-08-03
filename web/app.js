@@ -7,6 +7,7 @@ const state = {
   lastExport: [],
   tables: new Map(),
   selectedAccounts: new Set(),
+  selectedUsers: new Set(),
   accountItems: new Map(),
   accountScope: 'current',
   accountSearch: '',
@@ -17,7 +18,9 @@ const state = {
   overviewTrend: null,
   overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
   userDetail: null,
+  cashDetail: null,
   monitorCandidates: new Map(),
+  runtimeRefreshTimer: null,
 };
 
 const pageMeta = {
@@ -30,6 +33,7 @@ const pageMeta = {
   reconciliation: ['对账中心', '用户余额、扣费与支付订单核对'],
   costs: ['成本核算', '成本模板、生效期间和分摊方法'],
   monitor: ['分组监控', '独立监控页嵌入与公开展示分组可用性、倍率和响应状态'],
+  runtime: ['并发与排队', '只读展示 Sub2API 当前并发、工作线程和排队负载'],
   sync: ['数据同步', '来源进度、延迟与错误状态'],
   alerts: ['告警中心', '缺失成本、账号到期和对账差异'],
 };
@@ -83,6 +87,10 @@ function dateTimeInputValue(value) {
 
 function metric(label, value, hint = '', tone = '') {
   return `<div class="metric ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
+}
+
+function metricAction(label, value, hint = '', tone = '', action = '') {
+  return `<button type="button" class="metric metric-action ${tone}" ${action}><span class="label">${label}</span><span class="value">${value}</span><span class="hint">${hint}</span></button>`;
 }
 
 function maskedIdentity(value) {
@@ -467,10 +475,10 @@ async function renderOverview() {
   const summary = dashboard.summary;
   const operations = summary.operations;
   const cash = summary.cash;
+  const netRecharge = Number(cash.rechargeReceived || 0) - Number(cash.refunds || 0);
   const totalTokens = Number(summary.usage.inputTokens || 0)
     + Number(summary.usage.outputTokens || 0)
     + Number(summary.usage.cacheTokens || 0);
-  const netRecharge = Number(cash.received || 0) - Number(cash.refunds || 0);
   state.lastExport = [
     ...dashboard.rankings.requestActivity.map((item) => ({ ranking: '请求活跃度', ...item })),
     ...dashboard.rankings.tokenUsage.map((item) => ({ ranking: 'Token 使用排行', ...item })),
@@ -478,9 +486,9 @@ async function renderOverview() {
   ];
   content.innerHTML = `<div class="dashboard-meta"><span>运营看板</span><small>更新于 ${dateTime(dashboard.generatedAt)}</small></div>
     <div class="dashboard-metric-grid">
-      ${metric('净充值', cny(netRecharge), `总充值 ${cny(cash.received)}`, netRecharge >= 0 ? 'good' : 'bad')}
+      ${metricAction('现金流入', cny(cash.received), `充值实收 ${cny(cash.rechargeReceived)} · 查看明细`, 'good', 'data-open-cash-details')}
       ${metric('赠送金额', cny(dashboard.totals.giftAmountCny), `${compact(dashboard.totals.giftCount)} 笔非现金入账`)}
-      ${metric('总退款', cny(cash.refunds), '已确认退款', 'warn')}
+      ${metric('净充值', cny(netRecharge), `已退款 ${cny(cash.refunds)}`, netRecharge >= 0 ? 'good' : 'bad')}
       ${metric('总消耗', cny(operations.consumptionCny ?? operations.userChargeCny), `${compact(summary.usage.requests)} 次请求`, 'good')}
       ${metric('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户`)}
       ${metric('总 Token', compact(totalTokens), '输入、输出与缓存合计')}
@@ -765,6 +773,87 @@ function openUserDetails(userId) {
   loadUserDetails();
 }
 
+function cashDetailPager(data) {
+  const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
+  return `<div class="detail-pager">
+    <span>共 ${compact(data.total)} 笔流水</span>
+    <label>每页<select id="cash-detail-page-size">${
+      [10, 20, 50, 100].map((size) => `<option value="${size}" ${size === data.pageSize ? 'selected' : ''}>${size}</option>`).join('')
+    }</select></label>
+    <div class="pager-nav">
+      <button type="button" class="icon-button pager-button" data-cash-detail-page="${Math.max(1, data.page - 1)}" ${data.page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
+      ${pageNumbers(data.page, pages).map((value) => value === 'ellipsis'
+        ? '<span class="pager-ellipsis">…</span>'
+        : `<button type="button" class="page-number ${value === data.page ? 'active' : ''}" data-cash-detail-page="${value}" ${value === data.page ? 'aria-current="page"' : ''}>${value}</button>`).join('')}
+      <button type="button" class="icon-button pager-button" data-cash-detail-page="${Math.min(pages, data.page + 1)}" ${data.page >= pages ? 'disabled' : ''}>&rsaquo;</button>
+    </div>
+    <span>第 ${data.page} / ${pages} 页</span>
+  </div>`;
+}
+
+function renderCashFlowDetailModal(data) {
+  const summary = data.summary || {};
+  openContentModal('现金流入明细', `
+    <div class="detail-filter">
+      <span class="detail-range-note">与“充值与资金”菜单使用同一份 FinOps 现金流水；不包含赠送、返利和管理员余额调整。</span>
+    </div>
+    <div class="detail-metrics">
+      ${metric('现金流入', cny(summary.inflow), '充值与其他现金收入', 'good')}
+      ${metric('充值实收', cny(data.items.filter((item) => item.type === 'recharge' && item.direction === 'in').reduce((sum, item) => sum + Number(item.baseAmountCny || 0), 0)), '当前页已展示金额')}
+      ${metric('现金流出', cny(summary.outflow), '采购、费用与退款', 'warn')}
+      ${metric('现金净额', cny(summary.net), `${compact(summary.transactions)} 笔现金流水`, Number(summary.net) >= 0 ? 'good' : 'bad')}
+    </div>
+    <section class="detail-section">
+      <div class="detail-section-header"><h3>现金流水</h3><span>按发生时间倒序</span></div>
+      ${table([
+        { label: '时间' }, { label: '流水 / 对方' }, { label: '类型' }, { label: '支付方式' },
+        { label: '方向' }, { label: '现金金额 CNY', right: true }, { label: '入账余额 CNY', right: true }, { label: '状态' },
+      ], data.items.map((item) => [
+        dateTime(item.occurredAt), `<span class="primary-text">${escapeHtml(item.reference)}</span><div class="secondary-text">${escapeHtml(item.party || '')}</div>`,
+        `<span class="tag neutral">${escapeHtml(item.type)}</span>`, escapeHtml(item.method || '--'),
+        item.direction === 'in' ? '<span class="money-positive">流入</span>' : '<span class="money-negative">流出</span>',
+        cny(item.baseAmountCny), item.creditedAmountCny ? cny(item.creditedAmountCny) : '--',
+        `<span class="status ${item.status === 'completed' ? '' : 'warning'}">${escapeHtml(item.status)}</span>`,
+      ]), 950)}
+      ${cashDetailPager(data)}
+    </section>
+  `, 'cash-detail-modal');
+  const form = document.querySelector('#modal-form');
+  form.onclick = async (event) => {
+    const button = event.target.closest('[data-cash-detail-page]');
+    if (!button || button.disabled || !state.cashDetail) return;
+    state.cashDetail.page = Number(button.dataset.cashDetailPage);
+    await loadCashFlowDetails();
+  };
+  document.querySelector('#cash-detail-page-size')?.addEventListener('change', async (event) => {
+    if (!state.cashDetail) return;
+    state.cashDetail.pageSize = Number(event.target.value);
+    state.cashDetail.page = 1;
+    await loadCashFlowDetails();
+  });
+}
+
+async function loadCashFlowDetails() {
+  const detail = state.cashDetail;
+  if (!detail) return;
+  const form = document.querySelector('#modal-form');
+  if (form) form.innerHTML = '<div class="detail-loading"><span></span>正在读取现金流水</div>';
+  try {
+    const data = await api(`/funds?page=${detail.page}&page_size=${detail.pageSize}`);
+    if (state.cashDetail !== detail) return;
+    renderCashFlowDetailModal(data);
+  } catch (error) {
+    if (state.cashDetail !== detail) return;
+    if (form) form.innerHTML = `<div class="empty"><strong>现金流水读取失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openCashFlowDetails() {
+  state.cashDetail = { page: 1, pageSize: 20 };
+  openContentModal('现金流入明细', '<div class="detail-loading"><span></span>正在读取现金流水</div>', 'cash-detail-modal');
+  loadCashFlowDetails();
+}
+
 async function renderUsersEnhanced(search = state.userSearch) {
   state.userSearch = search;
   const data = await api(`/users?${queryFor('usersSearch', search, {
@@ -774,8 +863,13 @@ async function renderUsersEnhanced(search = state.userSearch) {
   state.lastExport = data.items;
   state.userItems = new Map(data.items.map((item) => [String(item.id), item]));
   content.innerHTML = `${section('用户核算', '点击用户查看充值、消费明细与趋势；金额列可直接切换升序或降序')}
-    <section class="table-panel">${searchTools('搜索邮箱、用户名', '', search)}${
+    <section class="table-panel">${searchTools('搜索邮箱、用户名', `
+      <span class="selection-text" id="user-selection-count">已选择 ${state.selectedUsers.size} 位</span>
+      <button type="button" class="button" id="user-exclude-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-x')}加入余额白名单</button>
+      <button type="button" class="button" id="user-include-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-check')}计入余额统计</button>
+    `, search)}${
       table([
+        { label: '<input type="checkbox" id="select-current-users" title="选择当前页">' },
         { label: '用户' },
         { label: userSortHeader('现金实收 CNY', 'cashPaidCny'), right: true },
         { label: userSortHeader('管理员加款 CNY', 'adminCreditCny'), right: true },
@@ -788,12 +882,55 @@ async function renderUsersEnhanced(search = state.userSearch) {
         { label: userSortHeader('经营毛利 CNY', 'bookedProfitCny'), right: true },
         { label: '成本覆盖' },
       ], data.items.map((item) => [
-        `<button type="button" class="user-link" data-user-details="${item.id}"><span>${escapeHtml(item.email)}</span><small>ID ${item.id} · ${tags(item.tags)}</small></button>`,
+        `<input type="checkbox" data-user-select="${item.id}" ${state.selectedUsers.has(Number(item.id)) ? 'checked' : ''}>`,
+        `<button type="button" class="user-link" data-user-details="${item.id}"><span>${escapeHtml(item.email)}</span><small>ID ${item.id} · ${tags(item.tags)}${item.excludeFromBalanceStats ? ' · 自用白名单' : ''}</small></button>`,
         cny(item.cashPaidCny), cny(item.adminCreditCny), cny(item.adminDeductionCny), cny(item.balanceCny), cny(item.userChargeCny),
         compact(item.requests), compact(item.tokens), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
-      ]), 1450)
+      ]), 1480)
     }${pager(data, 'usersSearch', '位用户')}</section>`;
   bindSearch(renderUsersEnhanced);
+  const updateUserSelection = () => {
+    const count = document.querySelector('#user-selection-count');
+    const enabled = state.selectedUsers.size > 0;
+    if (count) count.textContent = `已选择 ${state.selectedUsers.size} 位`;
+    ['#user-exclude-balance', '#user-include-balance'].forEach((selector) => {
+      const button = document.querySelector(selector);
+      if (button) button.disabled = !enabled;
+    });
+  };
+  document.querySelector('#select-current-users')?.addEventListener('change', (event) => {
+    data.items.forEach((item) => {
+      if (event.target.checked) state.selectedUsers.add(Number(item.id));
+      else state.selectedUsers.delete(Number(item.id));
+    });
+    renderUsersEnhanced(search);
+  });
+  document.querySelectorAll('[data-user-select]').forEach((checkbox) => checkbox.addEventListener('change', (event) => {
+    const userId = Number(event.target.dataset.userSelect);
+    if (event.target.checked) state.selectedUsers.add(userId);
+    else state.selectedUsers.delete(userId);
+    updateUserSelection();
+  }));
+  const updateWhitelist = async (excludeFromBalanceStats) => {
+    if (!state.selectedUsers.size) return;
+    try {
+      await api('/users/balance-statistics-whitelist', {
+        method: 'POST',
+        range: false,
+        body: JSON.stringify({
+          userIds: [...state.selectedUsers],
+          excludeFromBalanceStats,
+        }),
+      });
+      state.selectedUsers.clear();
+      toast(excludeFromBalanceStats ? '已加入余额统计白名单' : '已恢复余额统计');
+      await renderUsersEnhanced(search);
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  document.querySelector('#user-exclude-balance')?.addEventListener('click', () => updateWhitelist(true));
+  document.querySelector('#user-include-balance')?.addEventListener('click', () => updateWhitelist(false));
 }
 
 function accountActionButtons(item) {
@@ -1115,6 +1252,36 @@ async function renderMonitor(search = '') {
   }
 }
 
+async function renderRuntime() {
+  const data = await api('/runtime?refresh=1', { range: false });
+  const queue = data.queue || { available: false };
+  const activeWorkers = Number(queue.activeWorkers || 0);
+  const workerCount = Number(queue.workerCount || 0);
+  const queueLength = Number(queue.queueLength || 0);
+  const queueUsage = Number(queue.queueUsagePercent || 0);
+  const queueUsageDisplay = queueUsage <= 1 ? queueUsage * 100 : queueUsage;
+  state.lastExport = data.users || [];
+  content.innerHTML = `${section('并发与排队', '只读展示 Sub2API 风控队列和用户当前并发；数据由 FinOps 定时快照保存，不会改变上游请求处理')}
+    <div class="metric-grid">
+      ${metric('队列状态', !queue.available ? '等待快照' : queue.enabled ? '已启用' : '未启用', queue.available ? `模式 ${queue.mode || '--'}` : '使用管理员登录后自动读取', queue.available && queue.enabled ? 'good' : 'warn')}
+      ${metric('排队长度', queue.available ? compact(queueLength) : '--', queue.available ? `容量 ${compact(queue.queueSize || 0)} · 使用率 ${queueUsageDisplay.toFixed(1)}%` : '暂无上游快照', queueLength ? 'warn' : 'good')}
+      ${metric('工作线程', queue.available ? `${activeWorkers} / ${workerCount}` : '--', queue.available ? `空闲 ${compact(queue.idleWorkers || 0)} 个` : '暂无上游快照', activeWorkers >= workerCount && workerCount ? 'warn' : 'good')}
+      ${metric('累计处理', queue.available ? compact(queue.processed || 0) : '--', queue.available ? `错误 ${compact(queue.errors || 0)} 次` : '暂无上游快照', Number(queue.errors || 0) ? 'warn' : 'good')}
+      ${metric('最近采样', queue.available ? dateTime(queue.observedAt) : '--', '默认随 FinOps 同步刷新')}
+    </div>
+    <section class="table-panel">
+      <div class="panel-header"><h2>用户当前并发</h2><span>${compact((data.users || []).length)} 位活跃用户</span></div>
+      ${table([
+        { label: '用户' }, { label: '当前并发', right: true }, { label: '并发上限', right: true }, { label: '使用率', right: true }, { label: '采样时间' },
+      ], (data.users || []).map((item) => [
+        `<span class="primary-text">${escapeHtml(item.email || item.username || `用户 #${item.id}`)}</span><div class="secondary-text">ID ${item.id}${item.username && item.username !== item.email ? ` · ${escapeHtml(item.username)}` : ''}</div>`,
+        compact(item.currentConcurrency), compact(item.maxConcurrency),
+        item.usagePercent === null ? '--' : `<div>${Number(item.usagePercent).toFixed(1)}%</div><div class="progress"><span style="width:${Math.min(100, Math.max(0, Number(item.usagePercent)))}%"></span></div>`,
+        dateTime(item.observedAt),
+      ]), 880)}
+    </section>`;
+}
+
 async function renderSync() {
   const source = await api('/sync-details', { range: false });
   const data = localPage(source.sources, 'syncSources');
@@ -1173,11 +1340,14 @@ const renderers = {
   reconciliation: renderReconciliation,
   costs: renderCosts,
   monitor: renderMonitor,
+  runtime: renderRuntime,
   sync: renderSync,
   alerts: renderAlerts,
 };
 
 async function render() {
+  clearTimeout(state.runtimeRefreshTimer);
+  state.runtimeRefreshTimer = null;
   content.innerHTML = '<div class="loading"><span></span>正在读取经营数据</div>';
   const [pageTitle, pageSubtitle] = pageMeta[state.page];
   title.textContent = pageTitle;
@@ -1189,6 +1359,11 @@ async function render() {
   });
   try {
     await renderers[state.page]();
+    if (state.page === 'runtime') {
+      state.runtimeRefreshTimer = setTimeout(() => {
+        if (state.page === 'runtime') render();
+      }, 10_000);
+    }
   } catch (error) {
     content.innerHTML = `<div class="empty"><strong>数据读取失败</strong><p>${escapeHtml(error.message)}</p><button class="button" id="retry">重新加载</button></div>`;
     document.querySelector('#retry')?.addEventListener('click', render);
@@ -1243,6 +1418,7 @@ function openContentModal(titleText, contentHtml, modalClass = '') {
 function closeModal() {
   document.querySelector('#modal-backdrop').hidden = true;
   state.userDetail = null;
+  state.cashDetail = null;
 }
 
 function costFields(profiles, account, { includeAccount = false, batch = false } = {}) {
@@ -1611,6 +1787,7 @@ content.addEventListener('click', (event) => {
   const previous = event.target.closest('[data-page-prev]');
   const next = event.target.closest('[data-page-next]');
   const pageTarget = event.target.closest('[data-page-to]');
+  const cashDetails = event.target.closest('[data-open-cash-details]');
   const userDetails = event.target.closest('[data-user-details]');
   const userSort = event.target.closest('[data-user-sort]');
   const accountScope = event.target.closest('[data-account-scope]');
@@ -1619,6 +1796,10 @@ content.addEventListener('click', (event) => {
   const ledgerEdit = event.target.closest('[data-edit-ledger]');
   const accountRuleHistory = event.target.closest('[data-account-rule-history]');
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
+  if (cashDetails) {
+    openCashFlowDetails();
+    return;
+  }
   if (userDetails) {
     openUserDetails(userDetails.dataset.userDetails);
     return;

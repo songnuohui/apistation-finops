@@ -436,6 +436,21 @@ export class DemoRepository {
     };
   }
 
+  async setUserBalanceStatsWhitelist(userId, input) {
+    const user = this.users.find((item) => Number(item.id) === Number(userId));
+    if (!user) throw Object.assign(new Error('user not found'), { statusCode: 404 });
+    user.excludeFromBalanceStats = Boolean(input.excludeFromBalanceStats);
+    return { id: user.id, email: user.email, username: user.username, excludeFromBalanceStats: user.excludeFromBalanceStats };
+  }
+
+  async setBulkUserBalanceStatsWhitelist(input) {
+    const ids = new Set(input.userIds.map(Number));
+    this.users.forEach((user) => {
+      if (ids.has(Number(user.id))) user.excludeFromBalanceStats = Boolean(input.excludeFromBalanceStats);
+    });
+    return { userIds: input.userIds, updated: input.userIds.length, excludeFromBalanceStats: Boolean(input.excludeFromBalanceStats) };
+  }
+
   async listAccounts({ search = '', scope = 'current', page = 1, pageSize = 20 } = {}) {
     const filtered = this.accounts.filter((item) => {
       const deleted = Boolean(item.sourceDeletedAt);
@@ -676,6 +691,25 @@ export class DemoRepository {
       account.currentCostNotes = input.notes || '';
     }
     return period;
+  }
+
+  async getRuntimeDashboard() {
+    return {
+      queue: {
+        available: true, enabled: true, mode: 'observe', workerCount: 4, activeWorkers: 1, idleWorkers: 3,
+        queueSize: 32768, queueLength: 2, queueUsagePercent: 0.01, processed: 256, errors: 0,
+        observedAt: new Date().toISOString(),
+      },
+      users: this.users.slice(0, 5).map((user, index) => ({
+        id: user.id,
+        email: user.email,
+        username: user.username || '',
+        maxConcurrency: index ? 100 : 2000,
+        currentConcurrency: index ? 1 : 2,
+        usagePercent: index ? 1 : 0.1,
+        observedAt: new Date().toISOString(),
+      })),
+    };
   }
 
   async createBulkAccountCostPeriods(input, actor) {

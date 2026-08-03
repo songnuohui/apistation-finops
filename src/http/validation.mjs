@@ -103,6 +103,13 @@ function booleanValue(value, field) {
   throw badRequest(`invalid ${field}`);
 }
 
+function idList(value, field, { max = 100 } = {}) {
+  const source = Array.isArray(value) ? value : [];
+  const ids = [...new Set(source.map((item) => optionalId(item, field)).filter(Boolean))];
+  if (!ids.length || ids.length > max) throw badRequest(`invalid ${field}`);
+  return ids;
+}
+
 function tagValues(value) {
   if (value === undefined || value === null || value === '') return null;
   const source = Array.isArray(value) ? value : String(value).split(',');
@@ -196,6 +203,19 @@ export function normalizeAccountLedger(input) {
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags) || [],
+  };
+}
+
+export function normalizeUserBalanceStatsWhitelist(input) {
+  return {
+    excludeFromBalanceStats: booleanValue(input.excludeFromBalanceStats, 'excludeFromBalanceStats'),
+  };
+}
+
+export function normalizeBulkUserBalanceStatsWhitelist(input) {
+  return {
+    userIds: idList(input.userIds, 'userIds'),
+    excludeFromBalanceStats: booleanValue(input.excludeFromBalanceStats, 'excludeFromBalanceStats'),
   };
 }
 

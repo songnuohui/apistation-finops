@@ -452,6 +452,23 @@ textarea:focus-visible {
   box-shadow: 0 5px 18px rgba(50, 82, 120, .04);
 }
 
+.metric-action {
+  width: 100%;
+  appearance: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.metric-action:hover {
+  border-color: #9bb8e3;
+  box-shadow: 0 7px 20px rgba(50, 82, 120, .1);
+}
+
+.metric-action:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .metric .label {
   min-height: 15px;
   display: flex;
@@ -1060,6 +1077,16 @@ textarea:focus-visible {
   max-height: min(92vh, 820px);
 }
 
+.modal.cash-detail-modal {
+  width: min(1040px, 100%);
+  max-height: min(92vh, 860px);
+}
+
+.modal.cash-detail-modal form.modal-content {
+  display: block;
+  padding: 0 15px 18px;
+}
+
 .cost-rule-context {
   grid-column: 1 / -1;
   display: grid;
@@ -1146,7 +1173,7 @@ textarea:focus-visible {
   align-items: center;
   gap: 5px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -1161,7 +1188,7 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
-.detail-range-note { margin-left: auto; color: #73849a; font-size: 10px; }
+.detail-range-note { margin-left: auto; color: #73849a; font-size: 11px; }
 
 .detail-user-heading {
   min-height: 55px;
@@ -1173,8 +1200,8 @@ textarea:focus-visible {
 
 .detail-user-heading strong,
 .detail-user-heading span { display: block; }
-.detail-user-heading strong { color: #1b2738; font-size: 12px; }
-.detail-user-heading div > span { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.detail-user-heading strong { color: #1b2738; font-size: 14px; }
+.detail-user-heading div > span { margin-top: 3px; color: var(--muted); font-size: 11px; }
 
 .detail-metrics {
   display: grid;
@@ -1184,8 +1211,8 @@ textarea:focus-visible {
 }
 
 .detail-metrics .metric { min-height: 79px; padding: 10px; box-shadow: none; }
-.detail-metrics .metric .value { margin-top: 5px; font-size: 17px; line-height: 22px; }
-.detail-metrics .metric .hint { margin-top: 3px; }
+.detail-metrics .metric .value { margin-top: 5px; font-size: 19px; line-height: 24px; }
+.detail-metrics .metric .hint { margin-top: 3px; font-size: 11px; line-height: 16px; }
 
 .detail-section {
   margin-top: 11px;
@@ -1200,9 +1227,14 @@ textarea:focus-visible {
   gap: 12px;
 }
 
-.detail-section-header h3 { margin: 0; color: #1d2b3d; font-size: 11px; }
-.detail-section-header span { color: var(--muted); font-size: 9px; }
+.detail-section-header h3 { margin: 0; color: #1d2b3d; font-size: 13px; }
+.detail-section-header span { color: var(--muted); font-size: 11px; }
 .detail-chart-wrap { height: 208px; margin: 0 -4px 6px; padding-left: 4px; padding-right: 4px; }
+
+.modal .data-table { font-size: 12px; }
+.modal .data-table th { height: 39px; font-size: 11px; }
+.modal .data-table td { min-height: 50px; height: auto; }
+.modal .data-table .secondary-text { font-size: 10px; line-height: 15px; }
 
 .detail-pager {
   min-height: 36px;
@@ -1211,7 +1243,23 @@ textarea:focus-visible {
   justify-content: space-between;
   gap: 8px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
+}
+
+.detail-pager > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.detail-pager select {
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 11px;
 }
 
 .field { display: grid; gap: 5px; color: #4f6076; font-size: 10px; }
