@@ -121,7 +121,7 @@ export function cashScope(searchParams) {
 
 export function userBalanceScope(searchParams) {
   const scope = searchParams.get('balance_scope') || 'all';
-  if (!['all', 'reported'].includes(scope)) {
+  if (!['all', 'reported', 'whitelist'].includes(scope)) {
     throw Object.assign(new Error('invalid user balance scope'), { statusCode: 400 });
   }
   return scope;

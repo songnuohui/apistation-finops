@@ -59,6 +59,24 @@ test('overview dashboard returns complete identities and real ranking metrics', 
   assert.ok(dashboard.rankings.tokenUsage[0].tokens > 0);
   assert.ok(dashboard.rankings.requestActivity[0].requests > 0);
   assert.ok(dashboard.rankings.cashRecharge[0].cashPaidCny > 0);
+  assert.ok(dashboard.rankings.userConsumption[0].userChargeCny > 0);
+  assert.equal(dashboard.rankings.modelConsumption[0].name, 'gpt-5.6-sol');
+  assert.ok(dashboard.rankings.modelConsumption[0].userChargeCny > 0);
+});
+
+test('demo usage event details support global search and request-level cost fields', async () => {
+  const repository = new DemoRepository(config);
+  const firstPage = await repository.listUsageEvents({ page: 1, pageSize: 10 });
+  const first = firstPage.items[0];
+  const searched = await repository.listUsageEvents({ search: first.requestId, page: 1, pageSize: 10 });
+
+  assert.equal(firstPage.total, 48);
+  assert.equal(firstPage.items.length, 10);
+  assert.equal(searched.total, 1);
+  assert.equal(searched.items[0].sourceUsageId, first.sourceUsageId);
+  assert.ok(searched.items[0].model);
+  assert.ok('costStatus' in searched.items[0]);
+  assert.ok('calculatedCostCny' in searched.items[0]);
 });
 
 test('self-use balance whitelist excludes only reported balances, not usage rankings', async () => {
@@ -72,10 +90,12 @@ test('self-use balance whitelist excludes only reported balances, not usage rank
 
   const allUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'all' });
   const reportedBalanceUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'reported' });
+  const whitelistedUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'whitelist' });
   const dashboard = await repository.getOverviewDashboard();
 
   assert.ok(allUsers.items.some((item) => item.id === selfUseAccount.id));
   assert.ok(!reportedBalanceUsers.items.some((item) => item.id === selfUseAccount.id));
+  assert.deepEqual(whitelistedUsers.items.map((item) => item.id), [selfUseAccount.id]);
   assert.equal(dashboard.totals.balanceCny, expectedBalance);
   assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });

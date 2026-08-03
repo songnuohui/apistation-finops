@@ -52,6 +52,7 @@ test('cash and reported-balance scopes accept only their supported values', () =
 
   assert.equal(userBalanceScope(new URLSearchParams()), 'all');
   assert.equal(userBalanceScope(new URLSearchParams('balance_scope=reported')), 'reported');
+  assert.equal(userBalanceScope(new URLSearchParams('balance_scope=whitelist')), 'whitelist');
   assert.throws(() => userBalanceScope(new URLSearchParams('balance_scope=whitelisted')), /invalid user balance scope/);
 });
 

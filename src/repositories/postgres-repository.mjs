@@ -266,7 +266,7 @@ export class PostgresRepository {
   }
 
   async getOverviewDashboard({ start, end, dailyStart = start, dailyEnd = end }) {
-    const [summary, totals, tokenUsage, cashRecharge, requestActivity] = await Promise.all([
+    const [summary, totals, tokenUsage, cashRecharge, requestActivity, userConsumption, modelConsumption] = await Promise.all([
       this.getSummary({ start, end }),
       this.pool.query(`
         SELECT
@@ -323,6 +323,31 @@ export class PostgresRepository {
         ORDER BY requests DESC,u.source_user_id ASC
         LIMIT 8`,
       [dailyStart, dailyEnd]),
+      this.pool.query(`
+        SELECT u.source_user_id AS id,u.email,u.username,
+               COALESCE(SUM(d.user_charge_cny),0)::float8 AS consumption_cny,
+               COALESCE(SUM(d.requests),0)::float8 AS requests,
+               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens
+        FROM ${this.schema}.fact_usage_daily d
+        JOIN ${this.schema}.dim_users u ON u.source_user_id=d.source_user_id
+        WHERE d.day >= $1::date AND d.day <= $2::date AND d.source_user_id <> 0
+        GROUP BY u.source_user_id,u.email,u.username
+        HAVING COALESCE(SUM(d.user_charge_cny),0) > 0
+        ORDER BY consumption_cny DESC,u.source_user_id ASC
+        LIMIT 8`,
+      [dailyStart, dailyEnd]),
+      this.pool.query(`
+        SELECT COALESCE(NULLIF(BTRIM(d.model),''),'未标注模型') AS name,
+               COALESCE(SUM(d.user_charge_cny),0)::float8 AS consumption_cny,
+               COALESCE(SUM(d.requests),0)::float8 AS requests,
+               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens
+        FROM ${this.schema}.fact_usage_daily d
+        WHERE d.day >= $1::date AND d.day <= $2::date
+        GROUP BY COALESCE(NULLIF(BTRIM(d.model),''),'未标注模型')
+        HAVING COALESCE(SUM(d.user_charge_cny),0) > 0
+        ORDER BY consumption_cny DESC,name ASC
+        LIMIT 8`,
+      [dailyStart, dailyEnd]),
     ]);
     const total = totals.rows[0] || {};
     const rank = (rows, fields) => rows.map((row) => ({
@@ -330,6 +355,20 @@ export class PostgresRepository {
       email: row.email || '',
       username: row.username || '',
       ...Object.fromEntries(fields.map((field) => [field, number(row[field])])),
+    }));
+    const consumptionRank = (rows) => rows.map((row) => ({
+      id: number(row.id),
+      email: row.email || '',
+      username: row.username || '',
+      userChargeCny: number(row.consumption_cny),
+      requests: number(row.requests),
+      tokens: number(row.tokens),
+    }));
+    const modelConsumptionRank = modelConsumption.rows.map((row) => ({
+      name: String(row.name || '').trim() || '未标注模型',
+      userChargeCny: number(row.consumption_cny),
+      requests: number(row.requests),
+      tokens: number(row.tokens),
     }));
 
     return {
@@ -350,6 +389,8 @@ export class PostgresRepository {
           cashPaidCny: item.cash_paid_cny,
         })),
         requestActivity: rank(requestActivity.rows, ['requests', 'tokens']),
+        userConsumption: consumptionRank(userConsumption.rows),
+        modelConsumption: modelConsumptionRank,
       },
     };
   }
@@ -459,7 +500,7 @@ export class PostgresRepository {
   async getUsageBreakdown({ start, end, dailyStart = start, dailyEnd = end, page = 1, pageSize = 20, offset = 0 }) {
     const result = await this.pool.query(`
       WITH usage_by_model_account AS (
-        SELECT model,source_account_id,
+        SELECT COALESCE(NULLIF(BTRIM(model),''),'未标注模型') AS model,source_account_id,
                SUM(requests)::float8 AS requests,
                SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens)::float8 AS tokens,
                SUM(standard_cost_usd_reference) AS token_list_value_usd,
@@ -468,12 +509,12 @@ export class PostgresRepository {
                SUM(standard_cost_usd_reference) AS allocation_weight
         FROM ${this.schema}.fact_usage_daily
         WHERE day >= $1::date AND day <= $2::date
-        GROUP BY model,source_account_id
+        GROUP BY COALESCE(NULLIF(BTRIM(model),''),'未标注模型'),source_account_id
       ), account_weight AS (
         SELECT source_account_id,SUM(allocation_weight) AS allocation_weight,SUM(tokens) AS token_weight,SUM(requests) AS request_weight
         FROM usage_by_model_account GROUP BY source_account_id
       ), multiplier_cost AS (
-        SELECT model,source_account_id,
+        SELECT COALESCE(NULLIF(BTRIM(model),''),'未标注模型') AS model,source_account_id,
                COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
                COALESCE(SUM(user_charge_cny) FILTER (
                  WHERE cost_status NOT IN ('priced','free','fixed_cost')
@@ -481,7 +522,7 @@ export class PostgresRepository {
                MAX(cost_mode) AS cost_mode
         FROM ${this.schema}.usage_cost_facts
         WHERE occurred_at >= $3 AND occurred_at < $4
-        GROUP BY model,source_account_id
+        GROUP BY COALESCE(NULLIF(BTRIM(model),''),'未标注模型'),source_account_id
       ), account_cost AS (
         SELECT p.source_account_id,
                SUM(p.total_cost_cny *
@@ -559,6 +600,7 @@ export class PostgresRepository {
       FROM model_economics ORDER BY revenue_cny DESC LIMIT $5 OFFSET $6`, [dailyStart, dailyEnd, start, end, pageSize, offset]);
     return pageResult(result.rows.map((row) => ({
       total_count: row.total_count,
+      name: String(row.name || '').trim() || '未标注模型',
       requests: number(row.requests),
       tokens: number(row.tokens),
       tokenListValueUsd: number(row.token_list_value_usd),
@@ -580,6 +622,85 @@ export class PostgresRepository {
       unbookedAccountCount: number(row.unbooked_account_count),
       costCoverageStatus: number(row.unbooked_account_count) ? 'partial' : 'complete',
       margin: number(row.revenue_cny) ? number(row.profit_cny) / number(row.revenue_cny) : null,
+    })), page, pageSize);
+  }
+
+  async listUsageEvents({ start, end, search = '', page = 1, pageSize = 20, offset = 0 }) {
+    const result = await this.pool.query(`
+      SELECT f.source_usage_id,f.request_id,f.occurred_at,
+             f.source_user_id,u.email,u.username,
+             f.source_account_id,a.name AS account_name,
+             f.source_group_id,f.source_channel_id,
+             COALESCE(NULLIF(BTRIM(f.model),''),NULLIF(BTRIM(f.requested_model),''),
+               NULLIF(BTRIM(f.upstream_model),''),'未标注模型') AS model,
+             COALESCE(f.requested_model,'') AS requested_model,
+             COALESCE(f.upstream_model,'') AS upstream_model,
+             f.billing_mode,f.billing_type,
+             f.input_tokens,f.output_tokens,f.cache_creation_tokens,f.cache_read_tokens,
+             (f.input_tokens+f.output_tokens+f.cache_creation_tokens+f.cache_read_tokens)::float8 AS total_tokens,
+             f.duration_ms,f.first_token_ms,f.standard_cost_usd_reference,
+             f.user_charge_cny,f.recognized_revenue_cny,
+             snapshot.cost_mode,snapshot.basis_mode,snapshot.cost_status,
+             snapshot.calculated_cost_cny,snapshot.selling_multiplier,snapshot.upstream_multiplier,
+             snapshot.cny_per_reference_unit,snapshot.upstream_multiplier_source,
+             snapshot.rate_observation_id,snapshot.snapshot_origin,
+             COALESCE(snapshot.finalized,FALSE) AS cost_snapshot_finalized,
+             COUNT(*) OVER() AS total_count
+      FROM ${this.schema}.fact_usage_events f
+      LEFT JOIN ${this.schema}.dim_users u ON u.source_user_id=f.source_user_id
+      LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=f.source_account_id
+      LEFT JOIN ${this.schema}.fact_usage_cost_snapshots snapshot
+        ON snapshot.source_usage_id=f.source_usage_id
+      WHERE f.occurred_at >= $1 AND f.occurred_at < $2
+        AND ($3='' OR f.request_id ILIKE '%'||$3||'%'
+          OR f.source_usage_id::text ILIKE '%'||$3||'%'
+          OR f.model ILIKE '%'||$3||'%'
+          OR f.requested_model ILIKE '%'||$3||'%'
+          OR f.upstream_model ILIKE '%'||$3||'%'
+          OR u.email ILIKE '%'||$3||'%'
+          OR u.username ILIKE '%'||$3||'%'
+          OR a.name ILIKE '%'||$3||'%')
+      ORDER BY f.occurred_at DESC,f.source_usage_id DESC
+      LIMIT $4 OFFSET $5`, [start, end, search, pageSize, offset]);
+    return pageResult(result.rows.map((row) => ({
+      total_count: row.total_count,
+      sourceUsageId: number(row.source_usage_id),
+      requestId: row.request_id || '',
+      occurredAt: row.occurred_at,
+      userId: number(row.source_user_id),
+      email: row.email || '',
+      username: row.username || '',
+      accountId: number(row.source_account_id),
+      accountName: row.account_name || '',
+      groupId: number(row.source_group_id),
+      channelId: number(row.source_channel_id),
+      model: String(row.model || '').trim() || '未标注模型',
+      requestedModel: row.requested_model || '',
+      upstreamModel: row.upstream_model || '',
+      billingMode: row.billing_mode || '',
+      billingType: number(row.billing_type),
+      inputTokens: number(row.input_tokens),
+      outputTokens: number(row.output_tokens),
+      cacheCreationTokens: number(row.cache_creation_tokens),
+      cacheReadTokens: number(row.cache_read_tokens),
+      totalTokens: number(row.total_tokens),
+      tokens: number(row.total_tokens),
+      durationMs: nullableNumber(row.duration_ms),
+      firstTokenMs: nullableNumber(row.first_token_ms),
+      standardCostUsdReference: number(row.standard_cost_usd_reference),
+      userChargeCny: number(row.user_charge_cny),
+      recognizedRevenueCny: number(row.recognized_revenue_cny),
+      costMode: row.cost_mode || 'unconfigured',
+      basisMode: row.basis_mode || '',
+      costStatus: row.cost_status || 'not_snapshotted',
+      calculatedCostCny: nullableNumber(row.calculated_cost_cny),
+      sellingMultiplier: nullableNumber(row.selling_multiplier),
+      upstreamMultiplier: nullableNumber(row.upstream_multiplier),
+      cnyPerReferenceUnit: nullableNumber(row.cny_per_reference_unit),
+      upstreamMultiplierSource: row.upstream_multiplier_source || '',
+      rateObservationId: nullableNumber(row.rate_observation_id),
+      costSnapshotOrigin: row.snapshot_origin || '',
+      costSnapshotFinalized: Boolean(row.cost_snapshot_finalized),
     })), page, pageSize);
   }
 
@@ -730,7 +851,11 @@ export class PostgresRepository {
       LEFT JOIN cash c ON c.source_user_id=u.source_user_id
       LEFT JOIN adjustments ad ON ad.source_user_id=u.source_user_id
         WHERE ($5='' OR u.email ILIKE '%'||$5||'%' OR u.username ILIKE '%'||$5||'%')
-          AND ($8='all' OR (u.current_balance > 0 AND NOT u.exclude_from_balance_stats))
+          AND (
+            $8='all'
+            OR ($8='reported' AND u.current_balance > 0 AND NOT u.exclude_from_balance_stats)
+            OR ($8='whitelist' AND u.exclude_from_balance_stats)
+          )
       ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset, balanceScope]);
     return pageResult(result.rows.map((row) => {
       const recognizedRevenueCny = number(row.revenue_cny);
@@ -930,10 +1055,11 @@ export class PostgresRepository {
       )
       SELECT a.source_account_id AS id,a.name,a.platform,a.supplier,a.purchase_batch,a.status,a.expires_at,
              a.source_deleted_at,a.tags,a.cost_profile_id,
-              COALESCE(m.cost_mode,rule.cost_mode,cp.cost_mode,
+              COALESCE(NULLIF(m.cost_mode,'unconfigured'),rule.cost_mode,cp.cost_mode,
                 CASE
                   WHEN cp.cost_type='free' THEN 'free'
                   WHEN COALESCE(c.cost_record_count,0)>0 THEN 'fixed_purchase'
+                  WHEN probe.status='ok' AND probe.effective_rate_multiplier>0 AND probe.fresh_until>NOW() THEN 'probe_multiplier'
                   ELSE 'unconfigured'
                 END
               ) AS cost_type,COALESCE(u.revenue_cny,0) AS revenue_cny,
@@ -941,12 +1067,14 @@ export class PostgresRepository {
               COALESCE(c.period_cost,0) AS period_cost_cny,COALESCE(m.multiplier_cost_cny,0) AS multiplier_cost_cny,
               COALESCE(c.period_cost,0)+COALESCE(m.multiplier_cost_cny,0) AS effective_cost_cny,
               COALESCE(m.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
-              COALESCE(m.upstream_multiplier,rule.upstream_multiplier,probe.effective_rate_multiplier) AS upstream_multiplier,
+              COALESCE(m.upstream_multiplier,rule.upstream_multiplier,
+                CASE WHEN probe.status='ok' AND probe.fresh_until>NOW() THEN probe.effective_rate_multiplier END
+              ) AS upstream_multiplier,
               COALESCE(m.selling_multiplier,rule.selling_multiplier) AS selling_multiplier,
-              COALESCE(rule.basis_mode,'revenue_backsolve') AS basis_mode,
-              rule.cny_per_reference_unit AS cny_per_reference_unit,
-              COALESCE(m.upstream_multiplier_source,
-                CASE WHEN probe.id IS NOT NULL THEN 'probe_snapshot' ELSE '' END
+              COALESCE(rule.basis_mode,cp.basis_mode,'revenue_backsolve') AS basis_mode,
+              COALESCE(rule.cny_per_reference_unit,cp.cny_per_reference_unit) AS cny_per_reference_unit,
+              COALESCE(NULLIF(m.upstream_multiplier_source,''),
+                CASE WHEN probe.status='ok' AND probe.fresh_until>NOW() THEN 'probe_snapshot' ELSE '' END
               ) AS upstream_multiplier_source,
               probe.status AS probe_status,probe.observed_at AS probe_observed_at,probe.fresh_until AS probe_fresh_until,
               COALESCE(c.cost_record_count,0) AS cost_record_count,

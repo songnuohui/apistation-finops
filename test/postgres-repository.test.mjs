@@ -83,10 +83,109 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
   assert.match(usageByUser, /COALESCE\('token_weight', 'standard_cost_weight'\)/);
   assert.match(accounts, /LEAST\(p\.effective_to,\$4\)/);
   assert.match(accounts, /a\.source_deleted_at IS NULL AND a\.status='active'/);
+  assert.match(accounts, /NULLIF\(m\.cost_mode,'unconfigured'\)/);
+  assert.match(accounts, /WHEN probe\.status='ok' AND probe\.effective_rate_multiplier>0 AND probe\.fresh_until>NOW\(\) THEN 'probe_multiplier'/);
   assert.match(suppliers, /WHERE p\.status='active' AND p\.effective_from < \$4 AND p\.effective_to > \$3/);
   assert.deepEqual(queries.find((query) => query.text.includes('SELECT p.id,p.source_account_id')).params, [
     start, end, 'OpenAI',
   ]);
+});
+
+test('overview consumption rankings and model breakdown expose displayable model names', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('AS consumption_cny') && text.includes('JOIN "finops".dim_users')) {
+        return {
+          rows: [{
+            id: '7', email: 'customer@example.com', username: 'customer',
+            consumption_cny: '18.25', requests: '3', tokens: '2400',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes("GROUP BY COALESCE(NULLIF(BTRIM(d.model),''),'未标注模型')")) {
+        return {
+          rows: [{ name: 'gpt-5.6-sol', consumption_cny: '26.5', requests: '4', tokens: '3200' }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('WITH usage_by_model_account')) {
+        return {
+          rows: [{
+            name: 'gpt-5.6-sol', requests: '4', tokens: '3200', token_list_value_usd: '0.1',
+            charge_cny: '26.5', revenue_cny: '26.5', purchase_allocated_cost_cny: '0',
+            multiplier_cost_cny: '0', effective_cost_cny: '0', profit_cny: '26.5',
+            unbooked_account_count: '0', total_count: '1',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  repository.getSummary = async () => ({ cash: {}, operations: {}, usage: {}, alerts: [] });
+  const range = {
+    start: new Date('2026-08-02T16:00:00.000Z'), end: new Date('2026-08-03T16:00:00.000Z'),
+    dailyStart: '2026-08-03', dailyEnd: '2026-08-03', page: 1, pageSize: 20, offset: 0,
+  };
+
+  const [dashboard, models] = await Promise.all([
+    repository.getOverviewDashboard(range),
+    repository.getUsageBreakdown(range),
+  ]);
+
+  assert.deepEqual(dashboard.rankings.userConsumption, [{
+    id: 7, email: 'customer@example.com', username: 'customer', userChargeCny: 18.25, requests: 3, tokens: 2400,
+  }]);
+  assert.deepEqual(dashboard.rankings.modelConsumption, [{
+    name: 'gpt-5.6-sol', userChargeCny: 26.5, requests: 4, tokens: 3200,
+  }]);
+  assert.equal(models.items[0].name, 'gpt-5.6-sol');
+  assert.match(queries.find((query) => query.text.includes('WITH usage_by_model_account')).text, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
+});
+
+test('usage event details are read from FinOps facts with searchable model fallback and immutable cost status', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      return {
+        rows: [{
+          source_usage_id: '42', request_id: 'req-42', occurred_at: '2026-08-03T04:00:00.000Z',
+          source_user_id: '7', email: 'customer@example.com', username: 'customer',
+          source_account_id: '13', account_name: 'Primary OpenAI', source_group_id: '3', source_channel_id: '5',
+          model: 'requested-model', requested_model: 'requested-model', upstream_model: 'upstream-model',
+          billing_mode: 'token', billing_type: '0', input_tokens: '100', output_tokens: '20',
+          cache_creation_tokens: '5', cache_read_tokens: '10', total_tokens: '135', duration_ms: '3210', first_token_ms: '420',
+          standard_cost_usd_reference: '0.012', user_charge_cny: '0.8', recognized_revenue_cny: '0.7',
+          cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve', cost_status: 'priced',
+          calculated_cost_cny: '0.4', selling_multiplier: '1', upstream_multiplier: '0.5',
+          cny_per_reference_unit: null, upstream_multiplier_source: 'probe_observation', rate_observation_id: '99',
+          snapshot_origin: 'live_sync', cost_snapshot_finalized: true, total_count: '4',
+        }],
+        rowCount: 1,
+      };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const start = new Date('2026-08-02T16:00:00.000Z');
+  const end = new Date('2026-08-03T16:00:00.000Z');
+  const result = await repository.listUsageEvents({ start, end, search: 'req-42', page: 2, pageSize: 20, offset: 20 });
+
+  assert.equal(result.total, 4);
+  assert.equal(result.items[0].model, 'requested-model');
+  assert.equal(result.items[0].totalTokens, 135);
+  assert.equal(result.items[0].calculatedCostCny, 0.4);
+  assert.equal(result.items[0].costSnapshotFinalized, true);
+  assert.deepEqual(queries[0].params, [start, end, 'req-42', 20, 20]);
+  assert.match(queries[0].text, /FROM "finops"\.fact_usage_events f/);
+  assert.match(queries[0].text, /LEFT JOIN "finops"\.fact_usage_cost_snapshots snapshot/);
+  assert.match(queries[0].text, /NULLIF\(BTRIM\(f\.requested_model\),''\)/);
+  assert.match(queries[0].text, /snapshot\.cost_status/);
+  assert.doesNotMatch(queries[0].text, /sub2api/);
 });
 
 test('overview and non-cash-credit details exclude affiliate quota records', async () => {
@@ -162,11 +261,14 @@ test('reported balance scope excludes self-use accounts only from the balance li
   };
   await repository.listUsers({ ...range, balanceScope: 'all' });
   await repository.listUsers({ ...range, balanceScope: 'reported' });
+  await repository.listUsers({ ...range, balanceScope: 'whitelist' });
   const userQueries = queries.filter((query) => query.text.includes('usage_by_user_account'));
-  assert.equal(userQueries.length, 2);
+  assert.equal(userQueries.length, 3);
   assert.equal(userQueries[0].params.at(-1), 'all');
   assert.equal(userQueries[1].params.at(-1), 'reported');
-  assert.match(userQueries[0].text, /\$8='all' OR \(u\.current_balance > 0 AND NOT u\.exclude_from_balance_stats\)/);
+  assert.equal(userQueries[2].params.at(-1), 'whitelist');
+  assert.match(userQueries[0].text, /\$8='reported' AND u\.current_balance > 0 AND NOT u\.exclude_from_balance_stats/);
+  assert.match(userQueries[0].text, /\$8='whitelist' AND u\.exclude_from_balance_stats/);
   assert.match(userQueries[0].text, /FROM usage_by_user_account u/);
 });
 

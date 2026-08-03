@@ -731,6 +731,11 @@ export class SyncService {
             CASE
               WHEN account_profile.cost_type='free' THEN 'free'
               WHEN fixed_period.id IS NOT NULL THEN 'fixed_purchase'
+              -- An account with no FinOps rule may opt into automatic pricing only
+              -- through a confirmed, read-only upstream probe observation.
+              WHEN observation.status='ok'
+                AND observation.effective_rate_multiplier>=0
+                AND observation.fresh_until>f.occurred_at THEN 'probe_multiplier'
               ELSE 'unconfigured'
             END) AS configured_cost_mode,
           COALESCE(rule.basis_mode,rule_profile.basis_mode,account_profile.basis_mode,'revenue_backsolve') AS basis_mode,
@@ -792,11 +797,10 @@ export class SyncService {
           LIMIT 1
         ) fixed_period ON TRUE
         LEFT JOIN LATERAL (
-          SELECT o.id,o.effective_rate_multiplier
+          SELECT o.id,o.status,o.effective_rate_multiplier,o.fresh_until
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
             AND COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) <= f.occurred_at
-            AND o.status='ok'
           ORDER BY COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) DESC,o.id DESC
           LIMIT 1
         ) observation ON TRUE

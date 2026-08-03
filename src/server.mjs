@@ -179,6 +179,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>repository.getOverviewDashboard(range())));
   if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>repository.getTrend(range())));
   if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>repository.getUsageBreakdown({...range(),...page()})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/events')return json(res,200,await cached('usage-events',config.listCacheTtlSeconds,()=>repository.listUsageEvents({...range(),...page(),search:searchTerm(url.searchParams)})));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&userDetails){
     const userId=Number(userDetails[1]);

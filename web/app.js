@@ -15,11 +15,15 @@ const state = {
   userSearch: '',
   userSort: 'userChargeCny',
   userSortDirection: 'desc',
+  usageView: window.localStorage.getItem('finops.usage-view') === 'models' ? 'models' : 'events',
+  usageSearch: '',
   overviewTrend: null,
   overviewMetrics: null,
   overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
+  overviewConsumptionRanking: window.localStorage.getItem('finops.overview-consumption-ranking') === 'models' ? 'models' : 'users',
   userDetail: null,
   overviewDetail: null,
+  whitelistManager: null,
   runtimeRefreshTimer: null,
 };
 
@@ -27,7 +31,7 @@ const pageMeta = {
   overview: ['经营总览', '实收现金、用户实际消费、账号成本与经营毛利'],
   users: ['用户账务与利润', '充值、人工调账、实际消费和用户贡献'],
   accounts: ['账号台账与成本', '账号采购、成本归属、实际消费与毛利'],
-  usage: ['用量与扣费', '按 sub2api 实际扣费口径查看模型消费'],
+  usage: ['用量与扣费', '按模型汇总或逐请求核查实际扣费、成本快照与计价来源'],
   suppliers: ['供应商与采购', '上游资源、采购批次与经营毛利'],
   costs: ['成本核算', '成本模板、生效期间和分摊方法'],
   runtime: ['并发与排队', '只读展示 Sub2API 当前并发、工作线程和排队负载'],
@@ -101,15 +105,24 @@ function overviewIdentity(item, field = 'email') {
   return state.overviewAccountMasked ? maskedIdentity(value) : String(value);
 }
 
-function dashboardRankList(items, { value, detail }) {
+function modelName(item) {
+  return String(item?.name || item?.model || '').trim() || '未标注模型';
+}
+
+function dashboardRankList(items, {
+  value,
+  detail,
+  identity = (item) => overviewIdentity(item),
+  secondary = (item) => (item.username && item.username !== item.email
+    ? (state.overviewAccountMasked ? maskedIdentity(item.username) : item.username)
+    : ''),
+}) {
   if (!items.length) return '<div class="dashboard-rank-empty">当前周期暂无数据</div>';
   return items.map((item, index) => {
-    const secondary = item.username && item.username !== item.email
-      ? `<small>${escapeHtml(state.overviewAccountMasked ? maskedIdentity(item.username) : item.username)}</small>`
-      : '';
+    const secondaryText = secondary(item);
     return `<div class="dashboard-rank-item">
       <span class="dashboard-rank-index">${index + 1}</span>
-      <div class="dashboard-rank-user"><strong>${escapeHtml(overviewIdentity(item))}</strong>${secondary}</div>
+      <div class="dashboard-rank-user"><strong>${escapeHtml(identity(item))}</strong>${secondaryText ? `<small>${escapeHtml(secondaryText)}</small>` : ''}</div>
       <div class="dashboard-rank-value"><strong>${value(item)}</strong><small>${detail(item)}</small></div>
     </div>`;
   }).join('');
@@ -474,6 +487,21 @@ async function renderOverview() {
   const totalTokens = Number(summary.usage.inputTokens || 0)
     + Number(summary.usage.outputTokens || 0)
     + Number(summary.usage.cacheTokens || 0);
+  const consumptionRankingScope = state.overviewConsumptionRanking === 'models' ? 'models' : 'users';
+  const consumptionRankingItems = consumptionRankingScope === 'models'
+    ? (dashboard.rankings.modelConsumption || [])
+    : (dashboard.rankings.userConsumption || []);
+  const consumptionRankingOptions = consumptionRankingScope === 'models'
+    ? {
+      identity: (item) => modelName(item),
+      secondary: () => '',
+      value: (item) => cny(item.userChargeCny),
+      detail: (item) => `${compact(item.requests)} 次请求 · ${compact(item.tokens)} Token`,
+    }
+    : {
+      value: (item) => cny(item.userChargeCny),
+      detail: (item) => `${compact(item.requests)} 次请求 · ${compact(item.tokens)} Token`,
+    };
   state.overviewMetrics = {
     consumptionCny: Number(operations.consumptionCny ?? operations.userChargeCny ?? 0),
     requests: Number(summary.usage.requests || 0),
@@ -482,7 +510,8 @@ async function renderOverview() {
     balanceUserCount: Number(dashboard.totals.balanceUserCount || 0),
   };
   state.lastExport = [
-    ...dashboard.rankings.requestActivity.map((item) => ({ ranking: '请求活跃度', ...item })),
+    ...(dashboard.rankings.userConsumption || []).map((item) => ({ ranking: '用户消费排行', ...item })),
+    ...(dashboard.rankings.modelConsumption || []).map((item) => ({ ranking: '模型消费排行', ...item })),
     ...dashboard.rankings.tokenUsage.map((item) => ({ ranking: 'Token 使用排行', ...item })),
     ...dashboard.rankings.cashRecharge.map((item) => ({ ranking: '用户充值排行', ...item })),
   ];
@@ -496,12 +525,15 @@ async function renderOverview() {
     </div>
     <div class="overview-ranking-grid">
       <section class="panel dashboard-rank-panel">
-        <div class="panel-header"><h2>请求活跃度</h2><span>${compact(summary.usage.activeUsers)} 位活跃用户</span></div>
+        <div class="panel-header">
+          <div><h2>消费排行</h2><span>${consumptionRankingScope === 'models' ? `${compact(consumptionRankingItems.length)} 个模型` : `${compact(summary.usage.activeUsers)} 位活跃用户`}</span></div>
+          <div class="dashboard-rank-switch" role="group" aria-label="消费排行维度">
+            <button type="button" data-overview-consumption-rank="users" class="${consumptionRankingScope === 'users' ? 'active' : ''}" aria-pressed="${consumptionRankingScope === 'users'}">用户</button>
+            <button type="button" data-overview-consumption-rank="models" class="${consumptionRankingScope === 'models' ? 'active' : ''}" aria-pressed="${consumptionRankingScope === 'models'}">模型</button>
+          </div>
+        </div>
         <div class="dashboard-rank-list">${
-          dashboardRankList(dashboard.rankings.requestActivity, {
-            value: (item) => `${compact(item.requests)} 次`,
-            detail: (item) => `${compact(item.tokens)} Token`,
-          })
+          dashboardRankList(consumptionRankingItems, consumptionRankingOptions)
         }</div>
       </section>
       <section class="panel dashboard-rank-panel">
@@ -538,7 +570,7 @@ async function renderOverview() {
         { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '标准牌价 USD', right: true },
         { label: '用户实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
       ], modelData.items.map((item) => [
-        `<span class="primary-text">${escapeHtml(item.name)}</span>`, compact(item.requests), compact(item.tokens), usd(item.tokenListValueUsd),
+        `<span class="primary-text">${escapeHtml(modelName(item))}</span>`, compact(item.requests), compact(item.tokens), usd(item.tokenListValueUsd),
         cny(item.userChargeCny), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
       ]), 1220)
     }${pager(modelData, 'overviewModels', '个模型')}</section>`;
@@ -800,6 +832,85 @@ function overviewDetailPager(data, label) {
   </div>`;
 }
 
+function multiplier(value) {
+  if (value === null || value === undefined || value === '') return '--';
+  return `${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 })}x`;
+}
+
+function multiplierSourceLabel(value) {
+  return ({
+    usage_log_snapshot: '请求倍率快照',
+    probe_observation: '自动探测',
+    probe_snapshot: '自动探测',
+    manual_rule: '手动规则',
+    audited_reprice: '审计重算',
+  })[value] || '待确认来源';
+}
+
+function probeStatusLabel(value) {
+  return ({
+    ok: '探测已确认',
+    unsupported: '上游未提供探测',
+    pending: '等待探测',
+    failed: '探测失败',
+    unknown: '尚无探测结果',
+  })[String(value || '').toLowerCase()] || '尚无探测结果';
+}
+
+function accountPricingDetail(account) {
+  const mode = account.costMode || account.costType;
+  if (mode === 'free') return '<span class="primary-text">免费资源</span><div class="secondary-text">不计入上游成本</div>';
+  if (mode === 'fixed_purchase') {
+    if (!account.currentCostPeriodId) return '<span class="secondary-text">待登记固定成本期</span>';
+    const total = Number(account.currentOriginalAmount || 0) + Number(account.currentFeeAmount || 0) + Number(account.currentTaxAmount || 0);
+    return `<span class="primary-text">${cny(total)}</span><div class="secondary-text">固定成本期 · ${dateOnly(account.currentEffectiveFrom)}</div>`;
+  }
+  if (mode === 'manual_multiplier') {
+    return `<span class="primary-text">手动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">销售 ${multiplier(account.sellingMultiplier)} · 人工可随时调整</div>`;
+  }
+  if (mode === 'probe_multiplier') {
+    if (account.upstreamMultiplier) {
+      return `<span class="primary-text">自动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">${escapeHtml(multiplierSourceLabel(account.upstreamMultiplierSource))} · ${escapeHtml(probeStatusLabel(account.probeStatus))}</div>`;
+    }
+    const nextStep = account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '等待有效倍率快照';
+    return `<span class="secondary-text">${escapeHtml(probeStatusLabel(account.probeStatus))}</span><div class="secondary-text">${nextStep}</div>`;
+  }
+  return '<span class="secondary-text">先选择固定成本或倍率模式</span>';
+}
+
+function costStatusLabel(value) {
+  return ({
+    priced: '已计价',
+    fixed_cost: '固定成本分摊',
+    free: '免费资源',
+    unconfigured: '未配置成本规则',
+    missing_upstream_multiplier: '缺少上游倍率',
+    missing_selling_multiplier: '缺少销售倍率',
+    missing_cny_basis: '缺少 CNY 基准',
+    not_snapshotted: '等待成本快照',
+  })[value] || value || '等待成本快照';
+}
+
+function usageCostCell(item) {
+  const source = item.upstreamMultiplierSource ? multiplierSourceLabel(item.upstreamMultiplierSource) : '';
+  const rate = item.upstreamMultiplier === null || item.upstreamMultiplier === undefined
+    ? '' : `上游 ${multiplier(item.upstreamMultiplier)}`;
+  if (item.calculatedCostCny === null || item.calculatedCostCny === undefined) {
+    return `<span class="secondary-text">待计价</span><div class="secondary-text">${escapeHtml([costStatusLabel(item.costStatus), source].filter(Boolean).join(' · '))}</div>`;
+  }
+  return `<span class="primary-text">${cny(item.calculatedCostCny)}</span><div class="secondary-text">${escapeHtml([source, rate].filter(Boolean).join(' · ') || costStatusLabel(item.costStatus))}</div>`;
+}
+
+function usageCostState(item) {
+  const settled = ['priced', 'fixed_cost', 'free'].includes(item.costStatus);
+  const lifecycle = item.costSnapshotFinalized ? '已封存' : '当日可更新';
+  return `<span class="status ${settled ? '' : 'warning'}">${escapeHtml(costStatusLabel(item.costStatus))}</span><div class="secondary-text">${lifecycle}</div>`;
+}
+
+function durationText(value) {
+  return value === null || value === undefined ? '--' : `${(Number(value) / 1000).toFixed(2)}s`;
+}
+
 function bindOverviewDetailControls() {
   const form = document.querySelector('#modal-form');
   form.onclick = async (event) => {
@@ -906,7 +1017,7 @@ function renderUsageOverviewDetailModal(data) {
         { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '实际消费 CNY', right: true },
         { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
       ], data.items.map((item) => [
-        `<span class="primary-text">${escapeHtml(item.name)}</span>`, compact(item.requests), compact(item.tokens), cny(item.userChargeCny),
+        `<span class="primary-text">${escapeHtml(modelName(item))}</span>`, compact(item.requests), compact(item.tokens), cny(item.userChargeCny),
         cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
       ]), 1080)}
       ${overviewDetailPager(data, overviewDetailMeta[detail.type].label)}
@@ -996,6 +1107,7 @@ async function renderUsersEnhanced(search = state.userSearch) {
   state.userItems = new Map(data.items.map((item) => [String(item.id), item]));
   content.innerHTML = `${section('用户核算', '点击用户查看充值、消费明细与趋势；自用账号白名单只排除余额统计，消耗和成本仍正常计入')}
     <section class="table-panel">${searchTools('搜索邮箱、用户名', `
+      <button type="button" class="button" id="user-whitelist-button">${icon('shield-check')}自用账号白名单</button>
       <span class="selection-text" id="user-selection-count">已选择 ${state.selectedUsers.size} 位</span>
       <button type="button" class="button" id="user-exclude-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-x')}加入自用账号白名单</button>
       <button type="button" class="button" id="user-include-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-check')}恢复余额统计</button>
@@ -1061,8 +1173,126 @@ async function renderUsersEnhanced(search = state.userSearch) {
       toast(error.message);
     }
   };
+  document.querySelector('#user-whitelist-button')?.addEventListener('click', openWhitelistManager);
   document.querySelector('#user-exclude-balance')?.addEventListener('click', () => updateWhitelist(true));
   document.querySelector('#user-include-balance')?.addEventListener('click', () => updateWhitelist(false));
+}
+
+function whitelistViewTabs(scope) {
+  return [
+    ['whitelist', '当前白名单'], ['all', '搜索全部用户'],
+  ].map(([value, label]) => (
+    `<button type="button" class="${scope === value ? 'active' : ''}" data-whitelist-scope="${value}" aria-pressed="${scope === value}">${label}</button>`
+  )).join('');
+}
+
+function whitelistPager(data) {
+  const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
+  return `<div class="detail-pager">
+    <span>共 ${compact(data.total)} 位用户</span>
+    <div class="pager-nav" aria-label="白名单分页">
+      <button type="button" class="icon-button pager-button" data-whitelist-page="${Math.max(1, data.page - 1)}" title="上一页" ${data.page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
+      ${pageNumbers(data.page, pages).map((value) => value === 'ellipsis'
+        ? '<span class="pager-ellipsis">…</span>'
+        : `<button type="button" class="page-number ${value === data.page ? 'active' : ''}" data-whitelist-page="${value}" ${value === data.page ? 'aria-current="page"' : ''}>${value}</button>`).join('')}
+      <button type="button" class="icon-button pager-button" data-whitelist-page="${Math.min(pages, data.page + 1)}" title="下一页" ${data.page >= pages ? 'disabled' : ''}>&rsaquo;</button>
+    </div>
+    <span>第 ${data.page} / ${pages} 页</span>
+  </div>`;
+}
+
+function renderWhitelistManager(data) {
+  const manager = state.whitelistManager;
+  if (!manager) return;
+  const showingWhitelist = manager.scope === 'whitelist';
+  openContentModal('自用账号白名单', `
+    <div class="whitelist-toolbar">
+      <div class="whitelist-view-tabs" role="group" aria-label="白名单视图">${whitelistViewTabs(manager.scope)}</div>
+      <label class="whitelist-search">${icon('search')}<input type="search" data-whitelist-search placeholder="搜索邮箱或用户名" value="${escapeHtml(manager.search)}"></label>
+    </div>
+    <div class="whitelist-note">白名单只从“剩余余额”统计中排除；用户消费、成本和排行继续正常计入。配置仅保存于 FinOps。</div>
+    <section class="detail-section whitelist-table-section">
+      <div class="detail-section-header"><h3>${showingWhitelist ? '已排除余额统计的自用账号' : '全部用户'}</h3><span>${showingWhitelist ? '可随时恢复余额统计' : '搜索后直接加入或剔除'}</span></div>
+      ${table([
+        { label: '用户' }, { label: '当前余额 CNY', right: true }, { label: '实际消费 CNY', right: true },
+        { label: 'Token', right: true }, { label: '余额统计' }, { label: '操作' },
+      ], data.items.map((item) => [
+        `<span class="primary-text">${escapeHtml(item.email || item.username || `用户 #${item.id}`)}</span><div class="secondary-text">ID ${item.id}${item.username && item.username !== item.email ? ` · ${escapeHtml(item.username)}` : ''}</div>`,
+        cny(item.balanceCny), cny(item.userChargeCny), compact(item.tokens),
+        item.excludeFromBalanceStats ? '<span class="status warning">已排除</span>' : '<span class="status">参与统计</span>',
+        item.excludeFromBalanceStats
+          ? `<button type="button" class="button" data-whitelist-toggle="remove" data-whitelist-user="${item.id}">${icon('user-round-check')}恢复</button>`
+          : `<button type="button" class="button primary" data-whitelist-toggle="add" data-whitelist-user="${item.id}">${icon('user-round-x')}加入</button>`,
+      ]), 950)}
+      ${whitelistPager(data)}
+    </section>
+  `, 'whitelist-modal');
+
+  const form = document.querySelector('#modal-form');
+  form.onclick = async (event) => {
+    const scopeButton = event.target.closest('[data-whitelist-scope]');
+    if (scopeButton) {
+      manager.scope = scopeButton.dataset.whitelistScope === 'whitelist' ? 'whitelist' : 'all';
+      manager.search = '';
+      manager.page = 1;
+      await loadWhitelistManager();
+      return;
+    }
+    const pageButton = event.target.closest('[data-whitelist-page]');
+    if (pageButton && !pageButton.disabled) {
+      manager.page = Number(pageButton.dataset.whitelistPage);
+      await loadWhitelistManager();
+      return;
+    }
+    const toggleButton = event.target.closest('[data-whitelist-toggle]');
+    if (!toggleButton) return;
+    const excludeFromBalanceStats = toggleButton.dataset.whitelistToggle === 'add';
+    try {
+      await api(`/users/${Number(toggleButton.dataset.whitelistUser)}/balance-statistics-whitelist`, {
+        method: 'PATCH', range: false,
+        body: JSON.stringify({ excludeFromBalanceStats }),
+      });
+      toast(excludeFromBalanceStats ? '已加入自用账号白名单' : '已恢复余额统计');
+      if (state.page === 'users') await renderUsersEnhanced(state.userSearch);
+      await loadWhitelistManager();
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  let searchTimer;
+  form.querySelector('[data-whitelist-search]')?.addEventListener('input', (event) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      manager.search = event.target.value;
+      manager.page = 1;
+      loadWhitelistManager();
+    }, 260);
+  });
+}
+
+async function loadWhitelistManager() {
+  const manager = state.whitelistManager;
+  if (!manager) return;
+  const form = document.querySelector('#modal-form');
+  if (form) form.innerHTML = '<div class="detail-loading"><span></span>正在读取白名单</div>';
+  try {
+    const query = new URLSearchParams({
+      page: String(manager.page), page_size: String(manager.pageSize), balance_scope: manager.scope,
+    });
+    if (manager.search) query.set('search', manager.search);
+    const data = await api(`/users?${query}`);
+    if (state.whitelistManager !== manager) return;
+    renderWhitelistManager(data);
+  } catch (error) {
+    if (state.whitelistManager !== manager) return;
+    if (form) form.innerHTML = `<div class="empty"><strong>白名单读取失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openWhitelistManager() {
+  state.whitelistManager = { scope: 'whitelist', search: '', page: 1, pageSize: 20 };
+  openContentModal('自用账号白名单', '<div class="detail-loading"><span></span>正在读取白名单</div>', 'whitelist-modal');
+  loadWhitelistManager();
 }
 
 function accountActionButtons(item) {
@@ -1078,6 +1308,14 @@ function accountScopeTabs(active) {
     ['current', '当前可用'], ['deleted', '已删除历史'], ['all', '全部账号'],
   ].map(([value, label]) => (
     `<button type="button" class="${active === value ? 'active' : ''}" data-account-scope="${value}" aria-pressed="${active === value}">${label}</button>`
+  )).join('');
+}
+
+function usageViewTabs(active) {
+  return [
+    ['events', '请求明细'], ['models', '模型汇总'],
+  ].map(([value, label]) => (
+    `<button type="button" class="${active === value ? 'active' : ''}" data-usage-view="${value}" aria-pressed="${active === value}">${label}</button>`
   )).join('');
 }
 
@@ -1103,20 +1341,18 @@ async function renderAccounts(search = state.accountSearch) {
     <section class="table-panel">${searchTools('搜索账号、平台、供应商', actions, search)}${
       table([
         { label: '<input type="checkbox" id="select-current-accounts" title="选择当前页">' }, { label: '账号' }, { label: '平台/供应商' },
-        { label: '核算规则' }, { label: '固定成本期/倍率' }, { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true },
+        { label: '核算规则' }, { label: '本期计价来源' }, { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true },
         { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' }, { label: '编辑' },
       ], data.items.map((item) => [
         `<input type="checkbox" data-account-select="${item.id}" ${state.selectedAccounts.has(Number(item.id)) ? 'checked' : ''}>`,
         `<span class="primary-text">${escapeHtml(item.name)}</span><div class="secondary-text">#${item.id} · ${tags(item.tags)} ${accountLifecycle(item)}</div>`,
         `<span class="primary-text">${escapeHtml(item.platform)}</span><div class="secondary-text">${escapeHtml(item.supplier || '未标记供应商')}</div>`,
         `<span class="tag neutral">${escapeHtml(costModeLabel(item.costMode || item.costType))}</span><div class="secondary-text">${
-          item.probeStatus ? `探测 ${escapeHtml(item.probeStatus)}` : item.upstreamMultiplier ? `上游 ${item.upstreamMultiplier}x` : ''
+          item.costMode === 'probe_multiplier' ? probeStatusLabel(item.probeStatus) : item.upstreamMultiplier ? `上游 ${multiplier(item.upstreamMultiplier)}` : ''
         }</div>`,
-        item.currentCostPeriodId ? `${dateOnly(item.currentEffectiveFrom)}<div class="secondary-text">${cny(item.currentOriginalAmount)} + 费税 ${cny(Number(item.currentFeeAmount) + Number(item.currentTaxAmount))}</div>`
-          : item.upstreamMultiplier ? `<span class="primary-text">上游 ${item.upstreamMultiplier}x</span><div class="secondary-text">销售 ${item.sellingMultiplier || '--'}x</div>`
-          : '<span class="secondary-text">未登记</span>',
+        accountPricingDetail(item),
         cny(item.userChargeCny), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item), accountActionButtons(item),
-      ]), 1330)
+      ]), 1390)
     }${pager(data, 'accountsSearch', '个账号')}</section>`;
   bindSearch(renderAccounts);
   document.querySelector('#account-cost-button')?.addEventListener('click', () => openSingleCostModal(data.items, profiles));
@@ -1130,17 +1366,48 @@ async function renderAccounts(search = state.accountSearch) {
   });
 }
 
-async function renderUsage() {
-  const data = await api(`/usage/models?${queryFor('usageModels')}`);
+async function renderUsage(search = state.usageSearch) {
+  state.usageSearch = search;
+  const view = state.usageView === 'models' ? 'models' : 'events';
+  const viewTabs = `<div class="usage-view-tabs" role="group" aria-label="用量视图">${usageViewTabs(view)}</div>`;
+  if (view === 'models') {
+    const data = await api(`/usage/models?${queryFor('usageModels')}`);
+    state.lastExport = data.items;
+    content.innerHTML = `${section('用量与扣费', '模型汇总用于对比规模、实际扣费与已登记成本；需要追溯时切换到请求明细')}
+      <section class="table-panel"><div class="table-tools"><div class="usage-view-copy"><strong>模型汇总</strong><span>按模型聚合，不展示单笔请求</span></div><div class="table-actions">${viewTabs}</div></div>${table([
+        { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '标准牌价 USD', right: true },
+        { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
+      ], data.items.map((item) => [
+        `<span class="primary-text">${escapeHtml(modelName(item))}</span>`, compact(item.requests), compact(item.tokens), usd(item.tokenListValueUsd),
+        cny(item.userChargeCny), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
+      ]), 1190)}${pager(data, 'usageModels', '个模型')}</section>`;
+    return;
+  }
+
+  const data = await api(`/usage/events?${queryFor('usageEvents', search)}`);
   state.lastExport = data.items;
-  content.innerHTML = `${section('模型与 Token', '标准牌价 USD 仅作上游参考，经营收入使用实际扣费 CNY')}
-    <section class="table-panel">${table([
-      { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '标准牌价 USD', right: true },
-      { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
-    ], data.items.map((item) => [
-      `<span class="primary-text">${escapeHtml(item.name)}</span>`, compact(item.requests), compact(item.tokens), usd(item.tokenListValueUsd),
-      cny(item.userChargeCny), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
-    ]), 1190)}${pager(data, 'usageModels', '个模型')}</section>`;
+  content.innerHTML = `${section('用量与扣费', '逐请求核对模型、Token、实际扣费、成本快照和倍率来源；与总览汇总分开查看')}
+    <section class="table-panel">${searchTools('搜索请求 ID、用户、账号或模型', viewTabs, search)}${table([
+      { label: '时间' }, { label: '请求 / 用户' }, { label: '模型' }, { label: '上游账号' },
+      { label: 'Token 明细', right: true }, { label: '实际扣费 CNY', right: true }, { label: '计算成本 CNY', right: true },
+      { label: '计价状态' }, { label: '耗时', right: true },
+    ], data.items.map((item) => {
+      const modelDetail = [
+        item.requestedModel && item.requestedModel !== item.model ? `请求 ${item.requestedModel}` : '',
+        item.upstreamModel && item.upstreamModel !== item.model ? `上游 ${item.upstreamModel}` : '',
+      ].filter(Boolean).join(' · ');
+      const cacheTokens = Number(item.cacheCreationTokens || 0) + Number(item.cacheReadTokens || 0);
+      return [
+        dateTime(item.occurredAt),
+        `<span class="primary-text">${escapeHtml(item.requestId || `#${item.sourceUsageId}`)}</span><div class="secondary-text">${escapeHtml(item.email || item.username || `用户 #${item.userId}`)}</div>`,
+        `<span class="primary-text">${escapeHtml(modelName(item))}</span>${modelDetail ? `<div class="secondary-text">${escapeHtml(modelDetail)}</div>` : ''}`,
+        `<span class="primary-text">${escapeHtml(item.accountName || `#${item.accountId || '--'}`)}</span><div class="secondary-text">组 #${item.groupId || '--'} · 渠道 #${item.channelId || '--'}</div>`,
+        `<span class="primary-text">${compact(item.totalTokens)}</span><div class="secondary-text">入 ${compact(item.inputTokens)} · 出 ${compact(item.outputTokens)} · 缓存 ${compact(cacheTokens)}</div>`,
+        `<span class="primary-text">${cny(item.userChargeCny)}</span><div class="secondary-text">目录价 ${usd(item.standardCostUsdReference)}</div>`,
+        usageCostCell(item), usageCostState(item), durationText(item.durationMs),
+      ];
+    }), 1740)}${pager(data, 'usageEvents', '笔请求')}</section>`;
+  bindSearch(renderUsage);
 }
 
 async function renderSuppliers(search = '') {
@@ -1322,6 +1589,7 @@ function closeModal() {
   document.querySelector('#modal-backdrop').hidden = true;
   state.userDetail = null;
   state.overviewDetail = null;
+  state.whitelistManager = null;
 }
 
 function costFields(profiles, account, { includeAccount = false, batch = false } = {}) {
@@ -1440,9 +1708,9 @@ function ledgerFields(profiles, account) {
   const profileId = account.costProfileId || '';
   return [
     { name: 'costProfileId', label: '成本模板', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...profiles.map((item) => [item.id, item.name])] },
-    { name: 'costMode', label: '核算模式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['probe_multiplier', '探测上游倍率'], ['manual_multiplier', '手动上游倍率'], ['fixed_purchase', '固定采购成本'], ['free', '免费资源']] },
+    { name: 'costMode', label: '核算模式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['probe_multiplier', '自动读取上游探测倍率'], ['manual_multiplier', '手动输入上游倍率'], ['fixed_purchase', '固定采购成本'], ['free', '免费资源']] },
     { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
-    { name: 'upstreamMultiplier', label: '手动上游倍率', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
+    { name: 'upstreamMultiplier', label: '手动上游倍率（仅手动模式）', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
     { name: 'sellingMultiplier', label: '销售倍率覆盖', type: 'number', required: false, value: account.sellingMultiplier || '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
     { name: 'changeStrategy', label: '本次计价变更', type: 'select', value: 'future_only', options: [['future_only', '后续用量生效'], ['current_day', '从今天 0 点重算']] },
@@ -1458,16 +1726,25 @@ function changeStrategyLabel(value) {
 
 function accountRuleText(account) {
   if (account.costMode === 'manual_multiplier' || account.costMode === 'probe_multiplier') {
-    const upstream = account.upstreamMultiplier ? `上游 ${account.upstreamMultiplier}x` : '上游待补';
-    const selling = account.sellingMultiplier ? `销售 ${account.sellingMultiplier}x` : '销售待补';
+    const upstream = account.upstreamMultiplier ? `上游 ${multiplier(account.upstreamMultiplier)}` : '上游待补';
+    const selling = account.sellingMultiplier ? `销售 ${multiplier(account.sellingMultiplier)}` : '销售待补';
     return `${costModeLabel(account.costMode)} · ${upstream} / ${selling}`;
   }
   return costModeLabel(account.costMode || account.costType);
 }
 
+function accountAutoPricingText(account) {
+  if (account.costMode === 'manual_multiplier') return '手动倍率不会被自动探测覆盖';
+  if (account.costMode !== 'probe_multiplier') return '当前规则不使用倍率计价';
+  const status = probeStatusLabel(account.probeStatus);
+  if (!account.upstreamMultiplier) return `${status} · 等待可用倍率`;
+  return `${status} · ${multiplier(account.upstreamMultiplier)} · ${multiplierSourceLabel(account.upstreamMultiplierSource)}`;
+}
+
 function accountRuleContext(account) {
   return `<div class="cost-rule-context">
     <div><span>当前规则</span><strong>${escapeHtml(accountRuleText(account))}</strong></div>
+    <div><span>自动探测 / 手动覆盖</span><strong>${escapeHtml(accountAutoPricingText(account))}</strong></div>
     <div><span>最后变更</span><strong>${dateTime(account.lastCostRuleChangedAt)}${account.lastCostRuleChangedBy ? ` · ${escapeHtml(account.lastCostRuleChangedBy)}` : ''}</strong></div>
     <div><span>已封存至</span><strong>${dateTime(account.archivedThrough)}</strong></div>
   </div>`;
@@ -1581,7 +1858,7 @@ function openAccountCostRepriceModal(account) {
   openModal('历史成本更正', [
     { name: 'effectiveFrom', label: '更正开始时间', type: 'datetime-local', value: dateTimeInputValue(start) },
     { name: 'effectiveTo', label: '更正结束时间', type: 'datetime-local', value: dateTimeInputValue(new Date()) },
-    { name: 'costMode', label: '核算模式', type: 'select', value: costMode, options: [['manual_multiplier', '手动上游倍率'], ['probe_multiplier', '已确认探测倍率'], ['free', '免费资源']] },
+    { name: 'costMode', label: '核算模式', type: 'select', value: costMode, options: [['manual_multiplier', '手动上游倍率'], ['probe_multiplier', '使用已确认探测倍率'], ['free', '免费资源']] },
     { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'upstreamMultiplier', label: '确认上游倍率', type: 'number', required: false, value: account.upstreamMultiplier || '' },
     { name: 'sellingMultiplier', label: '确认销售倍率', type: 'number', required: false, value: account.sellingMultiplier || '' },
@@ -1623,7 +1900,7 @@ function openCostProfileModal() {
   openModal('新建成本模板', [
     { name: 'name', label: '模板名称' },
     { name: 'costType', label: '成本类型', type: 'select', options: [['subscription', '固定订阅'], ['metered', '按量后付费'], ['prepaid', '预付余额'], ['one_time', '一次性购买'], ['free', '免费资源'], ['hybrid', '混合成本']] },
-    { name: 'costMode', label: '核算模式', type: 'select', options: [['fixed_purchase', '固定采购成本'], ['probe_multiplier', '探测上游倍率'], ['manual_multiplier', '手动上游倍率'], ['free', '免费资源']] },
+    { name: 'costMode', label: '核算模式', type: 'select', options: [['fixed_purchase', '固定采购成本'], ['probe_multiplier', '自动读取上游探测倍率'], ['manual_multiplier', '手动上游倍率'], ['free', '免费资源']] },
     { name: 'basisMode', label: '倍率成本基础', type: 'select', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'variableMultiplier', label: '默认手动上游倍率', type: 'number', required: false },
     { name: 'defaultSellingMultiplier', label: '默认销售倍率覆盖', type: 'number', required: false },
@@ -1675,6 +1952,8 @@ content.addEventListener('click', (event) => {
   const next = event.target.closest('[data-page-next]');
   const pageTarget = event.target.closest('[data-page-to]');
   const overviewDetails = event.target.closest('[data-open-overview-detail]');
+  const overviewConsumptionRank = event.target.closest('[data-overview-consumption-rank]');
+  const usageView = event.target.closest('[data-usage-view]');
   const userDetails = event.target.closest('[data-user-details]');
   const userSort = event.target.closest('[data-user-sort]');
   const accountScope = event.target.closest('[data-account-scope]');
@@ -1683,6 +1962,27 @@ content.addEventListener('click', (event) => {
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
   if (overviewDetails) {
     openOverviewDetails(overviewDetails.dataset.openOverviewDetail);
+    return;
+  }
+  if (overviewConsumptionRank) {
+    const scope = overviewConsumptionRank.dataset.overviewConsumptionRank;
+    if (scope !== state.overviewConsumptionRanking) {
+      state.overviewConsumptionRanking = scope === 'models' ? 'models' : 'users';
+      window.localStorage.setItem('finops.overview-consumption-ranking', state.overviewConsumptionRanking);
+      renderOverview();
+    }
+    return;
+  }
+  if (usageView) {
+    const view = usageView.dataset.usageView === 'models' ? 'models' : 'events';
+    if (view !== state.usageView) {
+      state.usageView = view;
+      state.usageSearch = '';
+      window.localStorage.setItem('finops.usage-view', view);
+      tableState('usageEvents').page = 1;
+      tableState('usageModels').page = 1;
+      renderUsage();
+    }
     return;
   }
   if (userDetails) {

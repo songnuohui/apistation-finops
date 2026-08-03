@@ -530,6 +530,31 @@ textarea:focus-visible {
 
 .dashboard-rank-panel { min-height: 330px; overflow: hidden; }
 .dashboard-rank-panel .panel-header { min-height: 46px; }
+.dashboard-rank-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #c7d7ee;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.dashboard-rank-switch button {
+  min-width: 40px;
+  height: 25px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid #c7d7ee;
+  background: #fff;
+  color: #52677f;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.dashboard-rank-switch button:last-child { border-right: 0; }
+.dashboard-rank-switch button:hover { background: #f1f6fd; }
+.dashboard-rank-switch button.active { background: var(--primary); color: #fff; font-weight: 700; }
 
 .dashboard-rank-list {
   display: grid;
@@ -776,7 +801,9 @@ textarea:focus-visible {
 }
 
 .account-scope-tabs,
-.detail-range-tabs {
+.detail-range-tabs,
+.usage-view-tabs,
+.whitelist-view-tabs {
   display: inline-flex;
   align-items: stretch;
   border: 1px solid var(--line-strong);
@@ -786,7 +813,9 @@ textarea:focus-visible {
 }
 
 .account-scope-tabs button,
-.detail-range-tabs button {
+.detail-range-tabs button,
+.usage-view-tabs button,
+.whitelist-view-tabs button {
   min-height: 30px;
   padding: 0 8px;
   border: 0;
@@ -799,11 +828,22 @@ textarea:focus-visible {
 }
 
 .account-scope-tabs button:last-child,
-.detail-range-tabs button:last-child { border-right: 0; }
+.detail-range-tabs button:last-child,
+.usage-view-tabs button:last-child,
+.whitelist-view-tabs button:last-child { border-right: 0; }
 .account-scope-tabs button:hover,
-.detail-range-tabs button:hover { background: #f4f8fe; }
+.detail-range-tabs button:hover,
+.usage-view-tabs button:hover,
+.whitelist-view-tabs button:hover { background: #f4f8fe; }
 .account-scope-tabs button.active,
-.detail-range-tabs button.active { background: var(--primary); color: #fff; font-weight: 700; }
+.detail-range-tabs button.active,
+.usage-view-tabs button.active,
+.whitelist-view-tabs button.active { background: var(--primary); color: #fff; font-weight: 700; }
+
+.usage-view-copy strong,
+.usage-view-copy span { display: block; }
+.usage-view-copy strong { color: #24344c; font-size: 11px; }
+.usage-view-copy span { margin-top: 2px; color: var(--muted); font-size: 9px; }
 
 .account-lifecycle {
   display: inline-flex;
@@ -1087,10 +1127,59 @@ textarea:focus-visible {
   padding: 0 15px 18px;
 }
 
+.modal.whitelist-modal {
+  width: min(980px, 100%);
+  max-height: min(92vh, 820px);
+}
+
+.modal.whitelist-modal form.modal-content {
+  display: block;
+  padding: 0 15px 18px;
+}
+
+.whitelist-toolbar {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.whitelist-search {
+  position: relative;
+  width: min(300px, 100%);
+}
+
+.whitelist-search img {
+  position: absolute;
+  left: 9px;
+  top: 8px;
+  width: 15px;
+  height: 15px;
+  opacity: .58;
+}
+
+.whitelist-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px 0 31px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  outline: 0;
+  background: #fff;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.whitelist-search input:focus { border-color: #7faae3; box-shadow: 0 0 0 3px #e8f1fd; }
+.whitelist-note { padding: 10px 0; color: #687b93; font-size: 10px; line-height: 16px; }
+.whitelist-table-section { margin-top: 0; }
+
 .cost-rule-context {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   padding: 9px 0 11px;
   border-bottom: 1px solid var(--line);
@@ -1374,7 +1463,8 @@ textarea:focus-visible {
   .field.full,
   .form-actions { grid-column: 1; }
   .modal.user-detail-modal form.modal-content,
-  .modal.cost-history-modal form.modal-content { padding: 0 11px 14px; }
+  .modal.cost-history-modal form.modal-content,
+  .modal.whitelist-modal form.modal-content { padding: 0 11px 14px; }
   .cost-history-summary { min-height: auto; padding: 10px 0; align-items: flex-start; flex-wrap: wrap; }
   .detail-filter { min-height: auto; padding: 9px 0; flex-wrap: wrap; }
   .detail-range-tabs { max-width: 100%; overflow-x: auto; }
@@ -1384,6 +1474,8 @@ textarea:focus-visible {
   .detail-range-note { flex: 1 1 100%; margin-left: 0; }
   .detail-metrics { grid-template-columns: 1fr 1fr; }
   .cost-rule-context { grid-template-columns: 1fr; }
+  .whitelist-toolbar { min-height: auto; padding: 9px 0; align-items: stretch; flex-wrap: wrap; }
+  .whitelist-search { flex: 1 1 100%; width: 100%; }
 }
 
 @media (max-width: 480px) {
@@ -1400,6 +1492,8 @@ textarea:focus-visible {
   .account-scope { width: 100%; justify-content: space-between; }
   .account-scope-tabs { flex: 1 1 auto; }
   .account-scope-tabs button { flex: 1 1 0; padding: 0 5px; }
+  .usage-view-tabs { flex: 1 1 auto; }
+  .usage-view-tabs button { flex: 1 1 0; padding: 0 7px; }
   .selection-text { margin-right: auto; }
   .pager { flex-wrap: wrap; justify-content: flex-end; gap: 6px 9px; padding: 7px 11px; }
   .pager > span:first-child { width: 100%; }

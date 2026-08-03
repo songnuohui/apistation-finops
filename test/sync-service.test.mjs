@@ -267,7 +267,7 @@ test('daily account snapshot records deletion and multiplier changes without inf
   assert.match(updates[0].text, /rate_change_count=rate_change_count\+\$14/);
 });
 
-test('cost snapshots prefer request multiplier, preserve unknown cost, and classify zero as free', async () => {
+test('cost snapshots use only the latest fresh probe fallback, prefer request multiplier, preserve unknown cost, and classify zero as free', async () => {
   const queries = [];
   let selected = false;
   const client = {
@@ -321,8 +321,18 @@ test('cost snapshots prefer request multiplier, preserve unknown cost, and class
               cost_profile_id: 7, account_cost_rule_id: null, fixed_period_id: null,
               rate_observation_id: null, observed_upstream_multiplier: null,
             },
+            {
+              source_usage_id: 5, source_account_id: 10, source_user_id: 3, source_group_id: 2,
+              model: 'gpt-test', occurred_at: new Date('2026-07-31T05:00:00Z'),
+              user_charge_cny: '100', standard_cost_usd_reference: '10',
+              source_selling_multiplier: '2', source_account_multiplier: null,
+              configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
+              selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
+              cost_profile_id: null, account_cost_rule_id: null, fixed_period_id: null,
+              rate_observation_id: 52, observed_upstream_multiplier: '0.7',
+            },
           ],
-          rowCount: 4,
+          rowCount: 5,
         };
       }
       return { rows: [], rowCount: 0 };
@@ -333,9 +343,9 @@ test('cost snapshots prefer request multiplier, preserve unknown cost, and class
   });
   const total = await service.freezePendingUsageCostSnapshots(client, 'historical_backfill');
   const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".fact_usage_cost_snapshots'));
-  assert.equal(total, 4);
+  assert.equal(total, 5);
   assert.match(insert.text, /ON CONFLICT\(source_usage_id\) DO NOTHING/);
-  assert.equal(insert.params.length, 4 * COST_SNAPSHOT_COLUMN_COUNT);
+  assert.equal(insert.params.length, 5 * COST_SNAPSHOT_COLUMN_COUNT);
   const row = (index) => insert.params.slice(index * COST_SNAPSHOT_COLUMN_COUNT, (index + 1) * COST_SNAPSHOT_COLUMN_COUNT);
   assert.equal(row(0)[17], '0.5');
   assert.equal(row(0)[20], 'priced');
@@ -347,6 +357,15 @@ test('cost snapshots prefer request multiplier, preserve unknown cost, and class
   assert.equal(row(2)[21], '0');
   assert.equal(row(3)[20], 'missing_upstream_multiplier');
   assert.equal(row(3)[21], null);
+  assert.equal(row(4)[10], 'probe_multiplier');
+  assert.equal(row(4)[17], '0.7');
+  assert.equal(row(4)[19], 'probe_observation');
+  assert.equal(row(4)[20], 'priced');
+  assert.equal(row(4)[21], '35');
+  const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
+  assert.match(selection.text, /SELECT o\.id,o\.status,o\.effective_rate_multiplier,o\.fresh_until/);
+  assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
+  assert.match(selection.text, /WHEN observation\.status='ok'\s+AND observation\.effective_rate_multiplier>=0\s+AND observation\.fresh_until>f\.occurred_at THEN 'probe_multiplier'/);
 });
 
 test('open usage cost snapshots refresh while finalized history remains immutable', async () => {

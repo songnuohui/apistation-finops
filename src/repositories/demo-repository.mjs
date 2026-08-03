@@ -339,6 +339,17 @@ export class DemoRepository {
         tokens: Number(item.tokens || 0),
         requests: Number(item.requests || 0),
         cashPaidCny: Number(item.cashPaidCny || 0),
+        userChargeCny: Number(item.userChargeCny || 0),
+      }));
+    const modelConsumption = models
+      .filter((item) => Number(item.userChargeCny || 0) > 0)
+      .sort((left, right) => Number(right.userChargeCny || 0) - Number(left.userChargeCny || 0) || String(left.name).localeCompare(String(right.name)))
+      .slice(0, 8)
+      .map((item) => ({
+        name: String(item.name || '').trim() || '未标注模型',
+        userChargeCny: Number(item.userChargeCny || 0),
+        requests: Number(item.requests || 0),
+        tokens: Number(item.tokens || 0),
       }));
     const nonCashBalanceCreditCny = this.nonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
     const reportedBalanceUsers = this.users.filter((item) => (
@@ -358,6 +369,8 @@ export class DemoRepository {
         tokenUsage: rank('tokens'),
         cashRecharge: rank('cashPaidCny'),
         requestActivity: rank('requests'),
+        userConsumption: rank('userChargeCny'),
+        modelConsumption,
       },
     };
   }
@@ -391,6 +404,65 @@ export class DemoRepository {
     return { items: models.slice((page - 1) * pageSize, page * pageSize), total: models.length, page, pageSize };
   }
 
+  async listUsageEvents({ search = '', page = 1, pageSize = 20 } = {}) {
+    const events = Array.from({ length: 48 }, (_, index) => {
+      const user = this.users[index % this.users.length];
+      const account = this.accounts[index % this.accounts.length];
+      const model = models[index % models.length];
+      const inputTokens = 12_000 + index * 730;
+      const outputTokens = 1_200 + index * 91;
+      const cacheCreationTokens = index % 3 ? 0 : 1_800 + index * 37;
+      const cacheReadTokens = 5_000 + index * 250;
+      const userChargeCny = Number((model.userChargeCny / Math.max(1, model.requests) * (1 + (index % 5) * 0.2)).toFixed(6));
+      const fixedCost = account.costMode === 'fixed_purchase';
+      return {
+        sourceUsageId: 900_000 + index,
+        requestId: `demo-request-${900_000 + index}`,
+        occurredAt: new Date(Date.now() - index * 27 * 60_000).toISOString(),
+        userId: user.id,
+        email: user.email,
+        username: user.username,
+        accountId: account.id,
+        accountName: account.name,
+        groupId: 1 + (index % 4),
+        channelId: 1 + (index % 3),
+        model: model.name,
+        requestedModel: model.name,
+        upstreamModel: index % 4 ? '' : model.name,
+        billingMode: 'token',
+        billingType: 0,
+        inputTokens,
+        outputTokens,
+        cacheCreationTokens,
+        cacheReadTokens,
+        totalTokens: inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens,
+        tokens: inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens,
+        durationMs: 7_200 + index * 130,
+        firstTokenMs: 420 + index * 11,
+        standardCostUsdReference: Number((model.tokenListValueUsd / Math.max(1, model.requests)).toFixed(6)),
+        userChargeCny,
+        recognizedRevenueCny: userChargeCny,
+        costMode: account.costMode || 'fixed_purchase',
+        basisMode: 'revenue_backsolve',
+        costStatus: fixedCost ? 'fixed_cost' : 'priced',
+        calculatedCostCny: fixedCost ? null : Number((userChargeCny * 0.72).toFixed(6)),
+        sellingMultiplier: fixedCost ? null : 1,
+        upstreamMultiplier: fixedCost ? null : 0.72,
+        cnyPerReferenceUnit: null,
+        upstreamMultiplierSource: fixedCost ? '' : 'manual_rule',
+        rateObservationId: null,
+        costSnapshotOrigin: 'live_sync',
+        costSnapshotFinalized: index > 3,
+      };
+    });
+    const term = String(search || '').trim().toLowerCase();
+    const filtered = term ? events.filter((event) => (
+      `${event.sourceUsageId} ${event.requestId} ${event.email} ${event.username} ${event.accountName} ${event.model} ${event.requestedModel} ${event.upstreamModel}`
+        .toLowerCase().includes(term)
+    )) : events;
+    return pageResult(filtered, page, pageSize);
+  }
+
   async listUsers({ search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc', balanceScope = 'all' } = {}) {
     const sortable = new Set([
       'cashPaidCny','adminCreditCny','adminDeductionCny','balanceCny',
@@ -400,7 +472,11 @@ export class DemoRepository {
     const order = direction === 'asc' ? 1 : -1;
     const filtered = this.users
       .filter((item) => `${item.email} ${item.username}`.toLowerCase().includes(search.toLowerCase()))
-      .filter((item) => balanceScope !== 'reported' || (Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats))
+      .filter((item) => (
+        balanceScope === 'all'
+        || (balanceScope === 'reported' && Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats)
+        || (balanceScope === 'whitelist' && item.excludeFromBalanceStats)
+      ))
       .sort((left, right) => order * (Number(left[key] || 0) - Number(right[key] || 0)));
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
   }
