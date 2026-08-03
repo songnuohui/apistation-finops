@@ -168,6 +168,7 @@ export function loadConfig(env = process.env) {
     sub2apiRedisUrl: sourceRedisUrl(env.SUB2API_REDIS_URL, 'SUB2API_REDIS_URL'),
     sub2apiRedisConnectTimeoutMs: intValue(env.SUB2API_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
     sub2apiRedisRuntimeUserLimit: intValue(env.SUB2API_REDIS_RUNTIME_USER_LIMIT, 500, { min: 1, max: 5_000 }),
+    runtimeSnapshotIntervalSeconds: intValue(env.RUNTIME_SNAPSHOT_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
     sessionSecret,
     sessionTtlSeconds: intValue(env.SESSION_TTL_SECONDS, 43_200, { min: 900, max: 86_400 }),
     sessionCookieSecure,

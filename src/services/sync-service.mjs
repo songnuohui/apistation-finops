@@ -169,6 +169,8 @@ export class SyncService {
     this.balanceSettings = `"${this.config.sourceSettingsSchema || 'finops_source'}"."balance_recharge_multiplier"`;
     this.running = false;
     this.timer = null;
+    this.runtimeRefreshing = false;
+    this.runtimeTimer = null;
     this.channelMonitorReader = null;
     this.sourceGroupCatalogReader = null;
     this.sourceGroupCatalogWriter = null;
@@ -242,6 +244,16 @@ export class SyncService {
   }
 
   async refreshRuntimeSnapshots() {
+    if (this.runtimeRefreshing) return 0;
+    this.runtimeRefreshing = true;
+    try {
+      return await this.refreshRuntimeSnapshotsUnsafe();
+    } finally {
+      this.runtimeRefreshing = false;
+    }
+  }
+
+  async refreshRuntimeSnapshotsUnsafe() {
     let queue = null;
     let users = [];
     try {
@@ -364,12 +376,28 @@ export class SyncService {
       catch (error) { this.logger.error('[sync] cycle failed', error); }
       finally { if (this.timer) this.timer = setTimeout(tick, this.config.syncIntervalSeconds * 1000); }
     };
+    const runtimeTick = async () => {
+      try {
+        const rows = await this.refreshRuntimeSnapshots();
+        if (rows) await this.readCacheInvalidator?.();
+      } catch (error) {
+        this.logger.warn('[runtime] snapshot cycle failed', error?.message || error);
+      } finally {
+        if (this.runtimeTimer) {
+          const interval = this.config.runtimeSnapshotIntervalSeconds || 10;
+          this.runtimeTimer = setTimeout(runtimeTick, interval * 1000);
+        }
+      }
+    };
     this.timer = setTimeout(tick, 50);
+    this.runtimeTimer = setTimeout(runtimeTick, 100);
   }
 
   stop() {
     if (this.timer) clearTimeout(this.timer);
+    if (this.runtimeTimer) clearTimeout(this.runtimeTimer);
     this.timer = null;
+    this.runtimeTimer = null;
   }
 
   async markSourceError(sourceName, error) {
