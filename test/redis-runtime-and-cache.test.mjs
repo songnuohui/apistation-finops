@@ -21,9 +21,10 @@ function fakeRedisClient() {
     },
     async *scanIterator({ MATCH }) {
       const prefix = MATCH.replace('*', '');
-      for (const key of values.keys()) if (key.startsWith(prefix)) yield key;
+      yield [...values.keys()].filter((key) => key.startsWith(prefix));
     },
-    async unlink(keys) {
+    async unlink(...keys) {
+      assert.ok(keys.every((key) => typeof key === 'string'));
       for (const key of keys) values.delete(key);
     },
     async quit() {

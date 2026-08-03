@@ -82,9 +82,11 @@ export class ResponseCacheService {
       }
 
       const value = await loader();
-      if (connected && this.client?.isReady) {
+      if (generation === this.generation && connected && this.client?.isReady) {
         try {
-          await this.client.set(cacheKey, JSON.stringify(value), { EX: ttl });
+          await this.client.set(cacheKey, JSON.stringify(value), {
+            expiration: { type: 'EX', value: ttl },
+          });
         } catch (error) {
           this.logRedisError(error);
         }
@@ -105,14 +107,14 @@ export class ResponseCacheService {
     if (!this.enabled || !(await this.connect()) || !this.client?.isReady) return;
     try {
       const keys = [];
-      for await (const key of this.client.scanIterator({
+      for await (const batch of this.client.scanIterator({
         MATCH: `${this.prefix}response:*`,
         COUNT: 100,
       })) {
-        keys.push(key);
-        if (keys.length >= 100) await this.client.unlink(keys.splice(0, keys.length));
+        keys.push(...batch);
+        if (keys.length >= 100) await this.client.unlink(...keys.splice(0, keys.length));
       }
-      if (keys.length) await this.client.unlink(keys);
+      if (keys.length) await this.client.unlink(...keys);
     } catch (error) {
       this.logRedisError(error);
     }
