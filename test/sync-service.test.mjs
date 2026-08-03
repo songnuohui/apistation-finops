@@ -365,6 +365,8 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
   const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
   assert.match(selection.text, /SELECT o\.id,o\.status,o\.effective_rate_multiplier,o\.fresh_until/);
   assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
+  assert.doesNotMatch(selection.text, /COALESCE\(o\.observed_at,o\.received_at,o\.last_attempt_at,o\.captured_at\)/);
+  assert.match(selection.text, /GREATEST\(\s+COALESCE\(o\.observed_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.received_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.last_attempt_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.captured_at,'-infinity'::timestamptz\)\s+\)/);
   assert.match(selection.text, /WHEN observation\.status='ok'\s+AND observation\.effective_rate_multiplier>=0\s+AND observation\.fresh_until>f\.occurred_at THEN 'probe_multiplier'/);
 });
 

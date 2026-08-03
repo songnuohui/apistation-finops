@@ -800,8 +800,18 @@ export class SyncService {
           SELECT o.id,o.status,o.effective_rate_multiplier,o.fresh_until
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
-            AND COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) <= f.occurred_at
-          ORDER BY COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) DESC,o.id DESC
+            AND GREATEST(
+              COALESCE(o.observed_at,'-infinity'::timestamptz),
+              COALESCE(o.received_at,'-infinity'::timestamptz),
+              COALESCE(o.last_attempt_at,'-infinity'::timestamptz),
+              COALESCE(o.captured_at,'-infinity'::timestamptz)
+            ) <= f.occurred_at
+          ORDER BY GREATEST(
+            COALESCE(o.observed_at,'-infinity'::timestamptz),
+            COALESCE(o.received_at,'-infinity'::timestamptz),
+            COALESCE(o.last_attempt_at,'-infinity'::timestamptz),
+            COALESCE(o.captured_at,'-infinity'::timestamptz)
+          ) DESC,o.id DESC
           LIMIT 1
         ) observation ON TRUE
         WHERE NOT EXISTS (
