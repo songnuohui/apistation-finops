@@ -31,6 +31,26 @@ test('manual cash transactions are searchable and update the funds summary', asy
   assert.equal(after.summary.outflow, before.summary.outflow + 12.5);
 });
 
+test('recharge-scoped cash totals exclude operational cash entries but retain refunds', async () => {
+  const repository = new DemoRepository(config);
+  repository.cashTransactions.push({
+    id: 99, reference: 'REFUND-001', type: 'refund', direction: 'out', amount: 1.25, currency: 'CNY',
+    method: 'Alipay', party: 'customer@example.com', status: 'confirmed', occurredAt: new Date().toISOString(),
+    baseAmountCny: 1.25, creditedAmount: 0, creditedAmountCny: 0, creditedCurrency: 'CNY',
+  });
+  repository.cashTransactions.push({
+    id: 100, reference: 'SUBSCRIPTION-REFUND-001', type: 'refund', orderType: 'subscription', direction: 'out', amount: 9, currency: 'CNY',
+    method: 'Alipay', party: 'subscriber@example.com', status: 'confirmed', occurredAt: new Date().toISOString(),
+    baseAmountCny: 9, creditedAmount: 0, creditedAmountCny: 0, creditedCurrency: 'CNY',
+  });
+  const rechargeOnly = await repository.listCashTransactions({ scope: 'recharge', pageSize: 20 });
+  assert.ok(rechargeOnly.items.every((item) => item.type === 'recharge' || item.orderType !== 'subscription'));
+  assert.equal(rechargeOnly.summary.rechargeReceived, 4);
+  assert.equal(rechargeOnly.summary.refunds, 1.25);
+  assert.equal(rechargeOnly.summary.net, 2.75);
+  assert.equal(rechargeOnly.summary.transactions, 3);
+});
+
 test('overview dashboard returns complete identities and real ranking metrics', async () => {
   const repository = new DemoRepository(config);
   const dashboard = await repository.getOverviewDashboard();
@@ -39,6 +59,25 @@ test('overview dashboard returns complete identities and real ranking metrics', 
   assert.ok(dashboard.rankings.tokenUsage[0].tokens > 0);
   assert.ok(dashboard.rankings.requestActivity[0].requests > 0);
   assert.ok(dashboard.rankings.cashRecharge[0].cashPaidCny > 0);
+});
+
+test('self-use balance whitelist excludes only reported balances, not usage rankings', async () => {
+  const repository = new DemoRepository(config);
+  const selfUseAccount = repository.users[0];
+  repository.users[1].balanceCny = -9;
+  const expectedBalance = repository.users
+    .filter((item) => Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats && item !== selfUseAccount)
+    .reduce((total, item) => total + Number(item.balanceCny || 0), 0);
+  selfUseAccount.excludeFromBalanceStats = true;
+
+  const allUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'all' });
+  const reportedBalanceUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'reported' });
+  const dashboard = await repository.getOverviewDashboard();
+
+  assert.ok(allUsers.items.some((item) => item.id === selfUseAccount.id));
+  assert.ok(!reportedBalanceUsers.items.some((item) => item.id === selfUseAccount.id));
+  assert.equal(dashboard.totals.balanceCny, expectedBalance);
+  assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });
 
 test('supplier overview groups account economics and exposes purchase rows', async () => {

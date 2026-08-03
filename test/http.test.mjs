@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { authorize, sessionCookie } from '../src/auth.mjs';
-import { accountScope, pagination, resolveRange } from '../src/http/query.mjs';
+import { accountScope, cashScope, pagination, resolveRange, userBalanceScope } from '../src/http/query.mjs';
 import { resolveStaticPath } from '../src/http/static-path.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
@@ -43,6 +43,16 @@ test('account scope defaults to current accounts and rejects invalid values', ()
   assert.equal(accountScope(new URLSearchParams('scope=deleted')), 'deleted');
   assert.equal(accountScope(new URLSearchParams('scope=all')), 'all');
   assert.throws(() => accountScope(new URLSearchParams('scope=unexpected')), /invalid account scope/);
+});
+
+test('cash and reported-balance scopes accept only their supported values', () => {
+  assert.equal(cashScope(new URLSearchParams()), 'all');
+  assert.equal(cashScope(new URLSearchParams('scope=recharge')), 'recharge');
+  assert.throws(() => cashScope(new URLSearchParams('scope=refund')), /invalid cash scope/);
+
+  assert.equal(userBalanceScope(new URLSearchParams()), 'all');
+  assert.equal(userBalanceScope(new URLSearchParams('balance_scope=reported')), 'reported');
+  assert.throws(() => userBalanceScope(new URLSearchParams('balance_scope=whitelisted')), /invalid user balance scope/);
 });
 
 test('authorization accepts a valid signed administrator session only', () => {

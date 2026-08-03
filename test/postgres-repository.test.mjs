@@ -67,7 +67,7 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
     '2026-07-02', '2026-07-30', start, end, 20, 0,
   ]);
   assert.deepEqual(queries.find((query) => query.text.includes('usage_by_user_account')).params, [
-    '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0,
+    '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0, 'all',
   ]);
   assert.deepEqual(queries.find((query) => query.text.includes('WITH usage AS') && query.text.includes('LIMIT $6 OFFSET $7')).params, [
     '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0,
@@ -87,6 +87,146 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
   assert.deepEqual(queries.find((query) => query.text.includes('SELECT p.id,p.source_account_id')).params, [
     start, end, 'OpenAI',
   ]);
+});
+
+test('overview and non-cash-credit details exclude affiliate quota records', async () => {
+  const overviewQueries = [];
+  const overviewPool = {
+    async query(text, params = []) {
+      overviewQueries.push({ text, params });
+      if (text.includes('non_cash_balance_credit_cny')) {
+        return {
+          rows: [{
+            non_cash_balance_credit_cny: '12.5', non_cash_balance_credit_count: '2',
+            balance_cny: '36', balance_user_count: '3',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const overviewRepository = new PostgresRepository(overviewPool, config);
+  overviewRepository.getSummary = async () => ({ cash: {}, operations: {}, usage: {}, alerts: [] });
+  const start = new Date('2026-08-02T16:00:00.000Z');
+  const end = new Date('2026-08-03T16:00:00.000Z');
+  const dashboard = await overviewRepository.getOverviewDashboard({
+    start, end, dailyStart: '2026-08-03', dailyEnd: '2026-08-03',
+  });
+  assert.deepEqual(dashboard.totals, {
+    nonCashBalanceCreditCny: 12.5, nonCashBalanceCreditCount: 2,
+    balanceCny: 36, balanceUserCount: 3,
+  });
+  const overviewTotals = overviewQueries.find((query) => query.text.includes('non_cash_balance_credit_cny'));
+  assert.equal((overviewTotals.text.match(/accounting_scope',''\) <> 'affiliate_quota'/g) || []).length, 2);
+  assert.match(overviewTotals.text, /SUM\(current_balance\) FILTER \(WHERE current_balance > 0 AND NOT exclude_from_balance_stats\)/);
+
+  const detailQueries = [];
+  const detailPool = {
+    async query(text, params = []) {
+      detailQueries.push({ text, params });
+      if (text.includes('COUNT(*) OVER()')) {
+        return {
+          rows: [{
+            id: '7', source_table: 'redeem_codes', source_id: 'CODE-7', event_type: 'redeem',
+            credit_amount: '12.5', occurred_at: '2026-08-03T04:00:00.000Z', action: 'used',
+            redeem_type: 'balance', email: 'customer@example.com', username: 'customer', total_count: '1',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [{ amount_cny: '12.5', events: '1' }], rowCount: 1 };
+    },
+  };
+  const detailRepository = new PostgresRepository(detailPool, config);
+  const credits = await detailRepository.listNonCashBalanceCredits({ start, end, page: 1, pageSize: 20, offset: 0 });
+  assert.deepEqual(credits.summary, { amountCny: 12.5, events: 1 });
+  assert.equal(credits.items[0].id, 7);
+  for (const query of detailQueries) {
+    assert.match(query.text, /COALESCE\(e\.metadata->>'accounting_scope',''\) <> 'affiliate_quota'/);
+  }
+});
+
+test('reported balance scope excludes self-use accounts only from the balance listing', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const range = {
+    start: new Date('2026-08-02T16:00:00.000Z'), end: new Date('2026-08-03T16:00:00.000Z'),
+    dailyStart: '2026-08-03', dailyEnd: '2026-08-03', search: '', page: 1, pageSize: 20, offset: 0,
+  };
+  await repository.listUsers({ ...range, balanceScope: 'all' });
+  await repository.listUsers({ ...range, balanceScope: 'reported' });
+  const userQueries = queries.filter((query) => query.text.includes('usage_by_user_account'));
+  assert.equal(userQueries.length, 2);
+  assert.equal(userQueries[0].params.at(-1), 'all');
+  assert.equal(userQueries[1].params.at(-1), 'reported');
+  assert.match(userQueries[0].text, /\$8='all' OR \(u\.current_balance > 0 AND NOT u\.exclude_from_balance_stats\)/);
+  assert.match(userQueries[0].text, /FROM usage_by_user_account u/);
+});
+
+test('recharge-scoped cash details and summary include balance recharges and exclude subscription refunds', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('SELECT t.id')) {
+        return {
+          rows: [{
+            id: 1, reference: 'ORDER-1', type: 'recharge', direction: 'in', order_type: '', source_status: 'paid',
+            method: 'alipay', status: 'confirmed', party: 'customer@example.com', occurred_at: '2026-08-03T04:00:00.000Z',
+            base_amount: '10', credited_amount: '10', total_count: '2',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [{ inflow: '10', recharge_received: '10', outflow: '2', refunds: '2', transactions: '2' }], rowCount: 1 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const result = await repository.listCashTransactions({
+    start: new Date('2026-08-02T16:00:00.000Z'), end: new Date('2026-08-03T16:00:00.000Z'),
+    page: 1, pageSize: 20, offset: 0, scope: 'recharge',
+  });
+  assert.equal(result.items[0].type, 'recharge');
+  assert.deepEqual(result.summary, {
+    inflow: 10, rechargeReceived: 10, outflow: 2, refunds: 2, net: 8, transactions: 2,
+  });
+  for (const query of queries) {
+    assert.match(query.text, /t\.transaction_type='recharge' OR \(t\.transaction_type='refund' AND COALESCE\(t\.order_type,''\) <> 'subscription'\)/);
+    assert.match(query.text, /t\.status <> 'void'/);
+  }
+});
+
+test('overview summary excludes subscription refunds from recharge net amount', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('FROM account_costs')) {
+        return { rows: [{ fixed_cost_cny: '0', multiplier_cost_cny: '0', effective_cost_cny: '0', unbooked_account_count: '0', unbooked_user_charge_cny: '0' }], rowCount: 1 };
+      }
+      if (text.includes('FROM "finops".fact_usage_events')) {
+        return { rows: [{ requests: '0', input_tokens: '0', output_tokens: '0', cache_tokens: '0', active_users: '0', active_accounts: '0', average_latency_ms: '0', user_charge_cny: '0', token_list_value_usd: '0' }], rowCount: 1 };
+      }
+      if (text.includes('FROM "finops".cash_transactions')) {
+        return { rows: [{ inflow: '100', recharge_received: '100', refunds: '15', gateway_fees: '0', procurement_spend: '0', outflow: '15' }], rowCount: 1 };
+      }
+      return { rows: [{ count: '0' }], rowCount: 1 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const summary = await repository.getSummary({
+    start: new Date('2026-08-02T16:00:00.000Z'), end: new Date('2026-08-03T16:00:00.000Z'),
+  });
+  assert.equal(summary.cash.refunds, 15);
+  const cashQuery = queries.find((query) => query.text.includes('FROM "finops".cash_transactions'));
+  assert.match(cashQuery.text, /transaction_type='refund' AND status <> 'void'\s+AND COALESCE\(order_type,''\) <> 'subscription'/);
 });
 
 test('account cost periods inherit the selected account profile when no explicit profile is supplied', async () => {

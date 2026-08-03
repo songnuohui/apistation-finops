@@ -12,7 +12,7 @@ import {
   pendingLoginId,
   sessionCookie,
 } from './auth.mjs';
-import { accountScope, resolveRange, pagination, searchTerm } from './http/query.mjs';
+import { accountScope, cashScope, pagination, resolveRange, searchTerm, userBalanceScope } from './http/query.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
@@ -189,7 +189,7 @@ async function api(request,res,url){
   }
   if(request.method==='GET'&&url.pathname==='/api/users'){
     return json(res,200,await cached('users',config.listCacheTtlSeconds,()=>repository.listUsers({
-      ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),
+      ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),balanceScope:userBalanceScope(url.searchParams),
     })));
   }
   const accountCostHistory=/^\/api\/accounts\/(\d+)\/cost-periods$/.exec(url.pathname);
@@ -208,7 +208,8 @@ async function api(request,res,url){
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
   })));
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
-  if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams),scope:cashScope(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/non-cash-balance-credits')return json(res,200,await cached('non-cash-balance-credits',config.listCacheTtlSeconds,()=>repository.listNonCashBalanceCredits({...range(),...page()})));
   if(request.method==='GET'&&url.pathname==='/api/runtime'){
     if(url.searchParams.get('refresh')==='1'){
       await syncService?.refreshRuntimeSnapshots();

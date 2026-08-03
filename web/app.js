@@ -16,9 +16,10 @@ const state = {
   userSort: 'userChargeCny',
   userSortDirection: 'desc',
   overviewTrend: null,
+  overviewMetrics: null,
   overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
   userDetail: null,
-  cashDetail: null,
+  overviewDetail: null,
   runtimeRefreshTimer: null,
 };
 
@@ -473,6 +474,13 @@ async function renderOverview() {
   const totalTokens = Number(summary.usage.inputTokens || 0)
     + Number(summary.usage.outputTokens || 0)
     + Number(summary.usage.cacheTokens || 0);
+  state.overviewMetrics = {
+    consumptionCny: Number(operations.consumptionCny ?? operations.userChargeCny ?? 0),
+    requests: Number(summary.usage.requests || 0),
+    totalTokens,
+    balanceCny: Number(dashboard.totals.balanceCny || 0),
+    balanceUserCount: Number(dashboard.totals.balanceUserCount || 0),
+  };
   state.lastExport = [
     ...dashboard.rankings.requestActivity.map((item) => ({ ranking: '请求活跃度', ...item })),
     ...dashboard.rankings.tokenUsage.map((item) => ({ ranking: 'Token 使用排行', ...item })),
@@ -480,12 +488,11 @@ async function renderOverview() {
   ];
   content.innerHTML = `<div class="dashboard-meta"><span>运营看板</span><small>更新于 ${dateTime(dashboard.generatedAt)}</small></div>
     <div class="dashboard-metric-grid">
-      ${metricAction('现金流入', cny(cash.received), `充值实收 ${cny(cash.rechargeReceived)} · 查看明细`, 'good', 'data-open-cash-details')}
-      ${metric('赠送金额', cny(dashboard.totals.giftAmountCny), `${compact(dashboard.totals.giftCount)} 笔非现金入账`)}
-      ${metric('净充值', cny(netRecharge), `已退款 ${cny(cash.refunds)}`, netRecharge >= 0 ? 'good' : 'bad')}
-      ${metric('总消耗', cny(operations.consumptionCny ?? operations.userChargeCny), `${compact(summary.usage.requests)} 次请求`, 'good')}
-      ${metric('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户`)}
-      ${metric('总 Token', compact(totalTokens), '输入、输出与缓存合计')}
+      ${metricAction('充值净额', cny(netRecharge), `充值实收 ${cny(cash.rechargeReceived)} · 已退款 ${cny(cash.refunds)} · 查看明细`, netRecharge >= 0 ? 'good' : 'bad', 'data-open-overview-detail="recharge"')}
+      ${metricAction('非现金余额入账', cny(dashboard.totals.nonCashBalanceCreditCny), `${compact(dashboard.totals.nonCashBalanceCreditCount)} 笔管理员加款、兑换等入账 · 查看明细`, '', 'data-open-overview-detail="non-cash"')}
+      ${metricAction('总消耗', cny(operations.consumptionCny ?? operations.userChargeCny), `${compact(summary.usage.requests)} 次请求 · 查看明细`, 'good', 'data-open-overview-detail="consumption"')}
+      ${metricAction('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户 · 查看明细`, '', 'data-open-overview-detail="balance"')}
+      ${metricAction('总 Token', compact(totalTokens), '输入、输出与缓存合计 · 查看明细', '', 'data-open-overview-detail="tokens"')}
     </div>
     <div class="overview-ranking-grid">
       <section class="panel dashboard-rank-panel">
@@ -767,38 +774,64 @@ function openUserDetails(userId) {
   loadUserDetails();
 }
 
-function cashDetailPager(data) {
+const overviewDetailMeta = {
+  recharge: { title: '充值净额明细', loading: '正在读取充值明细', error: '充值明细读取失败', label: '笔充值或退款' },
+  'non-cash': { title: '非现金余额入账明细', loading: '正在读取非现金余额入账', error: '非现金余额入账读取失败', label: '笔余额入账' },
+  consumption: { title: '总消耗明细', loading: '正在读取模型消耗明细', error: '模型消耗明细读取失败', label: '个模型' },
+  balance: { title: '剩余余额明细', loading: '正在读取余额用户', error: '余额用户读取失败', label: '位余额用户' },
+  tokens: { title: '总 Token 明细', loading: '正在读取模型 Token 明细', error: '模型 Token 明细读取失败', label: '个模型' },
+};
+
+function overviewDetailPager(data, label) {
   const pages = Math.max(1, Math.ceil(data.total / data.pageSize));
   return `<div class="detail-pager">
-    <span>共 ${compact(data.total)} 笔流水</span>
-    <label>每页<select id="cash-detail-page-size">${
+    <span>共 ${compact(data.total)} ${label}</span>
+    <label>每页<select id="overview-detail-page-size">${
       [10, 20, 50, 100].map((size) => `<option value="${size}" ${size === data.pageSize ? 'selected' : ''}>${size}</option>`).join('')
     }</select></label>
     <div class="pager-nav">
-      <button type="button" class="icon-button pager-button" data-cash-detail-page="${Math.max(1, data.page - 1)}" ${data.page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
+      <button type="button" class="icon-button pager-button" data-overview-detail-page="${Math.max(1, data.page - 1)}" ${data.page <= 1 ? 'disabled' : ''}>&lsaquo;</button>
       ${pageNumbers(data.page, pages).map((value) => value === 'ellipsis'
         ? '<span class="pager-ellipsis">…</span>'
-        : `<button type="button" class="page-number ${value === data.page ? 'active' : ''}" data-cash-detail-page="${value}" ${value === data.page ? 'aria-current="page"' : ''}>${value}</button>`).join('')}
-      <button type="button" class="icon-button pager-button" data-cash-detail-page="${Math.min(pages, data.page + 1)}" ${data.page >= pages ? 'disabled' : ''}>&rsaquo;</button>
+        : `<button type="button" class="page-number ${value === data.page ? 'active' : ''}" data-overview-detail-page="${value}" ${value === data.page ? 'aria-current="page"' : ''}>${value}</button>`).join('')}
+      <button type="button" class="icon-button pager-button" data-overview-detail-page="${Math.min(pages, data.page + 1)}" ${data.page >= pages ? 'disabled' : ''}>&rsaquo;</button>
     </div>
     <span>第 ${data.page} / ${pages} 页</span>
   </div>`;
 }
 
-function renderCashFlowDetailModal(data) {
+function bindOverviewDetailControls() {
+  const form = document.querySelector('#modal-form');
+  form.onclick = async (event) => {
+    const button = event.target.closest('[data-overview-detail-page]');
+    if (!button || button.disabled || !state.overviewDetail) return;
+    state.overviewDetail.page = Number(button.dataset.overviewDetailPage);
+    await loadOverviewDetails();
+  };
+  document.querySelector('#overview-detail-page-size')?.addEventListener('change', async (event) => {
+    if (!state.overviewDetail) return;
+    state.overviewDetail.pageSize = Number(event.target.value);
+    state.overviewDetail.page = 1;
+    await loadOverviewDetails();
+  });
+}
+
+function renderRechargeDetailModal(data) {
   const summary = data.summary || {};
-  openContentModal('现金流入明细', `
+  const rechargeReceived = Number(summary.rechargeReceived || 0);
+  const refunds = Number(summary.refunds || 0);
+  const netRecharge = rechargeReceived - refunds;
+  openContentModal('充值净额明细', `
     <div class="detail-filter">
-      <span class="detail-range-note">与“充值与资金”菜单使用同一份 FinOps 现金流水；不包含赠送、返利和管理员余额调整。</span>
+      <span class="detail-range-note">仅包含用户充值与退款；充值净额 = 充值实收 - 已退款，不包含其他现金收支、赠送、返利和管理员余额调整。</span>
     </div>
     <div class="detail-metrics">
-      ${metric('现金流入', cny(summary.inflow), '充值与其他现金收入', 'good')}
-      ${metric('充值实收', cny(data.items.filter((item) => item.type === 'recharge' && item.direction === 'in').reduce((sum, item) => sum + Number(item.baseAmountCny || 0), 0)), '当前页已展示金额')}
-      ${metric('现金流出', cny(summary.outflow), '采购、费用与退款', 'warn')}
-      ${metric('现金净额', cny(summary.net), `${compact(summary.transactions)} 笔现金流水`, Number(summary.net) >= 0 ? 'good' : 'bad')}
+      ${metric('充值净额', cny(netRecharge), `充值实收 ${cny(rechargeReceived)} · 已退款 ${cny(refunds)}`, netRecharge >= 0 ? 'good' : 'bad')}
+      ${metric('充值实收', cny(rechargeReceived), `${compact(summary.transactions)} 笔充值或退款`, 'good')}
+      ${metric('已退款', cny(refunds), '退款会从充值净额中扣除', refunds ? 'warn' : '')}
     </div>
     <section class="detail-section">
-      <div class="detail-section-header"><h3>现金流水</h3><span>按发生时间倒序</span></div>
+      <div class="detail-section-header"><h3>充值与退款流水</h3><span>按发生时间倒序</span></div>
       ${table([
         { label: '时间' }, { label: '流水 / 对方' }, { label: '类型' }, { label: '支付方式' },
         { label: '方向' }, { label: '现金金额 CNY', right: true }, { label: '入账余额 CNY', right: true }, { label: '状态' },
@@ -809,43 +842,148 @@ function renderCashFlowDetailModal(data) {
         cny(item.baseAmountCny), item.creditedAmountCny ? cny(item.creditedAmountCny) : '--',
         `<span class="status ${item.status === 'completed' ? '' : 'warning'}">${escapeHtml(item.status)}</span>`,
       ]), 950)}
-      ${cashDetailPager(data)}
+      ${overviewDetailPager(data, overviewDetailMeta.recharge.label)}
     </section>
-  `, 'cash-detail-modal');
-  const form = document.querySelector('#modal-form');
-  form.onclick = async (event) => {
-    const button = event.target.closest('[data-cash-detail-page]');
-    if (!button || button.disabled || !state.cashDetail) return;
-    state.cashDetail.page = Number(button.dataset.cashDetailPage);
-    await loadCashFlowDetails();
-  };
-  document.querySelector('#cash-detail-page-size')?.addEventListener('change', async (event) => {
-    if (!state.cashDetail) return;
-    state.cashDetail.pageSize = Number(event.target.value);
-    state.cashDetail.page = 1;
-    await loadCashFlowDetails();
-  });
+  `, 'cash-detail-modal overview-detail-modal');
+  bindOverviewDetailControls();
 }
 
-async function loadCashFlowDetails() {
-  const detail = state.cashDetail;
-  if (!detail) return;
+function nonCashBalanceCreditLabel(item) {
+  return ({
+    admin_adjustment: '管理员加款',
+    redeem: '兑换入账',
+    affiliate_rebate: '邀请返利',
+  })[item.type] || item.type || '--';
+}
+
+function renderNonCashBalanceCreditDetailModal(data) {
+  const summary = data.summary || {};
+  openContentModal('非现金余额入账明细', `
+    <div class="detail-filter">
+      <span class="detail-range-note">包含管理员加款、兑换等实际余额入账；不包含邀请返利额度等不进入用户余额的额度记录。</span>
+    </div>
+    <div class="detail-metrics">
+      ${metric('非现金余额入账', cny(summary.amountCny), `${compact(summary.events)} 笔实际余额入账`, 'good')}
+    </div>
+    <section class="detail-section">
+      <div class="detail-section-header"><h3>非现金余额入账记录</h3><span>按发生时间倒序</span></div>
+      ${table([
+        { label: '时间' }, { label: '用户' }, { label: '入账类型' }, { label: '来源' }, { label: '入账金额 CNY', right: true },
+      ], data.items.map((item) => {
+        const identity = item.email || item.username || '--';
+        const secondary = item.username && item.username !== item.email ? item.username : '';
+        const source = [item.action, item.redeemType].filter(Boolean).join(' · ') || (item.sourceId ? `记录 #${item.sourceId}` : '--');
+        return [
+          dateTime(item.occurredAt),
+          `<span class="primary-text">${escapeHtml(identity)}</span>${secondary ? `<div class="secondary-text">${escapeHtml(secondary)}</div>` : ''}`,
+          `<span class="tag neutral">${escapeHtml(nonCashBalanceCreditLabel(item))}</span>`,
+          escapeHtml(source), cny(item.amountCny),
+        ];
+      }), 850)}
+      ${overviewDetailPager(data, overviewDetailMeta['non-cash'].label)}
+    </section>
+  `, 'cash-detail-modal overview-detail-modal');
+  bindOverviewDetailControls();
+}
+
+function renderUsageOverviewDetailModal(data) {
+  const detail = state.overviewDetail;
+  const metrics = detail?.metrics || {};
+  const isTokenDetail = detail?.type === 'tokens';
+  const titleText = isTokenDetail ? '总 Token 明细' : '总消耗明细';
+  openContentModal(titleText, `
+    <div class="detail-filter">
+      <span class="detail-range-note">按模型汇总 sub2api 实际扣费记录；Token 包含输入、输出与缓存 Token。</span>
+    </div>
+    <div class="detail-metrics">
+      ${metric('总消耗', cny(metrics.consumptionCny), `${compact(metrics.requests)} 次请求`, 'good')}
+      ${metric('总 Token', compact(metrics.totalTokens), '输入、输出与缓存合计')}
+      ${metric('模型数', compact(data.total), '当前统计周期内有调用的模型')}
+    </div>
+    <section class="detail-section">
+      <div class="detail-section-header"><h3>${isTokenDetail ? '模型 Token 汇总' : '模型消耗汇总'}</h3><span>按实际消费金额倒序</span></div>
+      ${table([
+        { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '实际消费 CNY', right: true },
+        { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
+      ], data.items.map((item) => [
+        `<span class="primary-text">${escapeHtml(item.name)}</span>`, compact(item.requests), compact(item.tokens), cny(item.userChargeCny),
+        cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
+      ]), 1080)}
+      ${overviewDetailPager(data, overviewDetailMeta[detail.type].label)}
+    </section>
+  `, 'cash-detail-modal overview-detail-modal');
+  bindOverviewDetailControls();
+}
+
+function renderBalanceDetailModal(data) {
+  const detail = state.overviewDetail;
+  const metrics = detail?.metrics || {};
+  openContentModal('剩余余额明细', `
+    <div class="detail-filter">
+      <span class="detail-range-note">仅包含未加入自用账号白名单的正余额用户；自用账号白名单只排除余额统计，消耗和成本仍正常计入。</span>
+    </div>
+    <div class="detail-metrics">
+      ${metric('剩余余额', cny(metrics.balanceCny), `${compact(metrics.balanceUserCount)} 位余额用户`, Number(metrics.balanceCny) >= 0 ? 'good' : 'bad')}
+    </div>
+    <section class="detail-section">
+      <div class="detail-section-header"><h3>余额用户</h3><span>按余额从高到低</span></div>
+      ${table([
+        { label: '用户' }, { label: '当前余额 CNY', right: true }, { label: '实际消费 CNY', right: true },
+        { label: '请求', right: true }, { label: 'Token', right: true }, { label: '已登记成本 CNY', right: true },
+      ], data.items.map((item) => [
+        `<span class="primary-text">${escapeHtml(item.email || item.username || '--')}</span><div class="secondary-text">ID ${item.id}${item.tags?.length ? ` · ${tags(item.tags)}` : ''}</div>`,
+        cny(item.balanceCny), cny(item.userChargeCny), compact(item.requests), compact(item.tokens), cny(item.bookedCostCny),
+      ]), 1020)}
+      ${overviewDetailPager(data, overviewDetailMeta.balance.label)}
+    </section>
+  `, 'cash-detail-modal overview-detail-modal');
+  bindOverviewDetailControls();
+}
+
+function renderOverviewDetailModal(data) {
+  const type = state.overviewDetail?.type;
+  if (type === 'recharge') renderRechargeDetailModal(data);
+  else if (type === 'non-cash') renderNonCashBalanceCreditDetailModal(data);
+  else if (type === 'consumption' || type === 'tokens') renderUsageOverviewDetailModal(data);
+  else if (type === 'balance') renderBalanceDetailModal(data);
+}
+
+function overviewDetailPath(detail) {
+  const paging = `page=${detail.page}&page_size=${detail.pageSize}`;
+  if (detail.type === 'recharge') return `/funds?scope=recharge&${paging}`;
+  if (detail.type === 'non-cash') return `/non-cash-balance-credits?${paging}`;
+  if (detail.type === 'consumption' || detail.type === 'tokens') return `/usage/models?${paging}`;
+  if (detail.type === 'balance') return `/users?sort=balanceCny&direction=desc&balance_scope=reported&${paging}`;
+  return '';
+}
+
+async function loadOverviewDetails() {
+  const detail = state.overviewDetail;
+  const meta = detail && overviewDetailMeta[detail.type];
+  if (!detail || !meta) return;
   const form = document.querySelector('#modal-form');
-  if (form) form.innerHTML = '<div class="detail-loading"><span></span>正在读取现金流水</div>';
+  if (form) form.innerHTML = `<div class="detail-loading"><span></span>${meta.loading}</div>`;
   try {
-    const data = await api(`/funds?page=${detail.page}&page_size=${detail.pageSize}`);
-    if (state.cashDetail !== detail) return;
-    renderCashFlowDetailModal(data);
+    const data = await api(overviewDetailPath(detail));
+    if (state.overviewDetail !== detail) return;
+    renderOverviewDetailModal(data);
   } catch (error) {
-    if (state.cashDetail !== detail) return;
-    if (form) form.innerHTML = `<div class="empty"><strong>现金流水读取失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+    if (state.overviewDetail !== detail) return;
+    if (form) form.innerHTML = `<div class="empty"><strong>${meta.error}</strong><p>${escapeHtml(error.message)}</p></div>`;
   }
 }
 
-function openCashFlowDetails() {
-  state.cashDetail = { page: 1, pageSize: 20 };
-  openContentModal('现金流入明细', '<div class="detail-loading"><span></span>正在读取现金流水</div>', 'cash-detail-modal');
-  loadCashFlowDetails();
+function openOverviewDetails(type) {
+  const meta = overviewDetailMeta[type];
+  if (!meta) return;
+  state.overviewDetail = {
+    type,
+    page: 1,
+    pageSize: 20,
+    metrics: { ...(state.overviewMetrics || {}) },
+  };
+  openContentModal(meta.title, `<div class="detail-loading"><span></span>${meta.loading}</div>`, 'cash-detail-modal overview-detail-modal');
+  loadOverviewDetails();
 }
 
 async function renderUsersEnhanced(search = state.userSearch) {
@@ -856,11 +994,11 @@ async function renderUsersEnhanced(search = state.userSearch) {
   })}`);
   state.lastExport = data.items;
   state.userItems = new Map(data.items.map((item) => [String(item.id), item]));
-  content.innerHTML = `${section('用户核算', '点击用户查看充值、消费明细与趋势；金额列可直接切换升序或降序')}
+  content.innerHTML = `${section('用户核算', '点击用户查看充值、消费明细与趋势；自用账号白名单只排除余额统计，消耗和成本仍正常计入')}
     <section class="table-panel">${searchTools('搜索邮箱、用户名', `
       <span class="selection-text" id="user-selection-count">已选择 ${state.selectedUsers.size} 位</span>
-      <button type="button" class="button" id="user-exclude-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-x')}加入余额白名单</button>
-      <button type="button" class="button" id="user-include-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-check')}计入余额统计</button>
+      <button type="button" class="button" id="user-exclude-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-x')}加入自用账号白名单</button>
+      <button type="button" class="button" id="user-include-balance" ${state.selectedUsers.size ? '' : 'disabled'}>${icon('user-round-check')}恢复余额统计</button>
     `, search)}${
       table([
         { label: '<input type="checkbox" id="select-current-users" title="选择当前页">' },
@@ -877,7 +1015,7 @@ async function renderUsersEnhanced(search = state.userSearch) {
         { label: '成本覆盖' },
       ], data.items.map((item) => [
         `<input type="checkbox" data-user-select="${item.id}" ${state.selectedUsers.has(Number(item.id)) ? 'checked' : ''}>`,
-        `<button type="button" class="user-link" data-user-details="${item.id}"><span>${escapeHtml(item.email)}</span><small>ID ${item.id} · ${tags(item.tags)}${item.excludeFromBalanceStats ? ' · 自用白名单' : ''}</small></button>`,
+        `<button type="button" class="user-link" data-user-details="${item.id}"><span>${escapeHtml(item.email)}</span><small>ID ${item.id} · ${tags(item.tags)}${item.excludeFromBalanceStats ? ' · 自用账号白名单' : ''}</small></button>`,
         cny(item.cashPaidCny), cny(item.adminCreditCny), cny(item.adminDeductionCny), cny(item.balanceCny), cny(item.userChargeCny),
         compact(item.requests), compact(item.tokens), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
       ]), 1480)
@@ -917,7 +1055,7 @@ async function renderUsersEnhanced(search = state.userSearch) {
         }),
       });
       state.selectedUsers.clear();
-      toast(excludeFromBalanceStats ? '已加入余额统计白名单' : '已恢复余额统计');
+      toast(excludeFromBalanceStats ? '已加入自用账号白名单' : '已恢复余额统计');
       await renderUsersEnhanced(search);
     } catch (error) {
       toast(error.message);
@@ -1183,7 +1321,7 @@ function openContentModal(titleText, contentHtml, modalClass = '') {
 function closeModal() {
   document.querySelector('#modal-backdrop').hidden = true;
   state.userDetail = null;
-  state.cashDetail = null;
+  state.overviewDetail = null;
 }
 
 function costFields(profiles, account, { includeAccount = false, batch = false } = {}) {
@@ -1536,15 +1674,15 @@ content.addEventListener('click', (event) => {
   const previous = event.target.closest('[data-page-prev]');
   const next = event.target.closest('[data-page-next]');
   const pageTarget = event.target.closest('[data-page-to]');
-  const cashDetails = event.target.closest('[data-open-cash-details]');
+  const overviewDetails = event.target.closest('[data-open-overview-detail]');
   const userDetails = event.target.closest('[data-user-details]');
   const userSort = event.target.closest('[data-user-sort]');
   const accountScope = event.target.closest('[data-account-scope]');
   const ledgerEdit = event.target.closest('[data-edit-ledger]');
   const accountRuleHistory = event.target.closest('[data-account-rule-history]');
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
-  if (cashDetails) {
-    openCashFlowDetails();
+  if (overviewDetails) {
+    openOverviewDetails(overviewDetails.dataset.openOverviewDetail);
     return;
   }
   if (userDetails) {

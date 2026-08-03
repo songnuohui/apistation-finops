@@ -123,7 +123,10 @@ export class PostgresRepository {
     const cash = await this.pool.query(`
       SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND status <> 'void'),0) AS inflow,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='recharge' AND status <> 'void'),0) AS recharge_received,
-             COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='refund' AND status <> 'void'),0) AS refunds,
+             COALESCE(SUM(base_amount) FILTER (
+               WHERE direction='out' AND transaction_type='refund' AND status <> 'void'
+                 AND COALESCE(order_type,'') <> 'subscription'
+             ),0) AS refunds,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type='gateway_fee'),0) AS gateway_fees,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type IN ('account_purchase','supplier_topup','subscription_renewal')),0) AS procurement_spend,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND status <> 'void'),0) AS outflow
@@ -271,13 +274,15 @@ export class PostgresRepository {
             WHERE direction='in'
               AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
               AND COALESCE(cash_basis_cny,0)=0
-          ),0) AS gift_amount_cny,
+              AND COALESCE(metadata->>'accounting_scope','') <> 'affiliate_quota'
+          ),0) AS non_cash_balance_credit_cny,
           COUNT(*) FILTER (
             WHERE direction='in'
               AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
               AND COALESCE(cash_basis_cny,0)=0
-          ) AS gift_count,
-          (SELECT COALESCE(SUM(current_balance) FILTER (WHERE NOT exclude_from_balance_stats),0) FROM ${this.schema}.dim_users) AS balance_cny,
+              AND COALESCE(metadata->>'accounting_scope','') <> 'affiliate_quota'
+          ) AS non_cash_balance_credit_count,
+          (SELECT COALESCE(SUM(current_balance) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats),0) FROM ${this.schema}.dim_users) AS balance_cny,
           (SELECT COUNT(*) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats) FROM ${this.schema}.dim_users) AS balance_user_count
         FROM ${this.schema}.credit_events
         WHERE occurred_at >= $1 AND occurred_at < $2`,
@@ -331,8 +336,8 @@ export class PostgresRepository {
       generatedAt: new Date().toISOString(),
       summary,
       totals: {
-        giftAmountCny: number(total.gift_amount_cny),
-        giftCount: number(total.gift_count),
+        nonCashBalanceCreditCny: number(total.non_cash_balance_credit_cny),
+        nonCashBalanceCreditCount: number(total.non_cash_balance_credit_count),
         balanceCny: number(total.balance_cny),
         balanceUserCount: number(total.balance_user_count),
       },
@@ -578,7 +583,7 @@ export class PostgresRepository {
     })), page, pageSize);
   }
 
-  async listUsers({ start, end, dailyStart = start, dailyEnd = end, search = '', page = 1, pageSize = 20, offset = 0, sort = 'userChargeCny', direction = 'desc' }) {
+  async listUsers({ start, end, dailyStart = start, dailyEnd = end, search = '', page = 1, pageSize = 20, offset = 0, sort = 'userChargeCny', direction = 'desc', balanceScope = 'all' }) {
     const sortColumns = {
       cashPaidCny: 'cash_paid_cny',
       adminCreditCny: 'admin_credit_cny',
@@ -725,7 +730,8 @@ export class PostgresRepository {
       LEFT JOIN cash c ON c.source_user_id=u.source_user_id
       LEFT JOIN adjustments ad ON ad.source_user_id=u.source_user_id
         WHERE ($5='' OR u.email ILIKE '%'||$5||'%' OR u.username ILIKE '%'||$5||'%')
-      ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset]);
+          AND ($8='all' OR (u.current_balance > 0 AND NOT u.exclude_from_balance_stats))
+      ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset, balanceScope]);
     return pageResult(result.rows.map((row) => {
       const recognizedRevenueCny = number(row.revenue_cny);
       const purchaseAllocatedCostCny = number(row.purchase_allocated_cost_cny);
@@ -1337,7 +1343,10 @@ export class PostgresRepository {
     return { summary, items, purchases };
   }
 
-  async listCashTransactions({ start, end, page = 1, pageSize = 20, offset = 0, search = '' }) {
+  async listCashTransactions({ start, end, page = 1, pageSize = 20, offset = 0, search = '', scope = 'all' }) {
+    const scopeClause = scope === 'recharge'
+      ? "AND (t.transaction_type='recharge' OR (t.transaction_type='refund' AND COALESCE(t.order_type,'') <> 'subscription'))"
+      : '';
     const [result, totals] = await Promise.all([this.pool.query(`
       SELECT t.id,COALESCE(NULLIF(t.metadata->>'reference',''),t.source_id::text) AS reference,t.transaction_type AS type,t.direction,
              t.original_amount AS amount,t.original_currency AS currency,t.base_amount,t.credited_amount,t.credited_currency,
@@ -1350,12 +1359,16 @@ export class PostgresRepository {
         AND ($3='' OR t.source_id::text ILIKE '%'||$3||'%' OR t.transaction_type ILIKE '%'||$3||'%'
           OR t.payment_method ILIKE '%'||$3||'%' OR COALESCE(t.metadata->>'party','') ILIKE '%'||$3||'%'
           OR COALESCE(u.email,'') ILIKE '%'||$3||'%')
+        ${scopeClause}
       ORDER BY t.occurred_at DESC LIMIT $4 OFFSET $5`, [start,end,search,pageSize,offset]), this.pool.query(`
-       SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND status <> 'void'),0) AS inflow,
-             COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND status <> 'void'),0) AS outflow,
-             COALESCE(SUM(base_amount) FILTER (WHERE transaction_type='refund' AND status <> 'void'),0) AS refunds,
+       SELECT COALESCE(SUM(t.base_amount) FILTER (WHERE t.direction='in'),0) AS inflow,
+             COALESCE(SUM(t.base_amount) FILTER (WHERE t.direction='in' AND t.transaction_type='recharge'),0) AS recharge_received,
+             COALESCE(SUM(t.base_amount) FILTER (WHERE t.direction='out'),0) AS outflow,
+             COALESCE(SUM(t.base_amount) FILTER (WHERE t.transaction_type='refund'),0) AS refunds,
              COUNT(*)::int AS transactions
-      FROM ${this.schema}.cash_transactions WHERE occurred_at >= $1 AND occurred_at < $2 AND status <> 'void'`, [start,end])]);
+      FROM ${this.schema}.cash_transactions t
+      WHERE t.occurred_at >= $1 AND t.occurred_at < $2 AND t.status <> 'void'
+        ${scopeClause}`, [start,end])]);
     const paged = pageResult(result.rows.map((row) => ({
       total_count: row.total_count,
       id: row.id,
@@ -1377,9 +1390,45 @@ export class PostgresRepository {
     })), page, pageSize);
     const summary = totals.rows[0];
     return { ...paged, summary: {
-      inflow: number(summary.inflow), outflow: number(summary.outflow), refunds: number(summary.refunds),
+      inflow: number(summary.inflow), rechargeReceived: number(summary.recharge_received), outflow: number(summary.outflow), refunds: number(summary.refunds),
       net: number(summary.inflow) - number(summary.outflow), transactions: number(summary.transactions),
     } };
+  }
+
+  async listNonCashBalanceCredits({ start, end, page = 1, pageSize = 20, offset = 0 }) {
+    const conditions = `e.occurred_at >= $1 AND e.occurred_at < $2
+      AND e.direction='in'
+      AND e.event_type IN ('admin_adjustment','redeem','affiliate_rebate')
+      AND COALESCE(e.cash_basis_cny,0)=0
+      AND COALESCE(e.metadata->>'accounting_scope','') <> 'affiliate_quota'`;
+    const [result, totals] = await Promise.all([this.pool.query(`
+      SELECT e.id,e.source_table,e.source_id,e.event_type,e.credit_amount,e.occurred_at,
+             COALESCE(e.metadata->>'action','') AS action,
+             COALESCE(e.metadata->>'redeem_type','') AS redeem_type,
+             COALESCE(u.email,'') AS email,COALESCE(u.username,'') AS username,
+             COUNT(*) OVER() AS total_count
+      FROM ${this.schema}.credit_events e
+      LEFT JOIN ${this.schema}.dim_users u ON u.source_user_id=e.source_user_id
+      WHERE ${conditions}
+      ORDER BY e.occurred_at DESC,e.id DESC LIMIT $3 OFFSET $4`, [start,end,pageSize,offset]), this.pool.query(`
+      SELECT COALESCE(SUM(e.credit_amount),0) AS amount_cny,COUNT(*)::int AS events
+      FROM ${this.schema}.credit_events e
+      WHERE ${conditions}`, [start,end])]);
+    const paged = pageResult(result.rows.map((row) => ({
+      total_count: row.total_count,
+      id: number(row.id),
+      sourceTable: row.source_table,
+      sourceId: row.source_id,
+      type: row.event_type,
+      amountCny: number(row.credit_amount),
+      occurredAt: row.occurred_at,
+      action: row.action,
+      redeemType: row.redeem_type,
+      email: row.email,
+      username: row.username,
+    })), page, pageSize);
+    const summary = totals.rows[0] || {};
+    return { ...paged, summary: { amountCny: number(summary.amount_cny), events: number(summary.events) } };
   }
 
   async getReconciliation({ start, end }) {

@@ -108,6 +108,14 @@ const cashTransactions = [
   creditedAmountCny: type === 'recharge' ? amount : 0,
 }));
 
+const nonCashBalanceCredits = [
+  {
+    id: 1, sourceTable: 'redeem_codes', sourceId: 'DEMO-001', type: 'redeem', amountCny: 8,
+    occurredAt: new Date(Date.now() - 2 * 3_600_000).toISOString(), action: 'used', redeemType: 'balance',
+    email: 'nuohuisong@gmail.com', username: 'nuohuisong',
+  },
+];
+
 const demoCostProfiles = [
   { id: 1, name: 'PLUS 月租账号', costType: 'subscription', costMode: 'fixed_purchase', basisMode: 'revenue_backsolve', currency: 'CNY', allocationMethod: 'standard_cost_weight', version: 1, accountCount: 12 },
   { id: 2, name: 'OpenAI 探测倍率', costType: 'metered', costMode: 'probe_multiplier', basisMode: 'revenue_backsolve', currency: 'CNY', allocationMethod: 'token_weight', version: 2, accountCount: 4 },
@@ -159,6 +167,7 @@ export class DemoRepository {
     this.users = users.map((item) => ({ ...item, tags: [...item.tags] }));
     this.accounts = accounts.map((item) => ({ ...item, tags: [...item.tags] }));
     this.cashTransactions = cashTransactions.map((item) => ({ ...item }));
+    this.nonCashBalanceCredits = nonCashBalanceCredits.map((item) => ({ ...item }));
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
     this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
     this.accountCostPeriods = this.accounts.map((account, index) => {
@@ -331,18 +340,19 @@ export class DemoRepository {
         requests: Number(item.requests || 0),
         cashPaidCny: Number(item.cashPaidCny || 0),
       }));
-    const giftAmountCny = this.users.reduce((total, item) => (
-      total + Number(item.adminCreditCny || 0) + Number(item.redeemedCreditCny || 0) + Number(item.affiliateCreditCny || 0)
-    ), 0);
+    const nonCashBalanceCreditCny = this.nonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
+    const reportedBalanceUsers = this.users.filter((item) => (
+      Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats
+    ));
 
     return {
       generatedAt: new Date().toISOString(),
       summary,
       totals: {
-        giftAmountCny,
-        giftCount: giftAmountCny ? 1 : 0,
-        balanceCny: this.users.reduce((total, item) => total + Number(item.balanceCny || 0), 0),
-        balanceUserCount: this.users.filter((item) => Number(item.balanceCny || 0) > 0).length,
+        nonCashBalanceCreditCny,
+        nonCashBalanceCreditCount: this.nonCashBalanceCredits.length,
+        balanceCny: reportedBalanceUsers.reduce((total, item) => total + Number(item.balanceCny || 0), 0),
+        balanceUserCount: reportedBalanceUsers.length,
       },
       rankings: {
         tokenUsage: rank('tokens'),
@@ -381,7 +391,7 @@ export class DemoRepository {
     return { items: models.slice((page - 1) * pageSize, page * pageSize), total: models.length, page, pageSize };
   }
 
-  async listUsers({ search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc' } = {}) {
+  async listUsers({ search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc', balanceScope = 'all' } = {}) {
     const sortable = new Set([
       'cashPaidCny','adminCreditCny','adminDeductionCny','balanceCny',
       'userChargeCny','requests','tokens','bookedCostCny','bookedProfitCny',
@@ -390,6 +400,7 @@ export class DemoRepository {
     const order = direction === 'asc' ? 1 : -1;
     const filtered = this.users
       .filter((item) => `${item.email} ${item.username}`.toLowerCase().includes(search.toLowerCase()))
+      .filter((item) => balanceScope !== 'reported' || (Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats))
       .sort((left, right) => order * (Number(left[key] || 0) - Number(right[key] || 0)));
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
   }
@@ -555,15 +566,35 @@ export class DemoRepository {
     return { summary, items, purchases };
   }
 
-  async listCashTransactions({ page = 1, pageSize = 20, search = '' } = {}) {
+  async listCashTransactions({ page = 1, pageSize = 20, search = '', scope = 'all' } = {}) {
     const term = String(search || '').trim().toLowerCase();
-    const filtered = term ? this.cashTransactions.filter((item) => `${item.reference} ${item.type} ${item.method} ${item.party}`.toLowerCase().includes(term)) : this.cashTransactions;
-    const inflow = this.cashTransactions.filter((item) => item.direction === 'in').reduce((sum, item) => sum + Number(item.amount || 0), 0);
-    const outflow = this.cashTransactions.filter((item) => item.direction === 'out').reduce((sum, item) => sum + Number(item.amount || 0), 0);
-    const refunds = this.cashTransactions.filter((item) => item.type === 'refund').reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const scoped = scope === 'recharge'
+      ? this.cashTransactions.filter((item) => (
+        item.type === 'recharge' || (item.type === 'refund' && item.orderType !== 'subscription')
+      ))
+      : this.cashTransactions;
+    const filtered = term ? scoped.filter((item) => `${item.reference} ${item.type} ${item.method} ${item.party}`.toLowerCase().includes(term)) : scoped;
+    const inflow = scoped.filter((item) => item.direction === 'in').reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const rechargeReceived = scoped.filter((item) => item.direction === 'in' && item.type === 'recharge').reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const outflow = scoped.filter((item) => item.direction === 'out').reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const refunds = scoped.filter((item) => item.type === 'refund').reduce((sum, item) => sum + Number(item.amount || 0), 0);
     return {
       items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize,
-      summary: { inflow, outflow, refunds, net: inflow - outflow, transactions: this.cashTransactions.length },
+      summary: { inflow, rechargeReceived, outflow, refunds, net: inflow - outflow, transactions: scoped.length },
+    };
+  }
+
+  async listNonCashBalanceCredits({ page = 1, pageSize = 20 } = {}) {
+    const items = this.nonCashBalanceCredits
+      .slice()
+      .sort((left, right) => new Date(right.occurredAt) - new Date(left.occurredAt));
+    const paged = pageResult(items, page, pageSize);
+    return {
+      ...paged,
+      summary: {
+        amountCny: items.reduce((total, item) => total + Number(item.amountCny || 0), 0),
+        events: items.length,
+      },
     };
   }
 

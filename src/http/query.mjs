@@ -110,3 +110,19 @@ export function accountScope(searchParams) {
   }
   return scope;
 }
+
+export function cashScope(searchParams) {
+  const scope = searchParams.get('scope') || 'all';
+  if (!['all', 'recharge'].includes(scope)) {
+    throw Object.assign(new Error('invalid cash scope'), { statusCode: 400 });
+  }
+  return scope;
+}
+
+export function userBalanceScope(searchParams) {
+  const scope = searchParams.get('balance_scope') || 'all';
+  if (!['all', 'reported'].includes(scope)) {
+    throw Object.assign(new Error('invalid user balance scope'), { statusCode: 400 });
+  }
+  return scope;
+}
