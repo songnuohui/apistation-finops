@@ -19,7 +19,6 @@ const state = {
   overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
   userDetail: null,
   cashDetail: null,
-  monitorCandidates: new Map(),
   runtimeRefreshTimer: null,
 };
 
@@ -29,13 +28,8 @@ const pageMeta = {
   accounts: ['账号台账与成本', '账号采购、成本归属、实际消费与毛利'],
   usage: ['用量与扣费', '按 sub2api 实际扣费口径查看模型消费'],
   suppliers: ['供应商与采购', '上游资源、采购批次与经营毛利'],
-  funds: ['充值与资金', '实收现金、退款、采购支出与资金流水'],
-  reconciliation: ['对账中心', '用户余额、扣费与支付订单核对'],
   costs: ['成本核算', '成本模板、生效期间和分摊方法'],
-  monitor: ['分组监控', '独立监控页嵌入与公开展示分组可用性、倍率和响应状态'],
   runtime: ['并发与排队', '只读展示 Sub2API 当前并发、工作线程和排队负载'],
-  sync: ['数据同步', '来源进度、延迟与错误状态'],
-  alerts: ['告警中心', '缺失成本、账号到期和对账差异'],
 };
 
 const content = document.querySelector('#content');
@@ -1053,46 +1047,6 @@ async function renderSuppliers(search = '') {
   document.querySelector('#supplier-cost-button')?.addEventListener('click', () => openSingleCostModal(accountData.items, profiles));
 }
 
-async function renderFunds(search = '') {
-  const data = await api(`/funds?${queryFor('fundsSearch', search)}`);
-  const summary = data.summary;
-  state.lastExport = data.items;
-  content.innerHTML = `${section('资金概览', '资金页只统计现金和实际支付，不把赠送、返利和管理员余额调整误算为现金收入')}
-    <div class="metric-grid">
-      ${metric('现金流入', cny(summary.inflow), '充值与其他收入', 'good')}
-      ${metric('现金流出', cny(summary.outflow), '采购、费用与退款', 'warn')}
-      ${metric('现金退款', cny(summary.refunds), '已确认退款')}
-      ${metric('现金净额', cny(summary.net), '流入减流出', summary.net >= 0 ? 'good' : 'bad')}
-      ${metric('流水笔数', compact(summary.transactions), '当前周期')}
-    </div>
-    ${section('现金流水', '支付订单实收、退款和手工登记支出')}
-    <section class="table-panel">${searchTools('搜索流水编号、对方或费用类型', `<button type="button" class="button primary" id="expense-button">${icon('plus')}登记其他支出</button>`, search)}${
-      table([
-        { label: '时间' }, { label: '流水/对方' }, { label: '类型' }, { label: '支付方式' }, { label: '方向' }, { label: '现金金额 CNY', right: true }, { label: '入账余额 CNY', right: true }, { label: '状态' },
-      ], data.items.map((item) => [
-        dateTime(item.occurredAt), `<span class="primary-text">${escapeHtml(item.reference)}</span><div class="secondary-text">${escapeHtml(item.party || '')}</div>`,
-        `<span class="tag neutral">${escapeHtml(item.type)}</span>`, escapeHtml(item.method), item.direction === 'in' ? '<span class="money-positive">流入</span>' : '<span class="money-negative">流出</span>',
-        cny(item.baseAmountCny), item.creditedAmountCny ? cny(item.creditedAmountCny) : '--', `<span class="status">${escapeHtml(item.status)}</span>`,
-      ]), 1050)
-    }${pager(data, 'fundsSearch', '笔流水')}</section>`;
-  bindSearch(renderFunds);
-  document.querySelector('#expense-button')?.addEventListener('click', openExpenseModal);
-}
-
-async function renderReconciliation() {
-  const source = await api('/reconciliation');
-  const data = localPage(source, 'reconciliationList');
-  state.lastExport = data.items;
-  content.innerHTML = `${section('最近对账', '按人民币余额、实际扣费、支付订单和成本进行核对')}
-    <section class="table-panel">${table([
-      { label: '对账类型' }, { label: '状态' }, { label: '来源合计 CNY', right: true }, { label: 'FinOps 合计 CNY', right: true }, { label: '差异 CNY', right: true }, { label: '检查时间' },
-    ], data.items.map((item) => [
-      `<span class="primary-text">${escapeHtml(item.label)}</span>`,
-      `<span class="status ${item.status === 'matched' ? '' : 'warning'}">${item.status === 'matched' ? '一致' : '待处理'}</span>`,
-      cny(item.sourceTotal), cny(item.finopsTotal), `<span class="${item.difference ? 'money-negative' : 'money-positive'}">${cny(item.difference)}</span>`, dateTime(item.checkedAt),
-    ]), 900)}${pager(data, 'reconciliationList', '项对账')}</section>`;
-}
-
 async function renderCosts(search = '') {
   const source = await api('/cost-profiles', { range: false });
   const needle = search.trim().toLowerCase();
@@ -1114,142 +1068,6 @@ async function renderCosts(search = '') {
     }${pager(data, 'costProfiles', '个模板')}</section>`;
   bindSearch(renderCosts);
   document.querySelector('#profile-button')?.addEventListener('click', openCostProfileModal);
-}
-
-function monitorStatus(group) {
-  const labels = {
-    healthy: ['正常', ''],
-    degraded: ['部分可用', 'warning'],
-    unavailable: ['不可用', 'error'],
-    unknown: ['等待数据', 'warning'],
-  };
-  const [label, tone] = labels[group.status] || labels.unknown;
-  return `<span class="status ${tone}">${label}</span>`;
-}
-
-function monitorMultiplier(group) {
-  const value = group.configuredGroupMultiplier;
-  return value === null || value === undefined ? '--' : `${Number(value).toFixed(3).replace(/\.?0+$/, '')}x`;
-}
-
-function monitorAvailability(group) {
-  return group.availabilityPercent === null || group.availabilityPercent === undefined
-    ? '--'
-    : `${Number(group.availabilityPercent).toFixed(2)}%`;
-}
-
-function monitorSourceStatus(group) {
-  if (group.status === 'active') return '<span class="status">启用</span>';
-  if (group.status === 'inactive') return '<span class="status warning">停用</span>';
-  return '<span class="secondary-text">用量快照</span>';
-}
-
-function sourceGroupMultiplier(group) {
-  return group.groupMultiplier === null || group.groupMultiplier === undefined
-    ? '--'
-    : `${Number(group.groupMultiplier).toFixed(3).replace(/\.?0+$/, '')}x`;
-}
-
-function openMonitorGroupModal(group = null, candidate = null) {
-  const editing = Boolean(group);
-  const sourceGroupId = group?.sourceGroupId ?? candidate?.sourceGroupId ?? '';
-  const modelLabel = group?.modelLabel ?? candidate?.latestModel ?? candidate?.defaultModel ?? '';
-  openModal(editing ? '编辑监控分组' : '新增监控分组', [
-    { name: 'name', label: '展示名称', value: group?.name || candidate?.name || (candidate ? `分组 #${candidate.sourceGroupId}` : '') },
-    { name: 'sourceGroupId', label: 'sub2api 分组 ID', type: 'number', value: sourceGroupId },
-    { name: 'modelLabel', label: '展示模型', value: modelLabel, required: false },
-    { name: 'displayOrder', label: '展示排序', type: 'number', value: group?.displayOrder ?? 0 },
-    {
-      name: 'enabled', label: '展示状态', type: 'select', value: String(group?.enabled ?? true),
-      options: [['true', '展示'], ['false', '隐藏']],
-    },
-  ], (data) => api(editing ? `/monitor-groups/${group.id}` : '/monitor-groups', {
-    method: editing ? 'PATCH' : 'POST',
-    range: false,
-    body: JSON.stringify(data),
-  }));
-}
-
-function openMonitorSettingsModal(settings) {
-  openModal('监控页设置', [
-    {
-      name: 'refreshIntervalSeconds', label: '自动刷新间隔（秒）', type: 'number',
-      value: settings.refreshIntervalSeconds,
-    },
-  ], (data) => api('/monitor-settings', {
-    method: 'PATCH',
-    range: false,
-    body: JSON.stringify(data),
-  }));
-}
-
-async function renderMonitor(search = '') {
-  const [groups, candidates, settings] = await Promise.all([
-    api('/monitor-groups', { range: false }),
-    api('/monitor-group-candidates', { range: false }),
-    api('/monitor-settings', { range: false }),
-  ]);
-  state.lastExport = groups;
-  state.monitorCandidates = new Map(candidates.map((candidate) => [String(candidate.sourceGroupId), candidate]));
-  const term = search.trim().toLowerCase();
-  const visibleGroups = term
-    ? groups.filter((group) => `${group.name} ${group.sourceGroupId} ${group.modelLabel}`.toLowerCase().includes(term))
-    : groups;
-  const visibleCandidates = term
-    ? candidates.filter((group) => `${group.name} ${group.sourceGroupId} ${group.platform} ${group.latestModel} ${group.defaultModel}`.toLowerCase().includes(term))
-    : candidates;
-  const configuredGroupIds = new Set(groups.map((group) => Number(group.sourceGroupId)));
-  const enabled = visibleGroups.filter((group) => group.enabled);
-  const healthy = enabled.filter((group) => group.status === 'healthy').length;
-  content.innerHTML = `${section('分组可用性监控', '监控页使用独立地址展示，并在这里以 iframe 方式嵌入预览')}
-    <div class="metric-grid">
-      ${metric('已展示分组', compact(enabled.length), '公开监控页中的分组')}
-      ${metric('运行正常', compact(healthy), `${enabled.length || 0} 个已展示分组`, healthy === enabled.length && enabled.length ? 'good' : 'warn')}
-      ${metric('可用性', enabled.length ? `${(enabled.reduce((sum, group) => sum + Number(group.availabilityPercent || 0), 0) / enabled.length).toFixed(2)}%` : '--', '最近 7 天监控观测')}
-      ${metric('已读取分组', compact(candidates.length), '来自 sub2api 分组目录或用量快照')}
-      ${metric('独立地址', '/monitor', '可嵌入已授权来源')}
-    </div>
-    ${section('展示配置', '只有在这里启用的分组才会出现在公开监控页')}
-    <section class="table-panel">${searchTools('搜索展示名称或分组 ID', '<button type="button" class="button primary" id="monitor-group-add">新增分组</button>')}${
-      table([
-        { label: '展示分组' }, { label: '来源分组 ID', right: true }, { label: '模型标签' },
-        { label: '当前状态' }, { label: '分组倍率', right: true }, { label: '7 天可用性', right: true },
-        { label: '最近观测' }, { label: '编辑' },
-      ], visibleGroups.map((group) => [
-        `<span class="primary-text">${escapeHtml(group.name)}</span><div class="secondary-text">排序 ${group.displayOrder} · ${group.enabled ? '展示中' : '已隐藏'}</div>`,
-        `#${group.sourceGroupId}`, escapeHtml(group.modelLabel || '--'), monitorStatus(group), monitorMultiplier(group),
-        monitorAvailability(group), dateTime(group.lastObservedAt),
-        `<button type="button" class="icon-button table-icon" title="编辑监控分组" data-edit-monitor-group="${group.id}">${icon('settings-2')}</button>`,
-      ]), 1080)
-    }</section>
-    ${section('sub2api 分组目录', '登录 FinOps 时从 sub2api 管理接口读取；未重新登录时保留用量快照中的分组 ID')}
-    <section class="table-panel">${table([
-      { label: '分组' }, { label: '平台' }, { label: '状态' }, { label: '分组倍率', right: true },
-      { label: '最近模型' }, { label: '请求数', right: true }, { label: '最近使用' }, { label: '操作' },
-    ], visibleCandidates.map((group) => [
-      `<span class="primary-text">${escapeHtml(group.name || `分组 #${group.sourceGroupId}`)}</span><div class="secondary-text">#${group.sourceGroupId}</div>`,
-      escapeHtml(group.platform || '--'), monitorSourceStatus(group), sourceGroupMultiplier(group),
-      escapeHtml(group.latestModel || group.defaultModel || '--'), compact(group.requests), dateTime(group.lastUsedAt),
-      configuredGroupIds.has(Number(group.sourceGroupId))
-        ? '<span class="secondary-text">已配置</span>'
-        : `<button type="button" class="button" data-add-monitor-group="${group.sourceGroupId}">${icon('plus')}添加展示</button>`,
-    ]), 1120)}</section>
-    <section class="monitor-preview">
-      <div class="panel-header"><div><h2>公开监控页</h2><span>与外部 iframe 使用同一页面</span></div><a class="button" href="/monitor" target="_blank" rel="noopener">新窗口打开</a></div>
-      <iframe class="monitor-frame" src="/monitor" title="分组可用性监控预览"></iframe>
-    </section>`;
-  bindSearch(renderMonitor);
-  document.querySelector('#monitor-group-add')?.addEventListener('click', () => openMonitorGroupModal());
-  const groupAddButton = document.querySelector('#monitor-group-add');
-  if (groupAddButton && !document.querySelector('#monitor-settings-button')) {
-    const settingsButton = document.createElement('button');
-    settingsButton.type = 'button';
-    settingsButton.className = 'button';
-    settingsButton.id = 'monitor-settings-button';
-    settingsButton.textContent = '刷新设置';
-    settingsButton.addEventListener('click', () => openMonitorSettingsModal(settings));
-    groupAddButton.parentElement?.insertBefore(settingsButton, groupAddButton);
-  }
 }
 
 async function renderRuntime() {
@@ -1282,67 +1100,14 @@ async function renderRuntime() {
     </section>`;
 }
 
-async function renderSync() {
-  const source = await api('/sync-details', { range: false });
-  const data = localPage(source.sources, 'syncSources');
-  state.lastExport = data.items;
-  content.innerHTML = `${section('数据同步', '逐项检查真实数据的同步延迟和错误')}
-    <div class="metric-grid">
-      ${metric('整体状态', source.status === 'healthy' ? '同步正常' : source.status === 'error' ? '同步异常' : '等待同步', `${source.sources.length} 个来源`, source.status === 'healthy' ? 'good' : 'warn')}
-      ${metric('最大延迟', source.lagSeconds === null ? '--' : `${Math.round(source.lagSeconds)}s`, '按最慢来源计算', Number(source.lagSeconds) > 300 ? 'warn' : '')}
-      ${metric('最近完整成功', dateTime(source.lastSuccessAt), '最老成功来源')}
-      ${metric('累计同步行数', compact(source.rowsSynced), '游标累计')}
-    </div>
-    <section class="table-panel">${table([
-      { label: '数据来源' }, { label: '状态' }, { label: '最近成功' }, { label: '当前游标' }, { label: '延迟', right: true }, { label: '累计行数', right: true }, { label: '错误信息' },
-    ], data.items.map((item) => [
-      `<span class="primary-text">${escapeHtml(item.label)}</span><div class="secondary-text">${escapeHtml(item.sourceName)}</div>`,
-      `<span class="status ${item.status === 'healthy' ? '' : item.status === 'pending' ? 'warning' : 'error'}">${item.status === 'healthy' ? '正常' : item.status === 'pending' ? '等待' : '异常'}</span>`,
-      dateTime(item.lastSuccessAt), dateTime(item.cursorTime), item.lagSeconds === null ? '--' : `${Math.round(item.lagSeconds)}s`, compact(item.rowsSynced),
-      item.lastError ? `<span class="money-negative">${escapeHtml(item.lastError)}</span>` : '<span class="secondary-text">无</span>',
-    ]), 1050)}${pager(data, 'syncSources', '个来源')}</section>`;
-  applySyncState(source);
-}
-
-async function renderAlerts() {
-  const [summary, sync, reconciliation, suppliers] = await Promise.all([
-    api('/summary'), api('/sync-details', { range: false }), api('/reconciliation'), api('/suppliers'),
-  ]);
-  const issues = [
-    ...(summary.alerts || []).map((item, index) => ({ id: `summary-${index}`, category: '经营核算', ...item })),
-    ...reconciliation.filter((item) => item.status !== 'matched').map((item) => ({
-      id: `recon-${item.type}`, category: '对账差异', severity: 'high', title: `${item.label}存在差异`, detail: `差异 ${cny(item.difference)}`,
-    })),
-    ...sync.sources.filter((item) => item.status !== 'healthy').map((item) => ({
-      id: `sync-${item.sourceName}`, category: '数据同步', severity: item.status === 'error' ? 'high' : 'medium', title: `${item.label}同步异常`, detail: item.lastError || '尚未完成首次同步',
-    })),
-  ];
-  const expiring = (suppliers.items || []).reduce((total, item) => total + Number(item.expiringAccounts || 0), 0);
-  if (expiring) issues.push({ id: 'expiring', category: '账号治理', severity: 'medium', title: `${expiring} 个账号即将到期`, detail: '请核对续费、采购批次和剩余用量' });
-  const data = localPage(issues, 'alertsList');
-  state.lastExport = data.items;
-  content.innerHTML = `${section('待处理告警', '集中查看利润核算、成本和同步风险')}
-    <section class="table-panel">${table([
-      { label: '级别' }, { label: '类型' }, { label: '告警内容' }, { label: '说明' }, { label: '状态' },
-    ], data.items.map((item) => [
-      `<span class="severity-badge ${escapeHtml(item.severity)}">${item.severity === 'high' ? '高' : item.severity === 'medium' ? '中' : '低'}</span>`,
-      escapeHtml(item.category), `<span class="primary-text">${escapeHtml(item.title)}</span>`, escapeHtml(item.detail), '<span class="status warning">待处理</span>',
-    ]), 850)}${pager(data, 'alertsList', '项告警')}</section>`;
-}
-
 const renderers = {
   overview: renderOverview,
   users: renderUsersEnhanced,
   accounts: renderAccounts,
   usage: renderUsage,
   suppliers: renderSuppliers,
-  funds: renderFunds,
-  reconciliation: renderReconciliation,
   costs: renderCosts,
-  monitor: renderMonitor,
   runtime: renderRuntime,
-  sync: renderSync,
-  alerts: renderAlerts,
 };
 
 async function render() {
@@ -1730,22 +1495,6 @@ function openCostProfileModal() {
   ], (data) => api('/cost-profiles', { method: 'POST', range: false, body: JSON.stringify({ ...data, currency: 'CNY' }) }));
 }
 
-function openExpenseModal() {
-  openModal('登记其他支出', [
-    { name: 'transactionType', label: '费用类型', type: 'select', options: [['other_expense', '其他支出'], ['gateway_fee', '通道手续费'], ['account_purchase', '账号采购'], ['supplier_topup', '供应商充值'], ['subscription_renewal', '订阅续费'], ['affiliate_rebate', '分销返利'], ['manual_adjustment', '人工调整'], ['refund', '人工退款']] },
-    { name: 'originalAmount', label: '金额 CNY', type: 'number' },
-    { name: 'paymentMethod', label: '支付方式', type: 'select', options: [['bank', '银行转账'], ['alipay', '支付宝'], ['wechat', '微信支付'], ['card', '银行卡'], ['other', '其他']] },
-    { name: 'occurredAt', label: '发生时间', type: 'datetime-local', value: dateTimeInputValue(new Date()) },
-    { name: 'reference', label: '流水编号', required: false },
-    { name: 'party', label: '对方/供应商', required: false },
-    { name: 'notes', label: '备注', type: 'textarea', full: true, required: false },
-  ], (data) => api('/cash-transactions', {
-    method: 'POST',
-    range: false,
-    body: JSON.stringify({ ...data, direction: 'out', originalCurrency: 'CNY', fxRate: '1', baseAmount: data.originalAmount }),
-  }));
-}
-
 function exportCsv() {
   if (!state.lastExport.length) return toast('当前页面没有可导出数据');
   const keys = Object.keys(state.lastExport[0]);
@@ -1791,8 +1540,6 @@ content.addEventListener('click', (event) => {
   const userDetails = event.target.closest('[data-user-details]');
   const userSort = event.target.closest('[data-user-sort]');
   const accountScope = event.target.closest('[data-account-scope]');
-  const monitorGroupEdit = event.target.closest('[data-edit-monitor-group]');
-  const monitorGroupAdd = event.target.closest('[data-add-monitor-group]');
   const ledgerEdit = event.target.closest('[data-edit-ledger]');
   const accountRuleHistory = event.target.closest('[data-account-rule-history]');
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
@@ -1820,16 +1567,6 @@ content.addEventListener('click', (event) => {
     state.selectedAccounts.clear();
     tableState('accountsSearch').page = 1;
     renderAccounts();
-    return;
-  }
-  if (monitorGroupEdit) {
-    const group = state.lastExport.find((item) => Number(item.id) === Number(monitorGroupEdit.dataset.editMonitorGroup));
-    if (group) openMonitorGroupModal(group);
-    return;
-  }
-  if (monitorGroupAdd) {
-    const candidate = state.monitorCandidates.get(String(monitorGroupAdd.dataset.addMonitorGroup));
-    if (candidate) openMonitorGroupModal(null, candidate);
     return;
   }
   if (previous || next || pageTarget) {
