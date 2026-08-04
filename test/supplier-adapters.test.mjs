@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SupplierAdapterError, SupplierAdapterRegistry, SupplierHttpClient, normalizeSupplierBaseUrl,
+  buildPinnedHttpsRequestOptions, SupplierAdapterError, SupplierAdapterRegistry, SupplierHttpClient,
+  normalizeSupplierBaseUrl,
 } from '../src/services/supplier-adapters.mjs';
 
 const config = { supplierRequestTimeoutMs: 1_000, supplierMaxResponseBytes: 1024 * 1024 };
@@ -31,6 +32,26 @@ test('supplier base URLs normalize safely and private DNS targets are rejected b
     client.request('https://supplier.example.test', '/api/status'),
     (error) => error instanceof SupplierAdapterError && error.code === 'private_address_blocked',
   );
+});
+
+test('pinned HTTPS requests connect directly to the validated address while preserving Host and SNI', () => {
+  const options = buildPinnedHttpsRequestOptions(
+    'https://supplier.example.test:8443/api/v1/keys?page=2',
+    { method: 'GET', headers: { Accept: 'application/json' } },
+    { address: '203.0.113.10', family: 4 },
+  );
+  assert.deepEqual(options, {
+    protocol: 'https:',
+    hostname: '203.0.113.10',
+    family: 4,
+    port: '8443',
+    path: '/api/v1/keys?page=2',
+    method: 'GET',
+    headers: { Accept: 'application/json', Host: 'supplier.example.test:8443' },
+    servername: 'supplier.example.test',
+    autoSelectFamily: false,
+  });
+  assert.equal('lookup' in options, false);
 });
 
 test('Sub2API adapter supports password plus TOTP and probes only the documented billing read endpoint', async () => {

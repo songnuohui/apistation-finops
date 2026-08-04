@@ -224,9 +224,28 @@ async function readLimitedFetchBody(response, maxResponseBytes) {
   return raw;
 }
 
+export function buildPinnedHttpsRequestOptions(urlValue, init, target) {
+  const parsed = new URL(urlValue);
+  const originalHostname = hostname(parsed);
+  const headers = { ...init.headers };
+  if (!Object.keys(headers).some((name) => name.toLowerCase() === 'host')) {
+    headers.Host = parsed.host;
+  }
+  return {
+    protocol: 'https:',
+    hostname: target.address,
+    family: target.family,
+    port: parsed.port || 443,
+    path: `${parsed.pathname}${parsed.search}`,
+    method: init.method,
+    headers,
+    servername: net.isIP(originalHostname) ? undefined : originalHostname,
+    autoSelectFamily: false,
+  };
+}
+
 function pinnedHttpsRequest(urlValue, init, target, { timeoutMs, maxResponseBytes }) {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(urlValue);
     let settled = false;
     let timer;
     const finish = (error, value) => {
@@ -236,15 +255,7 @@ function pinnedHttpsRequest(urlValue, init, target, { timeoutMs, maxResponseByte
       if (error) reject(error);
       else resolve(value);
     };
-    const request = https.request(parsed, {
-      method: init.method,
-      headers: init.headers,
-      servername: net.isIP(hostname(parsed)) ? undefined : hostname(parsed),
-      lookup: (_host, options, callback) => {
-        if (options?.all) callback(null, [{ address: target.address, family: target.family }]);
-        else callback(null, target.address, target.family);
-      },
-    }, (response) => {
+    const request = https.request(buildPinnedHttpsRequestOptions(urlValue, init, target), (response) => {
       const status = Number(response.statusCode || 0);
       const declaredLength = Number(response.headers['content-length'] || 0);
       if (declaredLength > maxResponseBytes) {
