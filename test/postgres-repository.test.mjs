@@ -151,6 +151,43 @@ test('overview omits duplicate consumption rankings and model breakdown exposes 
   assert.match(usageBreakdown, /MAX\(snapshot\.cost_mode\) AS cost_mode/);
 });
 
+test('runtime dashboard enriches Redis-only concurrency snapshots with FinOps user identities', async () => {
+  const queries = [];
+  const pool = {
+    async query(text) {
+      queries.push(text);
+      if (text.includes('runtime_queue_live')) return { rows: [], rowCount: 0 };
+      if (text.includes('user_concurrency_live')) {
+        return {
+          rows: [{
+            source_user_id: '59', email: 'customer@example.com', username: 'customer',
+            max_concurrency: '100', current_concurrency: '2', observed_at: '2026-08-04T02:30:00.000Z',
+          }],
+          rowCount: 1,
+        };
+      }
+      assert.fail(`unexpected query: ${text}`);
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+
+  const dashboard = await repository.getRuntimeDashboard();
+
+  assert.equal(dashboard.queue.available, false);
+  assert.deepEqual(dashboard.users, [{
+    id: 59,
+    email: 'customer@example.com',
+    username: 'customer',
+    maxConcurrency: 100,
+    currentConcurrency: 2,
+    usagePercent: 2,
+    observedAt: '2026-08-04T02:30:00.000Z',
+  }]);
+  const userQuery = queries.find((text) => text.includes('user_concurrency_live'));
+  assert.match(userQuery, /LEFT JOIN "finops"\.dim_users users ON users\.source_user_id=live\.source_user_id/);
+  assert.match(userQuery, /COALESCE\(NULLIF\(live\.email,''\),users\.email,''\) AS email/);
+});
+
 test('usage event details are read from FinOps facts with searchable model fallback and immutable cost status', async () => {
   const queries = [];
   const pool = {

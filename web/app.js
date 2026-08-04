@@ -566,9 +566,6 @@ async function renderOverview() {
       ${metricAction('赠送金额', cny(dashboard.totals.giftBalanceCreditCny), `${compact(dashboard.totals.giftBalanceCreditCount)} 笔赠送、兑换或返利入账 · 查看明细`, 'good', 'data-open-overview-detail="gift"')}
       ${metricAction('退款金额', cny(cash.refunds), '已从充值净额扣除 · 查看退款明细', Number(cash.refunds || 0) ? 'warn' : '', 'data-open-overview-detail="recharge"')}
       ${metricAction('总消耗', cny(consumptionCny), `${compact(usage.requests)} 次请求 · 查看明细`, '', 'data-open-overview-detail="consumption"')}
-      ${metricAction('总成本', cny(totalCostCny), '已登记的固定与计价成本 · 查看明细', '', 'data-open-overview-detail="consumption"')}
-      ${metricAction('经营毛利', cny(grossProfitCny), '总消耗减已登记成本 · 查看明细', grossProfitCny >= 0 ? 'good' : 'bad', 'data-open-overview-detail="consumption"')}
-      ${metricAction('毛利率', percent(grossMargin), '经营毛利 / 总消耗 · 查看明细', Number(grossMargin || 0) >= 0 ? 'good' : 'bad', 'data-open-overview-detail="consumption"')}
       ${metricAction('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户 · 查看明细`, '', 'data-open-overview-detail="balance"')}
       ${metricAction('总 Token', compact(totalTokens), '输入、输出与缓存合计 · 查看明细', '', 'data-open-overview-detail="tokens"')}
     </div>

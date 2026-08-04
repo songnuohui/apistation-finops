@@ -3010,9 +3010,13 @@ export class PostgresRepository {
         FROM ${this.schema}.runtime_queue_live
         WHERE source_name='sub2api_risk_control' LIMIT 1`),
       this.pool.query(`
-        SELECT source_user_id,email,username,max_concurrency,current_concurrency,observed_at
-        FROM ${this.schema}.user_concurrency_live
-        ORDER BY current_concurrency DESC,max_concurrency DESC,source_user_id ASC
+        SELECT live.source_user_id,
+               COALESCE(NULLIF(live.email,''),users.email,'') AS email,
+               COALESCE(NULLIF(live.username,''),users.username,'') AS username,
+               live.max_concurrency,live.current_concurrency,live.observed_at
+        FROM ${this.schema}.user_concurrency_live live
+        LEFT JOIN ${this.schema}.dim_users users ON users.source_user_id=live.source_user_id
+        ORDER BY live.current_concurrency DESC,live.max_concurrency DESC,live.source_user_id ASC
         LIMIT 100`),
     ]);
     const queue = queueResult.rows[0];
