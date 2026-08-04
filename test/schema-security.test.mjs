@@ -179,3 +179,12 @@ test('supplier key cost rules remain FinOps-owned and reference only sanitized k
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(migration, /credentials|raw_key|api_key\s+(?:TEXT|VARCHAR)/i);
 });
+
+test('supplier key link backfill updates only FinOps dimensions and cost rules', () => {
+  const migration = read('migrations/018_backfill_supplier_key_cost_links.sql');
+  assert.match(migration, /\{\{FINOPS_SCHEMA\}\}\.supplier_account_links/);
+  assert.match(migration, /\{\{FINOPS_SCHEMA\}\}\.dim_accounts/);
+  assert.match(migration, /\{\{FINOPS_SCHEMA\}\}\.account_cost_rules/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /credentials|raw_key|api_key\s+(?:TEXT|VARCHAR)/i);
+});
