@@ -57,7 +57,7 @@ syncService?.setRuntimeStatusReader(({accessToken})=>Promise.all([
   listSub2ApiAdministratorUserConcurrency({accessToken},config),
 ]).then(([queue, users])=>({queue,users})));
 syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listActiveUserConcurrency());
-syncService?.setReadCacheInvalidator(()=>responseCache.invalidate());
+syncService?.setReadCacheInvalidator(()=>responseCache.invalidate('runtime'));
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
 function setHeaders(res,{embeddable=false}={}){
@@ -274,9 +274,12 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams),scope:cashScope(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/non-cash-balance-credits')return json(res,200,await cached('non-cash-balance-credits',config.listCacheTtlSeconds,()=>repository.listNonCashBalanceCredits({...range(),...page()})));
   if(request.method==='GET'&&url.pathname==='/api/runtime'){
-    if(url.searchParams.get('refresh')==='1'){
-      await syncService?.refreshRuntimeSnapshots();
-      await responseCache.invalidate();
+    const live=url.searchParams.get('live')==='1';
+    if(url.searchParams.get('refresh')==='1'||live){
+      await syncService?.refreshRuntimeSnapshots({
+        minIntervalMs:live?config.runtimeLiveRefreshSeconds*1000:0,
+      });
+      await responseCache.invalidate('runtime');
     }
     return json(res,200,await cached('runtime',config.runtimeCacheTtlSeconds,()=>repository.getRuntimeDashboard()));
   }

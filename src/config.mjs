@@ -195,6 +195,7 @@ export function loadConfig(env = process.env) {
     sub2apiRedisConnectTimeoutMs: intValue(env.SUB2API_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
     sub2apiRedisRuntimeUserLimit: intValue(env.SUB2API_REDIS_RUNTIME_USER_LIMIT, 500, { min: 1, max: 5_000 }),
     runtimeSnapshotIntervalSeconds: intValue(env.RUNTIME_SNAPSHOT_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
+    runtimeLiveRefreshSeconds: intValue(env.RUNTIME_LIVE_REFRESH_SECONDS, 2, { min: 1, max: 30 }),
     supplierCredentialsKey,
     supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
     supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 60, { min: 30, max: 3600 }),

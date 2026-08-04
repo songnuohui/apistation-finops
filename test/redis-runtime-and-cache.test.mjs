@@ -53,6 +53,24 @@ test('response cache uses only its own prefix and invalidates cached reads', asy
   await cache.close();
 });
 
+test('response cache can invalidate runtime entries without flushing report entries', async () => {
+  const client = fakeRedisClient();
+  const cache = new ResponseCacheService({
+    finopsRedisUrl: 'redis://:test@localhost:6379/15',
+    finopsRedisKeyPrefix: 'finops:cache:',
+  }, console, () => client);
+  let runtimeLoads = 0;
+  let overviewLoads = 0;
+
+  await cache.remember('runtime', 'live', 60, async () => ({ value: ++runtimeLoads }));
+  await cache.remember('overview', '7d', 60, async () => ({ value: ++overviewLoads }));
+  await cache.invalidate('runtime');
+
+  assert.deepEqual(await cache.remember('runtime', 'live', 60, async () => ({ value: ++runtimeLoads })), { value: 2 });
+  assert.deepEqual(await cache.remember('overview', '7d', 60, async () => ({ value: ++overviewLoads })), { value: 1 });
+  await cache.close();
+});
+
 test('Sub2API Redis reader counts only unexpired user concurrency members', async () => {
   const calls = [];
   const client = {

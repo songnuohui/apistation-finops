@@ -171,6 +171,8 @@ export class SyncService {
     this.running = false;
     this.timer = null;
     this.runtimeRefreshing = false;
+    this.runtimeRefreshPromise = null;
+    this.lastRuntimeRefreshAt = 0;
     this.runtimeTimer = null;
     this.channelMonitorReader = null;
     this.sourceGroupCatalogReader = null;
@@ -244,14 +246,16 @@ export class SyncService {
     return this.captureChannelMonitorGroupObservations(channelMonitors);
   }
 
-  async refreshRuntimeSnapshots() {
-    if (this.runtimeRefreshing) return 0;
+  async refreshRuntimeSnapshots({ minIntervalMs = 0 } = {}) {
+    if (this.runtimeRefreshPromise) return this.runtimeRefreshPromise;
+    if (minIntervalMs > 0 && Date.now() - this.lastRuntimeRefreshAt < minIntervalMs) return 0;
     this.runtimeRefreshing = true;
-    try {
-      return await this.refreshRuntimeSnapshotsUnsafe();
-    } finally {
+    this.runtimeRefreshPromise = this.refreshRuntimeSnapshotsUnsafe().finally(() => {
+      this.lastRuntimeRefreshAt = Date.now();
       this.runtimeRefreshing = false;
-    }
+      this.runtimeRefreshPromise = null;
+    });
+    return this.runtimeRefreshPromise;
   }
 
   async refreshRuntimeSnapshotsUnsafe() {

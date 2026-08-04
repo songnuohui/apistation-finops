@@ -29,6 +29,8 @@ const state = {
   runtimeRefreshTimer: null,
 };
 
+const RUNTIME_LIVE_REFRESH_MS = 3_000;
+
 const pageMeta = {
   overview: ['经营总览', '实收现金、用户实际消费、账号成本与经营毛利'],
   users: ['用户账务与利润', '充值、人工调账、实际消费和用户贡献'],
@@ -521,7 +523,7 @@ async function refreshOverviewRuntimePanel() {
   if (state.page !== 'overview') return;
   const current = document.querySelector('#overview-runtime-panel');
   if (!current) return;
-  const data = await api('/runtime', { range: false });
+  const data = await api('/runtime?live=1', { range: false });
   if (state.page === 'overview' && current.isConnected) current.outerHTML = overviewRuntimePanel(data);
 }
 
@@ -530,7 +532,7 @@ async function renderOverview() {
     api('/overview-dashboard'),
     api('/trend'),
     api(`/usage/models?${queryFor('overviewModels', '', { sort: 'userChargeCny', direction: 'desc' })}`),
-    api('/runtime', { range: false }),
+    api('/runtime?live=1', { range: false }),
   ]);
   const summary = dashboard.summary || {};
   const operations = summary.operations || {};
@@ -2188,7 +2190,7 @@ async function renderCosts(search = '') {
 }
 
 async function renderRuntime() {
-  const data = await api('/runtime?refresh=1', { range: false });
+  const data = await api('/runtime?live=1', { range: false });
   const queue = data.queue || { available: false };
   const activeWorkers = Number(queue.activeWorkers || 0);
   const workerCount = Number(queue.workerCount || 0);
@@ -2261,7 +2263,7 @@ function scheduleRuntimeRefresh() {
       console.warn('Unable to refresh overview runtime snapshot', error);
     }
     if (state.page === 'overview') scheduleRuntimeRefresh();
-  }, 10_000);
+  }, RUNTIME_LIVE_REFRESH_MS);
 }
 
 function modalControl(field) {

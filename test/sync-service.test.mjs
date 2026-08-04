@@ -54,6 +54,28 @@ test('configuration rejects legacy automatic USD-to-CNY conversion', () => {
   );
 });
 
+test('runtime refresh shares an in-flight source read and respects the live refresh cooldown', async () => {
+  const service = new SyncService(null, {
+    finopsSchema: 'finops', sourceSchema: 'public', sourceBalanceUnit: 'CNY',
+  });
+  let calls = 0;
+  service.refreshRuntimeSnapshotsUnsafe = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return 7;
+  };
+
+  const [first, second] = await Promise.all([
+    service.refreshRuntimeSnapshots({ minIntervalMs: 2_000 }),
+    service.refreshRuntimeSnapshots({ minIntervalMs: 2_000 }),
+  ]);
+
+  assert.equal(first, 7);
+  assert.equal(second, 7);
+  assert.equal(calls, 1);
+  assert.equal(await service.refreshRuntimeSnapshots({ minIntervalMs: 2_000 }), 0);
+});
+
 test('channel monitor summaries use operational and degraded checks as available', () => {
   assert.deepEqual(summarizeChannelMonitorGroup([
     { enabled: true, primaryStatus: 'operational', availability7d: 99.5, primaryLatencyMs: 120, primaryPingLatencyMs: 5 },

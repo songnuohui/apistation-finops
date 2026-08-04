@@ -101,14 +101,14 @@ export class ResponseCacheService {
     }
   }
 
-  async invalidate() {
+  async invalidate(scope = '') {
     this.inflight.clear();
     this.generation += 1;
     if (!this.enabled || !(await this.connect()) || !this.client?.isReady) return;
     try {
       const keys = [];
       for await (const batch of this.client.scanIterator({
-        MATCH: `${this.prefix}response:*`,
+        MATCH: `${this.prefix}response:${scope ? `${scope}:` : ''}*`,
         COUNT: 100,
       })) {
         keys.push(...batch);
