@@ -7,7 +7,7 @@ import { resolveStaticPath } from '../src/http/static-path.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
-  normalizeMonitorSettings,
+  normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -152,4 +152,33 @@ test('monitor settings validate a bounded refresh interval', () => {
   assert.deepEqual(normalizeMonitorSettings({ refreshIntervalSeconds: '45' }), { refreshIntervalSeconds: 45 });
   assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '4' }), /invalid refreshIntervalSeconds/);
   assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '3601' }), /invalid refreshIntervalSeconds/);
+});
+
+test('supplier connections validate encrypted portal and API-key credentials', () => {
+  const connection = normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'main account', adapterType: 'sub2api',
+    baseUrl: 'https://supplier.example.test', credentials: { username: 'operator', password: 'secret', totpSecret: 'ABC' },
+  });
+  assert.equal(connection.authMode, 'password');
+  assert.deepEqual(Object.keys(connection.credentials).sort(), [
+    'accessToken', 'apiKey', 'balance', 'balanceCurrency', 'keyName', 'password', 'rateMultiplier', 'totpSecret', 'username',
+  ]);
+  assert.equal(assertSupplierCredentials(connection), true);
+  const missingPassword = normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'missing password', adapterType: 'newapi',
+    baseUrl: 'https://supplier.example.test', credentials: { username: 'operator' },
+  });
+  assert.throws(() => assertSupplierCredentials(missingPassword), /password authentication requires username and password/);
+  const tokenConnection = normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'token account', adapterType: 'newapi', authMode: 'access_token',
+    baseUrl: 'https://supplier.example.test', credentials: { accessToken: 'portal-token' },
+  });
+  assert.equal(assertSupplierCredentials(tokenConnection), true);
+  const openAi = normalizeSupplierConnection({
+    supplierName: 'OpenAI compatible', name: 'key', adapterType: 'openai_compatible',
+    baseUrl: 'https://supplier.example.test', credentials: { apiKey: 'sk-secret' },
+  });
+  assert.equal(openAi.authMode, 'api_key');
+  assert.equal(assertSupplierCredentials(openAi), true);
+  assert.throws(() => assertSupplierCredentials({ ...openAi, authMode: 'access_token' }), /requires api_key/);
 });

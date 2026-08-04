@@ -24,6 +24,9 @@ const state = {
   userDetail: null,
   overviewDetail: null,
   whitelistManager: null,
+  supplierSearch: '',
+  supplierConnectionItems: new Map(),
+  supplierDetail: null,
   runtimeRefreshTimer: null,
 };
 
@@ -1410,26 +1413,631 @@ async function renderUsage(search = state.usageSearch) {
   bindSearch(renderUsage);
 }
 
-async function renderSuppliers(search = '') {
-  const [source, profiles, accountData] = await Promise.all([
+const supplierStateMeta = {
+  ok: ['正常', 'ok'],
+  warning: ['需关注', 'warning'],
+  failed: ['失败', 'error'],
+  pending: ['等待同步', 'pending'],
+  disabled: ['已停用', 'muted'],
+  unsupported: ['暂不支持', 'warning'],
+  active: ['可用', 'ok'],
+  inactive: ['不可用', 'warning'],
+  removed: ['已移除', 'muted'],
+  unknown: ['未知', 'pending'],
+  skipped: ['已跳过', 'muted'],
+  open: ['待处理', 'warning'],
+  acknowledged: ['已确认', 'muted'],
+  resolved: ['已恢复', 'ok'],
+};
+
+function supplierNumber(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+}
+
+function supplierAmount(value, currency = '') {
+  if (!supplierNumber(value)) return currency ? `-- ${currency}` : '--';
+  const code = String(currency || '').trim().toUpperCase();
+  if (/^[A-Z]{3}$/.test(code)) {
+    try {
+      return new Intl.NumberFormat('zh-CN', {
+        style: 'currency', currency: code, maximumFractionDigits: 2,
+      }).format(Number(value));
+    } catch {
+      // Some supplier portals expose non-ISO quota units. Keep them visible as units.
+    }
+  }
+  const amount = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 4 }).format(Number(value));
+  return code ? `${amount} ${code}` : amount;
+}
+
+function supplierAdapterLabel(value) {
+  return ({
+    auto: '自动识别',
+    sub2api: 'Sub2API',
+    newapi: 'NewAPI',
+    openai_compatible: 'OpenAI 兼容',
+    custom: '自定义适配器',
+  })[value] || value || '未识别';
+}
+
+function supplierAuthModeLabel(value) {
+  return ({ password: '账号密码', access_token: '访问令牌', api_key: 'API 密钥' })[value] || value || '--';
+}
+
+function supplierState(status, label = '') {
+  const meta = supplierStateMeta[String(status || '').toLowerCase()] || ['未知', 'pending'];
+  return `<span class="supplier-state ${meta[1]}">${escapeHtml(label || meta[0])}</span>`;
+}
+
+function supplierSeverity(severity) {
+  const value = String(severity || 'warning').toLowerCase();
+  const label = ({ critical: '严重', warning: '警告', info: '提示' })[value] || value;
+  return `<span class="supplier-severity ${escapeHtml(value)}">${escapeHtml(label)}</span>`;
+}
+
+function supplierConnectionStatusHint(item) {
+  if (item.connectionStatus === 'failed' && item.lastError) return item.lastError;
+  if (Number(item.consecutiveFailures || 0)) return `连续失败 ${compact(item.consecutiveFailures)} 次`;
+  if (!item.enabled) return '已停用，不参与自动同步';
+  return item.detectedAdapterType
+    ? `已识别 ${supplierAdapterLabel(item.detectedAdapterType)}`
+    : `配置 ${supplierAdapterLabel(item.adapterType)}`;
+}
+
+function supplierQuotaText(key) {
+  const currency = key.quotaCurrency || '';
+  if (supplierNumber(key.quotaRemaining) && supplierNumber(key.quotaTotal)) {
+    return `${supplierAmount(key.quotaRemaining, currency)} / ${supplierAmount(key.quotaTotal, currency)}`;
+  }
+  if (supplierNumber(key.quotaRemaining)) return `余 ${supplierAmount(key.quotaRemaining, currency)}`;
+  if (supplierNumber(key.quotaUsed)) return `已用 ${supplierAmount(key.quotaUsed, currency)}`;
+  return currency ? `未提供 ${currency} 额度` : '未提供额度';
+}
+
+function supplierAuthModeOptions(adapterType) {
+  if (adapterType === 'openai_compatible') return [['api_key', 'API 密钥']];
+  if (['auto', 'sub2api', 'newapi'].includes(adapterType)) return [['password', '账号密码'], ['access_token', '访问令牌']];
+  return [['password', '账号密码'], ['access_token', '访问令牌'], ['api_key', 'API 密钥']];
+}
+
+function supplierAuthModeSelectOptions(options, selected) {
+  return options.map(([value, label]) => (
+    `<option value="${value}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`
+  )).join('');
+}
+
+function refreshSupplierAuthMode(form) {
+  const select = form.elements.authMode;
+  const options = supplierAuthModeOptions(form.elements.adapterType.value);
+  const current = select.value;
+  select.innerHTML = supplierAuthModeSelectOptions(options, options.some(([value]) => value === current) ? current : options[0][0]);
+}
+
+function supplierConnectionCredentialFields(adapterType, authMode, values = {}, editing = false) {
+  const preserved = editing ? '<p class="supplier-credential-note">未切换认证方式且不修改手工密钥资料时，凭据可留空并继续使用已加密保存的值。切换认证方式或修改下方手工资料时，需重新填写对应凭据；凭据不会在页面回显。</p>' : '';
+  const optional = editing ? '' : 'required';
+  const value = (name) => escapeHtml(values[name] ?? '');
+  let fields;
+  let adapterHint = '';
+  if (authMode === 'password') {
+    fields = `
+      <label class="field"><span>登录账号</span><input name="username" autocomplete="username" ${optional} value="${value('username')}"></label>
+      <label class="field"><span>登录密码</span><input name="password" type="password" autocomplete="new-password" ${optional} value="${value('password')}"></label>`;
+    if (adapterType === 'sub2api') {
+      fields += `<label class="field full"><span>TOTP 密钥（可选）</span><input name="totpSecret" type="password" autocomplete="off" value="${value('totpSecret')}"></label>`;
+    }
+    if (adapterType === 'newapi') {
+      adapterHint = '<p class="supplier-credential-note">NewAPI 账号启用二步验证时，请改用访问令牌认证。</p>';
+    }
+  } else if (authMode === 'api_key') {
+    fields = `<label class="field full"><span>API 密钥</span><input name="apiKey" type="password" autocomplete="off" ${optional} value="${value('apiKey')}"></label>`;
+  } else {
+    fields = `<label class="field full"><span>访问令牌</span><input name="accessToken" type="password" autocomplete="off" ${optional} value="${value('accessToken')}"></label>`;
+  }
+  const openAiFields = adapterType === 'openai_compatible' ? `
+    <label class="field"><span>密钥显示名（可选）</span><input name="keyName" value="${value('keyName')}"></label>
+    <label class="field"><span>上游倍率（可选）</span><input name="rateMultiplier" type="number" step="any" min="0" value="${value('rateMultiplier')}"></label>
+    <label class="field"><span>手工余额（可选）</span><input name="balance" type="number" step="any" min="0" value="${value('balance')}"></label>
+    <label class="field"><span>手工余额币种（可选）</span><input name="credentialsBalanceCurrency" value="${value('credentialsBalanceCurrency')}"></label>` : '';
+  return `${preserved}${adapterHint}<div class="supplier-credential-grid">${fields}${openAiFields}</div>`;
+}
+
+function supplierConnectionFormMarkup(connection = null) {
+  const editing = Boolean(connection);
+  const value = (name, fallback = '') => escapeHtml(connection?.[name] ?? fallback);
+  const checked = (name, fallback) => (connection ? connection[name] : fallback) ? 'checked' : '';
+  const select = (name, options, fallback) => `<select name="${name}">${options.map(([option, label]) => (
+    `<option value="${option}" ${String(connection?.[name] ?? fallback) === option ? 'selected' : ''}>${escapeHtml(label)}</option>`
+  )).join('')}</select>`;
+  const adapterType = connection?.adapterType || 'auto';
+  const authOptions = supplierAuthModeOptions(adapterType);
+  const configuredAuthMode = connection?.authMode;
+  const authMode = authOptions.some(([mode]) => mode === configuredAuthMode) ? configuredAuthMode : authOptions[0][0];
+  const requiresCredentialReplacement = editing && configuredAuthMode && configuredAuthMode !== authMode;
+  return `<div class="supplier-form-note">供应商连接仅供 FinOps 读取上游门户的库存、余额和密钥巡检；采购金额与成本期在下方的采购核算中单独登记。</div>
+    <div class="supplier-connection-form">
+      <label class="field"><span>供应商名称</span><input name="supplierName" required value="${value('supplierName')}"></label>
+      <label class="field"><span>连接名称</span><input name="name" required value="${value('name', '主账号')}"></label>
+      <label class="field"><span>系统类型</span>${select('adapterType', [
+        ['auto', '自动识别'], ['sub2api', 'Sub2API'], ['newapi', 'NewAPI'], ['openai_compatible', 'OpenAI 兼容'], ['custom', '自定义适配器'],
+      ], 'auto')}</label>
+      <label class="field"><span>认证方式</span><select name="authMode">${supplierAuthModeSelectOptions(authOptions, authMode)}</select></label>
+      <label class="field full"><span>站点地址</span><input name="baseUrl" type="url" required placeholder="https://supplier.example.com" value="${value('baseUrl')}"></label>
+      <label class="field"><span>凭据标识（可选）</span><input name="credentialLabel" placeholder="例如采购邮箱或负责人" value="${value('credentialLabel')}"></label>
+      <label class="field"><span>余额币种</span><input name="balanceCurrency" required value="${value('balanceCurrency', 'USD')}"></label>
+      <div class="supplier-form-section full">
+        <div class="supplier-form-section-heading"><strong>同步与告警</strong><span>这些设置只影响 FinOps 的读取频率和巡检范围</span></div>
+        <div class="supplier-connection-form compact">
+          <label class="supplier-form-toggle"><input name="enabled" type="checkbox" ${checked('enabled', true)}><span>启用连接</span><small>纳入定时读取</small></label>
+          <label class="supplier-form-toggle"><input name="activeCheckEnabled" type="checkbox" ${checked('activeCheckEnabled', true)}><span>巡检可用密钥</span><small>只检测，不写入上游</small></label>
+          <label class="field"><span>库存同步间隔（分钟）</span><input name="inventoryIntervalMinutes" type="number" min="5" max="1440" required value="${value('inventoryIntervalMinutes', 10)}"></label>
+          <label class="field"><span>单次巡检上限</span><input name="activeCheckLimit" type="number" min="1" max="100" required value="${value('activeCheckLimit', 20)}"></label>
+          <label class="field full"><span>低余额告警阈值（可选）</span><input name="lowBalanceThreshold" type="number" min="0" step="any" placeholder="不设置则不触发余额告警" value="${value('lowBalanceThreshold')}"></label>
+        </div>
+      </div>
+      <div class="supplier-form-section full">
+        <div class="supplier-form-section-heading"><strong>访问凭据</strong><span>${requiresCredentialReplacement ? '旧认证方式已不支持，请填写新的只读凭据' : editing && connection.credentialsConfigured ? '当前已配置加密凭据' : '首次保存后将加密保存在 FinOps'}</span></div>
+        <div data-supplier-credentials>${supplierConnectionCredentialFields(adapterType, authMode, {}, editing)}</div>
+      </div>
+    </div>
+    <div class="form-actions"><button type="button" class="button" data-supplier-form-cancel>取消</button><button type="submit" class="button primary">${editing ? '保存连接' : '创建并同步'}</button></div>`;
+}
+
+function refreshSupplierCredentialFields(form, editing) {
+  const adapterType = form.elements.adapterType.value;
+  const authMode = form.elements.authMode.value;
+  const values = Object.fromEntries(new FormData(form));
+  const target = form.querySelector('[data-supplier-credentials]');
+  if (target) target.innerHTML = supplierConnectionCredentialFields(adapterType, authMode, values, editing);
+}
+
+function supplierConnectionPayload(form) {
+  const values = Object.fromEntries(new FormData(form));
+  return {
+    supplierName: values.supplierName,
+    name: values.name,
+    adapterType: values.adapterType,
+    baseUrl: values.baseUrl,
+    authMode: values.authMode,
+    credentialLabel: values.credentialLabel || '',
+    enabled: form.querySelector('[name="enabled"]').checked,
+    inventoryIntervalMinutes: values.inventoryIntervalMinutes,
+    activeCheckEnabled: form.querySelector('[name="activeCheckEnabled"]').checked,
+    activeCheckLimit: values.activeCheckLimit,
+    lowBalanceThreshold: values.lowBalanceThreshold || null,
+    balanceCurrency: values.balanceCurrency,
+    credentials: {
+      username: values.username || '',
+      password: values.password || '',
+      accessToken: values.accessToken || '',
+      apiKey: values.apiKey || '',
+      totpSecret: values.totpSecret || '',
+      keyName: values.keyName || '',
+      rateMultiplier: values.rateMultiplier || null,
+      balance: values.balance || null,
+      balanceCurrency: values.credentialsBalanceCurrency || '',
+    },
+  };
+}
+
+function supplierCredentialsProvided(payload) {
+  if (payload.authMode === 'password') return Boolean(payload.credentials.username && payload.credentials.password);
+  if (payload.authMode === 'api_key') return Boolean(payload.credentials.apiKey);
+  return Boolean(payload.credentials.accessToken);
+}
+
+function supplierCredentialChangeRequested(payload) {
+  const credentials = payload.credentials;
+  return Boolean(
+    credentials.username || credentials.password || credentials.accessToken || credentials.apiKey || credentials.totpSecret
+    || credentials.keyName || credentials.rateMultiplier || credentials.balance || credentials.balanceCurrency,
+  );
+}
+
+function openSupplierConnectionModal(connection = null) {
+  const editing = Boolean(connection);
+  const previousDetail = state.supplierDetail;
+  openContentModal(editing ? '编辑供应商连接' : '新建供应商连接', supplierConnectionFormMarkup(connection), 'supplier-connection-modal');
+  const form = document.querySelector('#modal-form');
+  form.classList.add('supplier-connection-form-shell');
+  form.querySelector('[data-supplier-form-cancel]')?.addEventListener('click', () => {
+    if (previousDetail?.data) renderSupplierConnectionDetails(previousDetail.data);
+    else closeModal();
+  });
+  form.onchange = (event) => {
+    if (!event.target.matches('[name="adapterType"], [name="authMode"]')) return;
+    if (event.target.name === 'adapterType') refreshSupplierAuthMode(form);
+    refreshSupplierCredentialFields(form, editing);
+  };
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const payload = supplierConnectionPayload(form);
+    const replacingCredentials = supplierCredentialsProvided(payload);
+    const requiresCredentials = !editing
+      || !connection.credentialsConfigured
+      || payload.authMode !== connection.authMode
+      || supplierCredentialChangeRequested(payload);
+    if (requiresCredentials && !replacingCredentials) {
+      toast(`请填写${supplierAuthModeLabel(payload.authMode)}后再保存`);
+      return;
+    }
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      const result = await api(editing ? `/supplier-connections/${connection.id}` : '/supplier-connections', {
+        method: editing ? 'PATCH' : 'POST',
+        range: false,
+        body: JSON.stringify(payload),
+      });
+      const connectionId = result.connection?.id || connection?.id;
+      closeModal();
+      await renderSuppliers();
+      toast(result.sync?.ok === false ? '连接已保存，首次同步未完成' : editing ? '供应商连接已更新' : '供应商连接已创建');
+      if (connectionId) openSupplierConnectionDetails(connectionId);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  };
+}
+
+function supplierDetailTabs(detail) {
+  const openAlerts = (detail.alerts || []).filter((item) => item.status === 'open').length;
+  const tabs = [
+    ['keys', 'API 密钥', (detail.keys || []).length],
+    ['balances', '余额历史', (detail.balances || []).length],
+    ['checks', '巡检记录', (detail.checks || []).length],
+    ['alerts', '告警', openAlerts],
+    ['purchases', '采购批次', (detail.purchases || []).length],
+  ];
+  return `<div class="supplier-detail-tabs" role="tablist" aria-label="供应商连接详情">${tabs.map(([name, label, count]) => (
+    `<button type="button" role="tab" data-supplier-detail-tab="${name}" class="${state.supplierDetail?.tab === name ? 'active' : ''}" aria-selected="${state.supplierDetail?.tab === name}">${label}<small>${compact(count)}</small></button>`
+  )).join('')}</div>`;
+}
+
+function supplierKeyLinks(key) {
+  const links = key.accountLinks || [];
+  if (!links.length) return '<span class="secondary-text">尚未关联本地账号</span>';
+  return `<div class="supplier-key-links">${links.map((link) => (
+    `<span class="supplier-account-link">${escapeHtml(link.accountName || `账号 #${link.accountId}`)}<button type="button" class="icon-button supplier-link-remove" title="解除关联" data-supplier-key-unlink="${key.id}" data-supplier-account-id="${link.accountId}">${icon('x')}</button></span>`
+  )).join('')}</div>`;
+}
+
+function supplierKeysTab(detail) {
+  const keys = detail.keys || [];
+  return `<section class="detail-section supplier-detail-section">
+    <div class="detail-section-header"><div><h3>API 密钥库存</h3><span>密钥只显示上游返回的脱敏标识；关联本地账号后，已确认的探测倍率才会进入成本快照。</span></div></div>
+    ${table([
+      { label: '密钥' }, { label: '状态' }, { label: '分组 / 倍率' }, { label: '额度' }, { label: '最近巡检' }, { label: '本地账号' },
+    ], keys.map((key) => [
+      `<span class="primary-text">${escapeHtml(key.name || key.maskedKey || `密钥 #${key.id}`)}</span><div class="secondary-text">${escapeHtml(key.maskedKey || key.externalId || '--')} · ID ${escapeHtml(key.externalId || '--')}</div>`,
+      supplierState(key.removedAt ? 'removed' : key.status),
+      `<span class="primary-text">${escapeHtml(key.groupName || '未分组')}</span><div class="secondary-text">${supplierNumber(key.rateMultiplier) ? `${escapeHtml(String(key.rateMultiplier))}x` : '未提供倍率'}</div>`,
+      `<span class="primary-text">${escapeHtml(supplierQuotaText(key))}</span><div class="secondary-text">${key.expiresAt ? `到期 ${escapeHtml(dateTime(key.expiresAt))}` : key.lastUsedAt ? `最近使用 ${escapeHtml(dateTime(key.lastUsedAt))}` : '无到期或使用记录'}</div>`,
+      `${supplierState(key.lastCheckStatus || 'pending')}<div class="secondary-text">${escapeHtml(key.lastCheckMethod || '等待巡检')}${key.lastCheckAt ? ` · ${escapeHtml(dateTime(key.lastCheckAt))}` : ''}${key.lastCheckError ? `<br>${escapeHtml(key.lastCheckError)}` : ''}</div>`,
+      `<div class="supplier-key-link-cell">${supplierKeyLinks(key)}${key.removedAt ? '' : `<button type="button" class="button supplier-link-button" data-supplier-key-link-picker="${key.id}">${icon('plus')}关联账号</button>`}</div>`,
+    ]), 1290)}
+  </section>`;
+}
+
+function supplierBalancesTab(detail) {
+  const balances = detail.balances || [];
+  return `<section class="detail-section supplier-detail-section">
+    <div class="detail-section-header"><div><h3>余额历史</h3><span>保留最近 ${compact(balances.length)} 个同步快照；采购成本不从该余额自动推导。</span></div></div>
+    ${table([
+      { label: '采样时间' }, { label: '余额', right: true }, { label: '币种' },
+    ], balances.map((item) => [
+      dateTime(item.observedAt), `<span class="primary-text">${escapeHtml(supplierAmount(item.balance, item.currency))}</span>`, escapeHtml(item.currency || '--'),
+    ]), 680)}
+  </section>`;
+}
+
+function supplierChecksTab(detail) {
+  const checks = detail.checks || [];
+  return `<section class="detail-section supplier-detail-section">
+    <div class="detail-section-header"><div><h3>主动巡检记录</h3><span>巡检只请求供应商侧的状态或计费元数据，不会修改供应商或 Sub2API。</span></div></div>
+    ${table([
+      { label: '时间' }, { label: '密钥' }, { label: '结果' }, { label: '方式' }, { label: 'HTTP / 耗时' }, { label: '异常' },
+    ], checks.map((item) => [
+      dateTime(item.checkedAt), `<span class="primary-text">${escapeHtml(item.keyName || item.maskedKey || `密钥 #${item.keyId}`)}</span><div class="secondary-text">${escapeHtml(item.maskedKey || '')}</div>`,
+      supplierState(item.status), escapeHtml(item.method || '--'),
+      `${item.httpStatus || '--'}${supplierNumber(item.latencyMs) ? ` / ${Math.round(item.latencyMs)} ms` : ''}`,
+      item.errorMessage ? `<span class="supplier-inline-error">${escapeHtml(item.errorMessage)}</span><div class="secondary-text">${escapeHtml(item.errorCode || '')}</div>` : '<span class="secondary-text">--</span>',
+    ]), 980)}
+  </section>`;
+}
+
+function supplierAlertsTab(detail) {
+  const alerts = detail.alerts || [];
+  return `<section class="detail-section supplier-detail-section">
+    <div class="detail-section-header"><div><h3>连接告警</h3><span>确认只会标记 FinOps 内的告警，不会关闭上游服务或删除告警历史。</span></div></div>
+    ${table([
+      { label: '级别' }, { label: '告警' }, { label: '状态' }, { label: '最近出现' }, { label: '次数', right: true }, { label: '操作' },
+    ], alerts.map((item) => [
+      supplierSeverity(item.severity),
+      `<span class="primary-text">${escapeHtml(item.title || item.type || '供应商告警')}</span><div class="secondary-text">${escapeHtml(item.message || '--')}</div>`,
+      `${supplierState(item.status)}${item.acknowledgedBy ? `<div class="secondary-text">${escapeHtml(item.acknowledgedBy)} · ${escapeHtml(dateTime(item.acknowledgedAt))}</div>` : ''}`,
+      dateTime(item.lastSeenAt), compact(item.occurrenceCount),
+      item.status === 'open'
+        ? `<button type="button" class="button" data-supplier-alert-ack="${item.id}">确认告警</button>`
+        : '<span class="secondary-text">--</span>',
+    ]), 920)}
+  </section>`;
+}
+
+function supplierPurchasesTab(detail) {
+  const purchases = detail.purchases || [];
+  return `<section class="detail-section supplier-detail-section">
+    <div class="detail-section-header">
+      <div><h3>采购批次</h3><span>采购金额、生效期和分摊独立于供应商门户连接；请以实际采购单据登记人民币成本。</span></div>
+      <button type="button" class="button primary" data-supplier-detail-cost>${icon('plus')}登记采购成本</button>
+    </div>
+    ${table([
+      { label: '账号' }, { label: '采购批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
+    ], purchases.map((item) => [
+      `<span class="primary-text">${escapeHtml(item.accountName || `账号 #${item.accountId}`)}</span><div class="secondary-text">#${escapeHtml(item.accountId)}</div>`,
+      `<span class="primary-text">${escapeHtml(item.purchaseBatch || '未标注批次')}</span><div class="secondary-text">${escapeHtml(item.supplier || detail.connection.supplierName)}</div>`,
+      `<span class="tag neutral">${escapeHtml(item.costProfile || '未绑定模板')}</span>`, cny(item.totalCost),
+      `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
+    ]), 920)}
+  </section>`;
+}
+
+function supplierDetailContent(detail) {
+  switch (state.supplierDetail?.tab) {
+    case 'balances': return supplierBalancesTab(detail);
+    case 'checks': return supplierChecksTab(detail);
+    case 'alerts': return supplierAlertsTab(detail);
+    case 'purchases': return supplierPurchasesTab(detail);
+    default: return supplierKeysTab(detail);
+  }
+}
+
+function renderSupplierConnectionDetails(detail) {
+  if (!state.supplierDetail || state.supplierDetail.id !== Number(detail.connection.id)) return;
+  state.supplierDetail.data = detail;
+  const connection = detail.connection;
+  const keys = detail.keys || [];
+  const activeKeys = keys.filter((item) => item.status === 'active' && !item.removedAt).length;
+  const failedChecks = keys.filter((item) => item.lastCheckStatus === 'failed' && !item.removedAt).length;
+  const openAlerts = (detail.alerts || []).filter((item) => item.status === 'open').length;
+  openContentModal(`${connection.supplierName} · ${connection.name}`, `
+    <div class="supplier-detail-header">
+      <div class="supplier-detail-identity"><strong>${escapeHtml(connection.name)}</strong><span>${escapeHtml(connection.supplierName)} · ${escapeHtml(connection.baseUrl)} · ${escapeHtml(supplierAdapterLabel(connection.detectedAdapterType || connection.adapterType))} · ${escapeHtml(supplierAuthModeLabel(connection.authMode))}</span></div>
+      <div class="supplier-detail-actions">
+        <button type="button" class="button" data-supplier-detail-edit>${icon('settings-2')}编辑连接</button>
+        <button type="button" class="button primary" data-supplier-detail-sync ${!connection.enabled ? 'disabled' : ''}>${icon('refresh-cw')}立即同步</button>
+      </div>
+    </div>
+    <div class="supplier-detail-status-row">${supplierState(connection.connectionStatus)}<span>${escapeHtml(supplierConnectionStatusHint(connection))}</span>${connection.lastSyncAt ? `<span>最近尝试 ${escapeHtml(dateTime(connection.lastSyncAt))}</span>` : ''}</div>
+    <div class="detail-metrics supplier-detail-metrics">
+      ${metric('当前余额', supplierAmount(connection.balance, connection.balanceCurrency), connection.lowBalanceThreshold === null || connection.lowBalanceThreshold === undefined ? `币种 ${connection.balanceCurrency || '--'} · 未设阈值` : `告警阈值 ${supplierAmount(connection.lowBalanceThreshold, connection.balanceCurrency)}`, connection.connectionStatus === 'failed' ? 'bad' : 'good')}
+      ${metric('可用密钥', `${compact(activeKeys)} / ${compact(keys.length)}`, failedChecks ? `${compact(failedChecks)} 个巡检失败` : '未发现巡检异常', failedChecks ? 'warn' : 'good')}
+      ${metric('待处理告警', compact(openAlerts), openAlerts ? '请在告警页确认或排查' : '当前没有开放告警', openAlerts ? 'warn' : 'good')}
+      ${metric('下次同步', connection.enabled ? dateTime(connection.nextSyncAt) : '已停用', connection.enabled ? `每 ${compact(connection.inventoryIntervalMinutes)} 分钟读取一次` : '启用后恢复定时读取')}
+    </div>
+    ${supplierDetailTabs(detail)}
+    ${supplierDetailContent(detail)}
+  `, 'supplier-detail-modal');
+
+  const form = document.querySelector('#modal-form');
+  form.onclick = async (event) => {
+    const tab = event.target.closest('[data-supplier-detail-tab]');
+    const edit = event.target.closest('[data-supplier-detail-edit]');
+    const sync = event.target.closest('[data-supplier-detail-sync]');
+    const linkPicker = event.target.closest('[data-supplier-key-link-picker]');
+    const unlink = event.target.closest('[data-supplier-key-unlink]');
+    const acknowledge = event.target.closest('[data-supplier-alert-ack]');
+    const cost = event.target.closest('[data-supplier-detail-cost]');
+    if (tab) {
+      state.supplierDetail.tab = tab.dataset.supplierDetailTab;
+      renderSupplierConnectionDetails(detail);
+      return;
+    }
+    if (edit) {
+      openSupplierConnectionModal(connection);
+      return;
+    }
+    if (sync && !sync.disabled) {
+      sync.disabled = true;
+      try {
+        const result = await api(`/supplier-connections/${connection.id}/sync`, { method: 'POST', range: false });
+        toast(result.sync?.ok === false ? '同步未完成，请查看连接异常' : '供应商连接已同步');
+        await loadSupplierConnectionDetails(connection.id);
+        if (state.page === 'suppliers') await renderSuppliers();
+      } catch (error) {
+        toast(error.message);
+        sync.disabled = false;
+      }
+      return;
+    }
+    if (linkPicker) {
+      openSupplierKeyLinkPicker(Number(linkPicker.dataset.supplierKeyLinkPicker));
+      return;
+    }
+    if (unlink) {
+      const keyId = Number(unlink.dataset.supplierKeyUnlink);
+      const accountId = Number(unlink.dataset.supplierAccountId);
+      unlink.disabled = true;
+      try {
+        await api(`/supplier-keys/${keyId}/account-link`, {
+          method: 'PATCH', range: false, body: JSON.stringify({ accountId, linked: false }),
+        });
+        toast('已解除本地账号关联');
+        await loadSupplierConnectionDetails(connection.id);
+      } catch (error) {
+        toast(error.message);
+        unlink.disabled = false;
+      }
+      return;
+    }
+    if (acknowledge) {
+      acknowledge.disabled = true;
+      try {
+        await api(`/supplier-alerts/${acknowledge.dataset.supplierAlertAck}/acknowledge`, { method: 'POST', range: false });
+        toast('告警已确认');
+        await loadSupplierConnectionDetails(connection.id);
+        if (state.page === 'suppliers') await renderSuppliers();
+      } catch (error) {
+        toast(error.message);
+        acknowledge.disabled = false;
+      }
+      return;
+    }
+    if (cost) openSupplierPurchaseCostModal(detail);
+  };
+}
+
+function supplierAvailableAccounts(detail, keyId, search = '') {
+  const linked = new Set((detail.keys || [])
+    .filter((key) => Number(key.id) !== Number(keyId))
+    .flatMap((key) => (key.accountLinks || []).map((link) => Number(link.accountId))));
+  const needle = String(search || '').trim().toLowerCase();
+  return (detail.accounts || []).filter((account) => (
+    account.status === 'active'
+      && !linked.has(Number(account.id))
+      && (!needle || `${account.name} ${account.platform} ${account.id}`.toLowerCase().includes(needle))
+  ));
+}
+
+function renderSupplierKeyLinkPickerResults(detail, keyId, search = '') {
+  const host = document.querySelector('[data-supplier-link-results]');
+  if (!host) return;
+  const accounts = supplierAvailableAccounts(detail, keyId, search);
+  const visible = accounts.slice(0, 50);
+  host.innerHTML = visible.length ? `${table([
+    { label: '本地账号' }, { label: '平台' }, { label: '状态' }, { label: '操作' },
+  ], visible.map((account) => [
+    `<span class="primary-text">${escapeHtml(account.name || `账号 #${account.id}`)}</span><div class="secondary-text">#${escapeHtml(account.id)}</div>`,
+    escapeHtml(account.platform || '--'), supplierState(account.status, account.status === 'active' ? '可用' : account.status),
+    `<button type="button" class="button" data-supplier-link-account="${account.id}">关联</button>`,
+  ]), 650)}${accounts.length > visible.length ? `<p class="supplier-result-note">仅显示前 ${compact(visible.length)} 个结果，请继续缩小搜索范围。</p>` : ''}`
+    : '<div class="empty"><strong>没有可关联的本地账号</strong><p>账号可能已关联到其他供应商密钥，或不在当前可用状态。</p></div>';
+  host.querySelectorAll('[data-supplier-link-account]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await api(`/supplier-keys/${keyId}/account-link`, {
+          method: 'PATCH', range: false,
+          body: JSON.stringify({ accountId: Number(button.dataset.supplierLinkAccount), linked: true }),
+        });
+        toast('已关联本地账号');
+        await loadSupplierConnectionDetails(detail.connection.id);
+      } catch (error) {
+        toast(error.message);
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+function openSupplierKeyLinkPicker(keyId) {
+  const detail = state.supplierDetail?.data;
+  const key = detail?.keys?.find((item) => Number(item.id) === Number(keyId));
+  if (!detail || !key) return;
+  openContentModal('关联本地账号', `
+    <div class="supplier-link-picker-heading"><strong>${escapeHtml(key.name || key.maskedKey || `密钥 #${key.id}`)}</strong><span>${escapeHtml(key.maskedKey || key.externalId || '--')} · ${escapeHtml(key.groupName || '未分组')}</span></div>
+    <label class="whitelist-search supplier-link-search">${icon('search')}<input type="search" data-supplier-link-search placeholder="搜索本地账号、平台或 ID"></label>
+    <div data-supplier-link-results></div>
+    <div class="form-actions"><button type="button" class="button" data-supplier-link-back>返回详情</button></div>
+  `, 'supplier-link-modal');
+  const form = document.querySelector('#modal-form');
+  const search = form.querySelector('[data-supplier-link-search]');
+  let timer;
+  search?.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => renderSupplierKeyLinkPickerResults(detail, keyId, search.value), 180);
+  });
+  form.querySelector('[data-supplier-link-back]')?.addEventListener('click', () => renderSupplierConnectionDetails(detail));
+  renderSupplierKeyLinkPickerResults(detail, keyId);
+}
+
+async function loadSupplierConnectionDetails(connectionId) {
+  const current = state.supplierDetail;
+  if (!current || current.id !== Number(connectionId)) return;
+  const form = document.querySelector('#modal-form');
+  if (form) form.innerHTML = '<div class="detail-loading"><span></span>正在读取供应商连接详情</div>';
+  try {
+    const detail = await api(`/supplier-connections/${connectionId}/details`, { range: false });
+    const overview = await api(`/suppliers?search=${encodeURIComponent(detail.connection.supplierName || '')}`);
+    const supplierName = String(detail.connection.supplierName || '').trim().toLowerCase();
+    const purchases = (overview.purchases || []).filter((item) => (
+      String(item.supplier || '').trim().toLowerCase() === supplierName
+    ));
+    if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
+    renderSupplierConnectionDetails({ ...detail, purchases });
+  } catch (error) {
+    if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
+    const currentForm = document.querySelector('#modal-form');
+    if (currentForm) currentForm.innerHTML = `<div class="empty"><strong>供应商连接详情读取失败</strong><p>${escapeHtml(error.message)}</p><button type="button" class="button" data-supplier-detail-retry>重新加载</button></div>`;
+    currentForm?.querySelector('[data-supplier-detail-retry]')?.addEventListener('click', () => loadSupplierConnectionDetails(connectionId));
+  }
+}
+
+function openSupplierConnectionDetails(connectionId) {
+  state.supplierDetail = { id: Number(connectionId), tab: 'keys', data: null };
+  openContentModal('供应商连接详情', '<div class="detail-loading"><span></span>正在读取供应商连接详情</div>', 'supplier-detail-modal');
+  loadSupplierConnectionDetails(Number(connectionId));
+}
+
+async function openSupplierPurchaseCostModal(detail) {
+  try {
+    const profiles = await api('/cost-profiles', { range: false });
+    const accounts = (detail.accounts || []).filter((item) => item.status === 'active');
+    if (!accounts.length) return toast('没有可登记采购成本的本地账号');
+    const picker = {
+      options: accounts.map((item) => [item.id, `${item.name} · ${item.platform || '--'}`]),
+      value: accounts[0].id,
+      supplier: detail.connection.supplierName,
+    };
+    openModal(`登记采购成本 · ${detail.connection.supplierName}`, costFields(profiles, picker, { includeAccount: true }), (data) => api('/account-cost-periods', {
+      method: 'POST', range: false, body: JSON.stringify(normalizeCostPayload(data)),
+    }));
+    document.querySelector('#form-cancel').onclick = () => renderSupplierConnectionDetails(detail);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function renderSuppliers(search = state.supplierSearch) {
+  state.supplierSearch = search;
+  const [source, connectionSource, profiles, accountData] = await Promise.all([
     api(`/suppliers?search=${encodeURIComponent(search)}`),
+    api(`/supplier-connections?search=${encodeURIComponent(search)}`, { range: false }),
     api('/cost-profiles', { range: false }),
     api(`/accounts?${queryFor('supplierAccounts', search)}`),
   ]);
-  const suppliers = localPage(source.items, 'suppliersList');
-  const purchases = localPage(source.purchases, 'purchasesList');
+  const connections = localPage(connectionSource.items || [], 'supplierConnections');
+  const suppliers = localPage(source.items || [], 'suppliersList');
+  const purchases = localPage(source.purchases || [], 'purchasesList');
   const summary = source.summary || {};
-  state.lastExport = suppliers.items;
-  content.innerHTML = `${section('供应商经营概览', '供应商成本按照账号采购记录汇总')}
+  state.supplierConnectionItems = new Map((connectionSource.items || []).map((item) => [String(item.id), item]));
+  state.lastExport = connections.items;
+  content.innerHTML = `${section('供应商连接', '通过 FinOps 读取供应商门户的余额、密钥库存、巡检和告警；不等同于采购成本记录')}
+    <section class="table-panel supplier-connection-panel">${searchTools('搜索供应商、连接、站点或采购批次', `<button type="button" class="button primary" id="supplier-connection-create">${icon('plus')}新建连接</button>`, search)}
+      <div class="supplier-connection-note">连接凭据仅加密保存在 FinOps。同步和巡检均为读取操作，采购金额、生效期与成本分摊请在下方单独登记。</div>
+      ${table([
+        { label: '供应商连接' }, { label: '连接状态' }, { label: '余额' }, { label: '密钥 / 异常' }, { label: '告警' }, { label: '最近同步' }, { label: '操作' },
+      ], connections.items.map((item) => [
+        `<button type="button" class="supplier-connection-link" data-supplier-connection-detail="${item.id}"><span>${escapeHtml(item.supplierName || '未命名供应商')}</span><small>${escapeHtml(item.name || '默认连接')} · ${escapeHtml(supplierAdapterLabel(item.detectedAdapterType || item.adapterType))} · ${escapeHtml(supplierAuthModeLabel(item.authMode))}</small></button><div class="secondary-text supplier-url">${escapeHtml(item.baseUrl || '--')}</div>`,
+        `${supplierState(item.connectionStatus)}<div class="secondary-text supplier-connection-status-hint">${escapeHtml(supplierConnectionStatusHint(item))}</div>`,
+        `<span class="primary-text">${escapeHtml(supplierAmount(item.balance, item.balanceCurrency))}</span><div class="secondary-text">${item.lowBalanceThreshold === null || item.lowBalanceThreshold === undefined ? `币种 ${escapeHtml(item.balanceCurrency || '--')} · 未设阈值` : `阈值 ${escapeHtml(supplierAmount(item.lowBalanceThreshold, item.balanceCurrency))}`}</div>`,
+        `<span class="primary-text">${compact(item.activeKeyCount)} / ${compact(item.keyCount)} 可用</span><div class="secondary-text">${item.failedKeyCount ? `${compact(item.failedKeyCount)} 个巡检失败` : '没有巡检失败'}</div>`,
+        item.openAlertCount ? `<span class="supplier-alert-count">${compact(item.openAlertCount)} 待处理</span><div class="secondary-text">请查看告警详情</div>` : '<span class="secondary-text">没有开放告警</span>',
+        `<span class="primary-text">${item.lastSuccessAt ? escapeHtml(dateTime(item.lastSuccessAt)) : '--'}</span><div class="secondary-text">${item.nextSyncAt ? `下次 ${escapeHtml(dateTime(item.nextSyncAt))}` : item.enabled ? '等待排程' : '连接已停用'}</div>`,
+        `<div class="table-actions supplier-row-actions"><button type="button" class="icon-button table-icon" title="查看连接详情" data-supplier-connection-detail="${item.id}">${icon('receipt-text')}</button><button type="button" class="icon-button table-icon" title="编辑连接" data-supplier-connection-edit="${item.id}">${icon('settings-2')}</button><button type="button" class="icon-button table-icon" title="立即同步" data-supplier-connection-sync="${item.id}" ${!item.enabled ? 'disabled' : ''}>${icon('refresh-cw')}</button></div>`,
+      ]), 1330)}${pager(connections, 'supplierConnections', '个供应商连接')}
+    </section>
+    ${section('采购成本核算', '采购批次和成本期独立于供应商连接，按实际人民币采购金额、税费和生效期核算')}
     <div class="metric-grid">
-      ${metric('供应商', compact(summary.supplierCount), '当前筛选范围')}
-      ${metric('关联账号', compact(summary.accountCount), '已归集账号')}
+      ${metric('供应商', compact(summary.supplierCount), '按采购成本归集')}
+      ${metric('关联账号', compact(summary.accountCount), '已归集到采购口径')}
       ${metric('期间采购', cny(summary.purchaseSpend), '含手续费与税费', 'warn')}
       ${metric('经营毛利', cny(summary.grossProfit), '实际消费减已登记成本', Number(summary.grossProfit) >= 0 ? 'good' : 'bad')}
       ${metric('待补成本账号', compact(summary.unbookedAccountCount), '有用量但无成本期间', Number(summary.unbookedAccountCount) ? 'warn' : 'good')}
     </div>
-    ${section('供应商核算', '按供应商归集用量、成本和毛利')}
-    <section class="table-panel">${searchTools('搜索供应商、平台、账号或采购批次', `<button type="button" class="button primary" id="supplier-cost-button">${icon('plus')}登记成本</button>`, search)}${
+    <section class="table-panel"><div class="table-tools supplier-procurement-tools"><span class="supplier-filter-note">采购核算沿用上方搜索条件</span><div class="table-actions"><button type="button" class="button primary" id="supplier-cost-button">${icon('plus')}登记采购成本</button></div></div>${
       table([
         { label: '供应商' }, { label: '平台' }, { label: '账号', right: true }, { label: '实际消费 CNY', right: true },
         { label: '采购分摊 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
@@ -1439,16 +2047,40 @@ async function renderSuppliers(search = '') {
         `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
       ]), 1080)
     }${pager(suppliers, 'suppliersList', '个供应商')}</section>
-    ${section('采购批次', '账号采购成本、生效期和供应商归属')}
-    <section class="table-panel">${table([
-      { label: '账号' }, { label: '供应商/批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
+    <section class="table-panel supplier-purchase-panel"><div class="panel-header"><div><h2>采购批次</h2><span>账号采购成本、生效期和供应商归属</span></div></div>${table([
+      { label: '账号' }, { label: '供应商 / 批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
     ], purchases.items.map((item) => [
       `<span class="primary-text">${escapeHtml(item.accountName)}</span><div class="secondary-text">#${item.accountId}</div>`,
       `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${escapeHtml(item.purchaseBatch)}</div>`,
       `<span class="tag neutral">${escapeHtml(item.costProfile)}</span>`, cny(item.totalCost),
-      `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, `<span class="status ${item.status === 'active' ? '' : 'warning'}">${escapeHtml(item.status)}</span>`,
+      `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
     ]), 920)}${pager(purchases, 'purchasesList', '个采购批次')}</section>`;
   bindSearch(renderSuppliers);
+  document.querySelector('#supplier-connection-create')?.addEventListener('click', () => openSupplierConnectionModal());
+  document.querySelectorAll('[data-supplier-connection-detail]').forEach((button) => {
+    button.addEventListener('click', () => openSupplierConnectionDetails(Number(button.dataset.supplierConnectionDetail)));
+  });
+  document.querySelectorAll('[data-supplier-connection-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const connection = state.supplierConnectionItems.get(button.dataset.supplierConnectionEdit);
+      if (connection) openSupplierConnectionModal(connection);
+    });
+  });
+  document.querySelectorAll('[data-supplier-connection-sync]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const connection = state.supplierConnectionItems.get(button.dataset.supplierConnectionSync);
+      if (!connection || button.disabled) return;
+      button.disabled = true;
+      try {
+        const result = await api(`/supplier-connections/${connection.id}/sync`, { method: 'POST', range: false });
+        toast(result.sync?.ok === false ? '同步未完成，请查看连接异常' : '供应商连接已同步');
+        await renderSuppliers();
+      } catch (error) {
+        toast(error.message);
+        button.disabled = false;
+      }
+    });
+  });
   document.querySelector('#supplier-cost-button')?.addEventListener('click', () => openSingleCostModal(accountData.items, profiles));
 }
 
@@ -1590,6 +2222,7 @@ function closeModal() {
   state.userDetail = null;
   state.overviewDetail = null;
   state.whitelistManager = null;
+  state.supplierDetail = null;
 }
 
 function costFields(profiles, account, { includeAccount = false, batch = false } = {}) {

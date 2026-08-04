@@ -15,6 +15,30 @@ function pageResult(items, page = 1, pageSize = 20) {
   };
 }
 
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function copySupplierConnection(connection, { includeCiphertext = false } = {}) {
+  const copy = { ...connection };
+  if (!includeCiphertext) delete copy.credentialsCiphertext;
+  return copy;
+}
+
+function copySupplierDetail(detail) {
+  return {
+    keys: detail.keys.map((key) => ({
+      ...key,
+      accountLinks: (key.accountLinks || []).map((link) => ({ ...link })),
+    })),
+    balances: detail.balances.map((item) => ({ ...item })),
+    checks: detail.checks.map((item) => ({ ...item })),
+    alerts: detail.alerts.map((item) => ({ ...item, details: { ...(item.details || {}) } })),
+  };
+}
+
 const users = [
   ['nuohuisong@gmail.com', 1, 1840.22, 312.45, 81.6, 0.739, 99998.48],
   ['278999990@qq.com', 21, 412.58, 96.82, 22.34, 0.769, 36.12],
@@ -112,7 +136,7 @@ const nonCashBalanceCredits = [
   {
     id: 1, sourceTable: 'redeem_codes', sourceId: 'DEMO-001', type: 'redeem', amountCny: 8,
     occurredAt: new Date(Date.now() - 2 * 3_600_000).toISOString(), action: 'used', redeemType: 'balance',
-    email: 'nuohuisong@gmail.com', username: 'nuohuisong',
+    sourceUserId: 1, email: 'nuohuisong@gmail.com', username: 'nuohuisong',
   },
 ];
 
@@ -170,6 +194,31 @@ export class DemoRepository {
     this.nonCashBalanceCredits = nonCashBalanceCredits.map((item) => ({ ...item }));
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
     this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
+    this.supplierConnections = [{
+      id: 1, supplierId: 1, supplierName: 'Cloud Seats', name: '主账号', adapterType: 'sub2api',
+      detectedAdapterType: 'sub2api', baseUrl: 'https://supplier.example.com', authMode: 'access_token',
+      credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true,
+      inventoryIntervalMinutes: 10, activeCheckEnabled: true, activeCheckLimit: 20,
+      lowBalanceThreshold: 5, balanceCurrency: 'USD', balance: 10.84, connectionStatus: 'ok',
+      keyCount: 4, activeKeyCount: 4, failedKeyCount: 0, openAlertCount: 1,
+      lastSyncAt: new Date(Date.now() - 3 * 60_000).toISOString(), lastSuccessAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+      nextSyncAt: new Date(Date.now() + 7 * 60_000).toISOString(), consecutiveFailures: 0, lastError: '',
+    }];
+    const supplierNow = Date.now();
+    this.supplierConnectionDetails = new Map([[
+      1,
+      {
+        keys: [
+          { id:1,externalId:'101',name:'plus-特惠',maskedKey:'sk-db8...cb4b',status:'active',groupName:'ChatGPT-Plus',rateMultiplier:0.05,quotaTotal:null,quotaUsed:3.2,quotaRemaining:null,quotaCurrency:'USD',lastCheckStatus:'ok',lastCheckMethod:'billing_metadata',lastCheckAt:new Date(supplierNow-180000).toISOString(),accountLinks:[{accountId:2745,accountName:'RoseGalatea9974+see3@outlook.com'}] },
+          { id:2,externalId:'102',name:'pro兜底',maskedKey:'sk-286...b8eb',status:'active',groupName:'ChatGPT-Pro',rateMultiplier:0.15,quotaTotal:null,quotaUsed:4.13,quotaRemaining:null,quotaCurrency:'USD',lastCheckStatus:'ok',lastCheckMethod:'billing_metadata',lastCheckAt:new Date(supplierNow-190000).toISOString(),accountLinks:[] },
+          { id:3,externalId:'103',name:'cc-pro',maskedKey:'sk-abd...c5a0',status:'active',groupName:'Claude-Kiro',rateMultiplier:0.03,quotaTotal:null,quotaUsed:0,quotaRemaining:null,quotaCurrency:'USD',lastCheckStatus:'unsupported',lastCheckMethod:'billing_metadata',lastCheckAt:new Date(supplierNow-200000).toISOString(),accountLinks:[] },
+          { id:4,externalId:'104',name:'PLUS-稳定',maskedKey:'sk-9cb...ddab',status:'active',groupName:'ChatGPT-Plus',rateMultiplier:0.06,quotaTotal:null,quotaUsed:1.82,quotaRemaining:null,quotaCurrency:'USD',lastCheckStatus:'ok',lastCheckMethod:'billing_metadata',lastCheckAt:new Date(supplierNow-210000).toISOString(),accountLinks:[] },
+        ],
+        balances: Array.from({ length: 8 }, (_, index) => ({ balance:10.84+index*0.31,currency:'USD',observedAt:new Date(supplierNow-index*3600000).toISOString() })),
+        checks: [],
+        alerts: [{ id:1,keyId:3,type:'multiplier_changed',severity:'warning',status:'open',title:'密钥倍率发生变化',message:'cc-pro：0.04x → 0.03x',lastSeenAt:new Date(supplierNow-3600000).toISOString(),occurrenceCount:1 }],
+      },
+    ]]);
     this.accountCostPeriods = this.accounts.map((account, index) => {
       const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
       const effectiveTo = account.expiresAt
@@ -326,6 +375,13 @@ export class DemoRepository {
     };
   }
 
+  reportableNonCashBalanceCredits() {
+    const excludedUserIds = new Set(this.users
+      .filter((user) => user.excludeFromBalanceStats)
+      .map((user) => Number(user.id)));
+    return this.nonCashBalanceCredits.filter((item) => !excludedUserIds.has(Number(item.sourceUserId)));
+  }
+
   async getOverviewDashboard() {
     const summary = await this.getSummary();
     const rank = (key) => this.users
@@ -351,7 +407,8 @@ export class DemoRepository {
         requests: Number(item.requests || 0),
         tokens: Number(item.tokens || 0),
       }));
-    const nonCashBalanceCreditCny = this.nonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
+    const reportableNonCashBalanceCredits = this.reportableNonCashBalanceCredits();
+    const nonCashBalanceCreditCny = reportableNonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
     const reportedBalanceUsers = this.users.filter((item) => (
       Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats
     ));
@@ -361,7 +418,7 @@ export class DemoRepository {
       summary,
       totals: {
         nonCashBalanceCreditCny,
-        nonCashBalanceCreditCount: this.nonCashBalanceCredits.length,
+        nonCashBalanceCreditCount: reportableNonCashBalanceCredits.length,
         balanceCny: reportedBalanceUsers.reduce((total, item) => total + Number(item.balanceCny || 0), 0),
         balanceUserCount: reportedBalanceUsers.length,
       },
@@ -642,6 +699,261 @@ export class DemoRepository {
     return { summary, items, purchases };
   }
 
+  async listSupplierConnections({ search = '' } = {}) {
+    const term = String(search || '').trim().toLowerCase();
+    return {
+      items: this.supplierConnections
+        .filter((item) => `${item.supplierName} ${item.name} ${item.baseUrl}`.toLowerCase().includes(term))
+        .map((item) => copySupplierConnection(item)),
+    };
+  }
+
+  async getSupplierConnection(connectionId, { includeCiphertext = false } = {}) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    return copySupplierConnection(connection, { includeCiphertext });
+  }
+
+  supplierDetail(connectionId) {
+    const detail = this.supplierConnectionDetails.get(Number(connectionId));
+    if (!detail) throw Object.assign(new Error('supplier connection details not found'), { statusCode: 404 });
+    return detail;
+  }
+
+  refreshSupplierConnectionStats(connection) {
+    const detail = this.supplierDetail(connection.id);
+    const visibleKeys = detail.keys.filter((key) => !key.removedAt);
+    connection.keyCount = visibleKeys.length;
+    connection.activeKeyCount = visibleKeys.filter((key) => key.status === 'active').length;
+    connection.failedKeyCount = visibleKeys.filter((key) => key.lastCheckStatus === 'failed').length;
+    connection.openAlertCount = detail.alerts.filter((alert) => alert.status === 'open').length;
+  }
+
+  nextSupplierKeyId() {
+    return Math.max(0, ...[...this.supplierConnectionDetails.values()]
+      .flatMap((detail) => detail.keys.map((key) => Number(key.id) || 0))) + 1;
+  }
+
+  findSupplierKey(keyId) {
+    for (const connection of this.supplierConnections) {
+      const detail = this.supplierConnectionDetails.get(Number(connection.id));
+      const key = detail?.keys.find((item) => Number(item.id) === Number(keyId));
+      if (key) return { connection, detail, key };
+    }
+    return null;
+  }
+
+  createSupplierDetail(connection) {
+    const keyId = this.nextSupplierKeyId();
+    const balance = finiteNumber(connection.balance);
+    return {
+      keys: [{
+        id: keyId,
+        externalId: `demo-${connection.id}-key`,
+        name: connection.name || `连接 #${connection.id}`,
+        maskedKey: 'sk-demo...key',
+        status: 'active',
+        groupName: '演示分组',
+        rateMultiplier: null,
+        quotaTotal: null,
+        quotaUsed: null,
+        quotaRemaining: null,
+        quotaCurrency: connection.balanceCurrency || 'USD',
+        lastCheckStatus: 'pending',
+        lastCheckMethod: '',
+        lastCheckAt: null,
+        accountLinks: [],
+      }],
+      balances: balance === null ? [] : [{ balance, currency: connection.balanceCurrency || 'USD', observedAt: new Date().toISOString() }],
+      checks: [],
+      alerts: [],
+    };
+  }
+
+  async createSupplierConnection(input, credentialsCiphertext) {
+    if (this.supplierConnections.some((item) => item.supplierName === input.supplierName && item.name === input.name)) {
+      throw Object.assign(new Error('supplier connection already exists'), { statusCode: 409 });
+    }
+    const sameSupplier = this.supplierConnections.find((item) => item.supplierName === input.supplierName);
+    const balance = input.adapterType === 'openai_compatible' ? finiteNumber(input.credentials?.balance) : null;
+    const now = new Date().toISOString();
+    const connection = {
+      id: Math.max(0, ...this.supplierConnections.map((item) => Number(item.id) || 0)) + 1,
+      supplierId: sameSupplier?.supplierId || Math.max(0, ...this.supplierConnections.map((item) => Number(item.supplierId) || 0)) + 1,
+      supplierName: input.supplierName,
+      name: input.name,
+      adapterType: input.adapterType,
+      detectedAdapterType: '',
+      baseUrl: input.baseUrl,
+      authMode: input.authMode,
+      credentialLabel: input.credentialLabel || '',
+      credentialsConfigured: Boolean(credentialsCiphertext),
+      credentialsCiphertext: credentialsCiphertext || '',
+      enabled: input.enabled,
+      inventoryIntervalMinutes: input.inventoryIntervalMinutes,
+      activeCheckEnabled: input.activeCheckEnabled,
+      activeCheckLimit: input.activeCheckLimit,
+      lowBalanceThreshold: input.lowBalanceThreshold,
+      balanceCurrency: input.credentials?.balanceCurrency || input.balanceCurrency,
+      balance,
+      connectionStatus: input.enabled ? 'pending' : 'disabled',
+      keyCount: 0,
+      activeKeyCount: 0,
+      failedKeyCount: 0,
+      openAlertCount: 0,
+      lastSyncAt: null,
+      lastSuccessAt: null,
+      nextSyncAt: input.enabled ? now : null,
+      consecutiveFailures: 0,
+      lastError: '',
+    };
+    this.supplierConnections.push(connection);
+    this.supplierConnectionDetails.set(connection.id, this.createSupplierDetail(connection));
+    this.refreshSupplierConnectionStats(connection);
+    return copySupplierConnection(connection);
+  }
+
+  async updateSupplierConnection(connectionId, input, credentialsCiphertext) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    const duplicate = this.supplierConnections.find((item) => (
+      Number(item.id) !== Number(connectionId) && item.supplierName === input.supplierName && item.name === input.name
+    ));
+    if (duplicate) throw Object.assign(new Error('supplier connection already exists'), { statusCode: 409 });
+    const supplier = this.supplierConnections.find((item) => Number(item.id) !== Number(connectionId) && item.supplierName === input.supplierName);
+    Object.assign(connection, {
+      supplierId: supplier?.supplierId || connection.supplierId,
+      supplierName: input.supplierName,
+      name: input.name,
+      adapterType: input.adapterType,
+      detectedAdapterType: '',
+      baseUrl: input.baseUrl,
+      authMode: input.authMode,
+      credentialLabel: input.credentialLabel || '',
+      enabled: input.enabled,
+      inventoryIntervalMinutes: input.inventoryIntervalMinutes,
+      activeCheckEnabled: input.activeCheckEnabled,
+      activeCheckLimit: input.activeCheckLimit,
+      lowBalanceThreshold: input.lowBalanceThreshold,
+      balanceCurrency: input.credentials?.balanceCurrency || input.balanceCurrency,
+      connectionStatus: input.enabled ? 'pending' : 'disabled',
+      nextSyncAt: input.enabled ? new Date().toISOString() : null,
+      lastError: '',
+      consecutiveFailures: 0,
+    });
+    if (credentialsCiphertext) {
+      connection.credentialsCiphertext = credentialsCiphertext;
+      connection.credentialsConfigured = true;
+    }
+    if (input.adapterType === 'openai_compatible' && finiteNumber(input.credentials?.balance) !== null) {
+      connection.balance = finiteNumber(input.credentials.balance);
+    }
+    const detail = this.supplierDetail(connection.id);
+    if (input.adapterType === 'openai_compatible' && detail.keys[0]) {
+      const key = detail.keys[0];
+      key.name = input.credentials?.keyName || key.name;
+      key.rateMultiplier = input.credentials?.rateMultiplier ?? key.rateMultiplier;
+      key.quotaCurrency = input.credentials?.balanceCurrency || input.balanceCurrency;
+    }
+    this.refreshSupplierConnectionStats(connection);
+    return copySupplierConnection(connection);
+  }
+
+  async syncSupplierConnection(connectionId) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    if (!connection.enabled) return { ok: false, status: 'disabled' };
+    const detail = this.supplierDetail(connection.id);
+    const checkedAt = new Date().toISOString();
+    const activeKeys = detail.keys.filter((key) => key.status === 'active' && !key.removedAt).slice(0, connection.activeCheckLimit);
+    if (connection.activeCheckEnabled) {
+      for (const key of activeKeys) {
+        key.lastCheckStatus = 'ok';
+        key.lastCheckMethod = 'demo_read';
+        key.lastCheckAt = checkedAt;
+        detail.checks.unshift({
+          id: `${checkedAt}:${key.id}`,
+          keyId: key.id,
+          keyName: key.name,
+          maskedKey: key.maskedKey,
+          status: 'ok',
+          method: 'demo_read',
+          httpStatus: 200,
+          latencyMs: 12,
+          errorCode: '',
+          errorMessage: '',
+          checkedAt,
+        });
+      }
+      detail.checks.splice(100);
+    }
+    if (finiteNumber(connection.balance) !== null) {
+      detail.balances.unshift({ balance: Number(connection.balance), currency: connection.balanceCurrency || 'USD', observedAt: checkedAt });
+      detail.balances.splice(60);
+    }
+    connection.connectionStatus = 'ok';
+    connection.detectedAdapterType = connection.adapterType === 'auto' ? 'sub2api' : connection.adapterType;
+    connection.lastSyncAt = checkedAt;
+    connection.lastSuccessAt = checkedAt;
+    connection.nextSyncAt = new Date(Date.now() + Number(connection.inventoryIntervalMinutes || 10) * 60_000).toISOString();
+    connection.consecutiveFailures = 0;
+    connection.lastError = '';
+    this.refreshSupplierConnectionStats(connection);
+    return {
+      ok: true,
+      adapterType: connection.detectedAdapterType,
+      keyCount: connection.keyCount,
+      checked: connection.activeCheckEnabled ? activeKeys.length : 0,
+    };
+  }
+
+  async getSupplierConnectionDetails(connectionId) {
+    const connection = await this.getSupplierConnection(connectionId);
+    const detail = copySupplierDetail(this.supplierDetail(connectionId));
+    return {
+      connection,
+      keys: detail.keys,
+      balances: detail.balances,
+      checks: detail.checks,
+      alerts: detail.alerts,
+      accounts: this.accounts.map((item) => ({ id:item.id,name:item.name,platform:item.platform,status:item.status })),
+    };
+  }
+
+  async setSupplierKeyAccountLink(keyId, accountId, linked) {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
+    if (!account) throw Object.assign(new Error('account not found'), { statusCode: 404 });
+    if (linked) {
+      for (const detail of this.supplierConnectionDetails.values()) {
+        for (const key of detail.keys) {
+          key.accountLinks = (key.accountLinks || []).filter((item) => Number(item.accountId) !== Number(accountId));
+        }
+      }
+      match.key.accountLinks.push({ accountId: account.id, accountName: account.name });
+    } else {
+      match.key.accountLinks = (match.key.accountLinks || []).filter((item) => Number(item.accountId) !== Number(accountId));
+    }
+    return { keyId: Number(keyId), accountId: Number(accountId), linked: Boolean(linked) };
+  }
+
+  async acknowledgeSupplierAlert(alertId, actor = 'admin') {
+    for (const connection of this.supplierConnections) {
+      const detail = this.supplierConnectionDetails.get(Number(connection.id));
+      const alert = detail?.alerts.find((item) => Number(item.id) === Number(alertId));
+      if (!alert) continue;
+      const acknowledgedAt = new Date().toISOString();
+      alert.status = 'acknowledged';
+      alert.acknowledgedAt = acknowledgedAt;
+      alert.acknowledgedBy = actor;
+      alert.lastSeenAt = acknowledgedAt;
+      this.refreshSupplierConnectionStats(connection);
+      return { id: Number(alert.id), status: alert.status, acknowledgedAt, acknowledgedBy: actor };
+    }
+    throw Object.assign(new Error('supplier alert not found'), { statusCode: 404 });
+  }
+
   async listCashTransactions({ page = 1, pageSize = 20, search = '', scope = 'all' } = {}) {
     const term = String(search || '').trim().toLowerCase();
     const scoped = scope === 'recharge'
@@ -661,7 +973,7 @@ export class DemoRepository {
   }
 
   async listNonCashBalanceCredits({ page = 1, pageSize = 20 } = {}) {
-    const items = this.nonCashBalanceCredits
+    const items = this.reportableNonCashBalanceCredits()
       .slice()
       .sort((left, right) => new Date(right.occurredAt) - new Date(left.occurredAt));
     const paged = pageResult(items, page, pageSize);

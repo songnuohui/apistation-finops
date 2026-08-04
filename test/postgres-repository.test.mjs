@@ -144,7 +144,10 @@ test('overview consumption rankings and model breakdown expose displayable model
     name: 'gpt-5.6-sol', userChargeCny: 26.5, requests: 4, tokens: 3200,
   }]);
   assert.equal(models.items[0].name, 'gpt-5.6-sol');
-  assert.match(queries.find((query) => query.text.includes('WITH usage_by_model_account')).text, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
+  const usageBreakdown = queries.find((query) => query.text.includes('WITH usage_by_model_account')).text;
+  assert.match(usageBreakdown, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
+  assert.match(usageBreakdown, /JOIN "finops"\.fact_usage_events f ON f\.source_usage_id=snapshot\.source_usage_id/);
+  assert.match(usageBreakdown, /NULLIF\(BTRIM\(f\.requested_model\),''\)/);
 });
 
 test('usage event details are read from FinOps facts with searchable model fallback and immutable cost status', async () => {
@@ -188,7 +191,52 @@ test('usage event details are read from FinOps facts with searchable model fallb
   assert.doesNotMatch(queries[0].text, /sub2api/);
 });
 
-test('overview and non-cash-credit details exclude affiliate quota records', async () => {
+test('user detail usage rows use the same model fallback as model aggregates', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH totals AS')) {
+        return {
+          rows: [{
+            id: '7', email: 'customer@example.com', username: 'customer', tags: [], status: 'active',
+            balance_cny: '0', exclude_from_balance_stats: false, consumption_cny: '0', requests: '0', tokens: '0',
+            recharge_cny: '0', credited_cny: '0', admin_credit_cny: '0', admin_deduction_cny: '0',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('WITH days AS')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT source_usage_id,occurred_at,')) {
+        return {
+          rows: [{
+            source_usage_id: '42', occurred_at: '2026-08-03T04:00:00.000Z',
+            model: 'requested-model', requested_model: 'requested-model', upstream_model: 'upstream-model',
+            source_account_id: '13', user_charge_cny: '0.8', input_tokens: '100', output_tokens: '20',
+            cache_creation_tokens: '5', cache_read_tokens: '10', duration_ms: '3210', total_count: '1',
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const start = new Date('2026-08-02T16:00:00.000Z');
+  const end = new Date('2026-08-03T16:00:00.000Z');
+  const details = await repository.getUserDetails({
+    userId: 7, start, end, dailyStart: '2026-08-03', dailyEnd: '2026-08-03',
+    recharge: { page: 1, pageSize: 20, offset: 0 }, usage: { page: 1, pageSize: 20, offset: 0 },
+  });
+
+  assert.equal(details.usage.items[0].model, 'requested-model');
+  const usageQuery = queries.find((query) => query.text.includes('SELECT source_usage_id,occurred_at,'));
+  assert.match(usageQuery.text, /NULLIF\(BTRIM\(requested_model\),''\)/);
+  assert.match(usageQuery.text, /NULLIF\(BTRIM\(upstream_model\),''\)/);
+  assert.doesNotMatch(usageQuery.text, /sub2api/);
+});
+
+test('overview and non-cash-credit details exclude affiliate quota records and balance-whitelisted users', async () => {
   const overviewQueries = [];
   const overviewPool = {
     async query(text, params = []) {
@@ -218,6 +266,8 @@ test('overview and non-cash-credit details exclude affiliate quota records', asy
   });
   const overviewTotals = overviewQueries.find((query) => query.text.includes('non_cash_balance_credit_cny'));
   assert.equal((overviewTotals.text.match(/accounting_scope',''\) <> 'affiliate_quota'/g) || []).length, 2);
+  assert.match(overviewTotals.text, /LEFT JOIN "finops"\.dim_users credit_user ON credit_user\.source_user_id=e\.source_user_id/);
+  assert.match(overviewTotals.text, /NOT COALESCE\(credit_user\.exclude_from_balance_stats,FALSE\)/);
   assert.match(overviewTotals.text, /SUM\(current_balance\) FILTER \(WHERE current_balance > 0 AND NOT exclude_from_balance_stats\)/);
 
   const detailQueries = [];
@@ -243,6 +293,8 @@ test('overview and non-cash-credit details exclude affiliate quota records', asy
   assert.equal(credits.items[0].id, 7);
   for (const query of detailQueries) {
     assert.match(query.text, /COALESCE\(e\.metadata->>'accounting_scope',''\) <> 'affiliate_quota'/);
+    assert.match(query.text, /LEFT JOIN "finops"\.dim_users u ON u\.source_user_id=e\.source_user_id/);
+    assert.match(query.text, /NOT COALESCE\(u\.exclude_from_balance_stats,FALSE\)/);
   }
 });
 

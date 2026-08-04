@@ -267,7 +267,7 @@ test('daily account snapshot records deletion and multiplier changes without inf
   assert.match(updates[0].text, /rate_change_count=rate_change_count\+\$14/);
 });
 
-test('cost snapshots use only the latest fresh probe fallback, prefer request multiplier, preserve unknown cost, and classify zero as free', async () => {
+test('cost snapshots prefer a fresh read-only probe, fall back to request multipliers, preserve unknown cost, and classify zero as free', async () => {
   const queries = [];
   let selected = false;
   const client = {
@@ -289,7 +289,9 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
               configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
               selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
               cost_profile_id: 7, account_cost_rule_id: null, fixed_period_id: null,
-              rate_observation_id: 41, observed_upstream_multiplier: '0.8',
+              rate_observation_id: 41, observation_status: 'ok', observation_source_kind: 'sub2api_snapshot',
+              observation_fresh_until: new Date('2026-07-31T01:30:00Z'), observed_resolved_multiplier: '0.8',
+              observed_upstream_multiplier: '0.8', observed_peak_enabled: false,
             },
             {
               source_usage_id: 2, source_account_id: 8, source_user_id: 3, source_group_id: 2,
@@ -299,7 +301,9 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
               configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
               selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
               cost_profile_id: 7, account_cost_rule_id: null, fixed_period_id: null,
-              rate_observation_id: 41, observed_upstream_multiplier: '0.8',
+              rate_observation_id: 41, observation_status: 'ok', observation_source_kind: 'sub2api_snapshot',
+              observation_fresh_until: new Date('2026-07-31T02:30:00Z'), observed_resolved_multiplier: '0.8',
+              observed_upstream_multiplier: '0.8', observed_peak_enabled: false,
             },
             {
               source_usage_id: 3, source_account_id: 8, source_user_id: 3, source_group_id: 2,
@@ -329,7 +333,9 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
               configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
               selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
               cost_profile_id: null, account_cost_rule_id: null, fixed_period_id: null,
-              rate_observation_id: 52, observed_upstream_multiplier: '0.7',
+              rate_observation_id: 52, observation_status: 'ok', observation_source_kind: 'supplier_direct_probe',
+              observation_fresh_until: new Date('2026-07-31T05:30:00Z'), observed_resolved_multiplier: '0.7',
+              observed_upstream_multiplier: '0.7', observed_peak_enabled: false,
             },
           ],
           rowCount: 5,
@@ -347,9 +353,10 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
   assert.match(insert.text, /ON CONFLICT\(source_usage_id\) DO NOTHING/);
   assert.equal(insert.params.length, 5 * COST_SNAPSHOT_COLUMN_COUNT);
   const row = (index) => insert.params.slice(index * COST_SNAPSHOT_COLUMN_COUNT, (index + 1) * COST_SNAPSHOT_COLUMN_COUNT);
-  assert.equal(row(0)[17], '0.5');
+  assert.equal(row(0)[17], '0.8');
+  assert.equal(row(0)[19], 'probe_observation');
   assert.equal(row(0)[20], 'priced');
-  assert.equal(row(0)[21], '25');
+  assert.equal(row(0)[21], '40');
   assert.equal(row(1)[17], '0.8');
   assert.equal(row(1)[19], 'probe_observation');
   assert.equal(row(2)[10], 'free');
@@ -359,11 +366,11 @@ test('cost snapshots use only the latest fresh probe fallback, prefer request mu
   assert.equal(row(3)[21], null);
   assert.equal(row(4)[10], 'probe_multiplier');
   assert.equal(row(4)[17], '0.7');
-  assert.equal(row(4)[19], 'probe_observation');
+  assert.equal(row(4)[19], 'supplier_direct_probe');
   assert.equal(row(4)[20], 'priced');
   assert.equal(row(4)[21], '35');
   const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
-  assert.match(selection.text, /SELECT o\.id,o\.status,o\.effective_rate_multiplier,o\.fresh_until/);
+  assert.match(selection.text, /SELECT o\.id,o\.status,o\.source_kind,o\.resolved_rate_multiplier,o\.effective_rate_multiplier/);
   assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
   assert.doesNotMatch(selection.text, /COALESCE\(o\.observed_at,o\.received_at,o\.last_attempt_at,o\.captured_at\)/);
   assert.match(selection.text, /GREATEST\(\s+COALESCE\(o\.observed_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.received_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.last_attempt_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.captured_at,'-infinity'::timestamptz\)\s+\)/);
@@ -505,6 +512,28 @@ test('usage timestamp corrections refresh both the old and new daily partitions'
   }]);
   assert.deepEqual(rebuilt, [5]);
   assert.deepEqual(refreshedDays.sort(), ['2026-07-01', '2026-07-02']);
+});
+
+test('daily usage rollups fall back from an empty primary model to requested and upstream models', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const service = new SyncService(null, {
+    finopsSchema: 'finops', sourceSchema: 'public', timezone: 'Asia/Shanghai', sourceBalanceUnit: 'CNY',
+  });
+
+  await service.refreshUsageDaily(client, ['2026-08-03']);
+
+  const aggregate = queries.find((query) => query.text.includes('INSERT INTO "finops".fact_usage_daily'));
+  assert.ok(aggregate);
+  assert.deepEqual(aggregate.params, [['2026-08-03'], 'Asia/Shanghai']);
+  assert.match(aggregate.text, /NULLIF\(BTRIM\(model\),''\),NULLIF\(BTRIM\(requested_model\),''\)/);
+  assert.match(aggregate.text, /NULLIF\(BTRIM\(upstream_model\),''\)/);
+  assert.doesNotMatch(aggregate.text, /sub2api\./);
 });
 
 test('usage mapping keeps the source charge in CNY without an upstream CNY cost field', async () => {

@@ -10,6 +10,42 @@ function nullableNumber(value) {
   return value === null || value === undefined ? null : Number(value);
 }
 
+function supplierConnection(row, { includeCiphertext = false } = {}) {
+  if (!row) return null;
+  const result = {
+    id: Number(row.id),
+    supplierId: Number(row.supplier_id),
+    supplierName: row.supplier_name || '',
+    name: row.name || '',
+    adapterType: row.adapter_type || 'auto',
+    detectedAdapterType: row.detected_adapter_type || '',
+    baseUrl: row.base_url || '',
+    authMode: row.auth_mode || 'password',
+    credentialLabel: row.credential_label || '',
+    credentialsConfigured: Boolean(row.credentials_ciphertext),
+    enabled: Boolean(row.enabled),
+    inventoryIntervalMinutes: Number(row.inventory_interval_minutes || 10),
+    activeCheckEnabled: Boolean(row.active_check_enabled),
+    activeCheckLimit: Number(row.active_check_limit || 20),
+    lowBalanceThreshold: nullableNumber(row.low_balance_threshold),
+    balanceCurrency: row.balance_currency || 'USD',
+    connectionStatus: row.connection_status || 'pending',
+    lastSyncAt: row.last_sync_at || null,
+    lastSuccessAt: row.last_success_at || null,
+    nextSyncAt: row.next_sync_at || null,
+    consecutiveFailures: Number(row.consecutive_failures || 0),
+    lastError: row.last_error || '',
+    balance: nullableNumber(row.balance),
+    keyCount: Number(row.key_count || 0),
+    activeKeyCount: Number(row.active_key_count || 0),
+    failedKeyCount: Number(row.failed_key_count || 0),
+    openAlertCount: Number(row.open_alert_count || 0),
+    updatedAt: row.updated_at || null,
+  };
+  if (includeCiphertext) result.credentialsCiphertext = row.credentials_ciphertext || '';
+  return result;
+}
+
 function cnySum(...values) {
   return values.reduce((total, value) => total.plus(value || 0), new Decimal(0)).toString();
 }
@@ -284,8 +320,10 @@ export class PostgresRepository {
           ) AS non_cash_balance_credit_count,
           (SELECT COALESCE(SUM(current_balance) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats),0) FROM ${this.schema}.dim_users) AS balance_cny,
           (SELECT COUNT(*) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats) FROM ${this.schema}.dim_users) AS balance_user_count
-        FROM ${this.schema}.credit_events
-        WHERE occurred_at >= $1 AND occurred_at < $2`,
+        FROM ${this.schema}.credit_events e
+        LEFT JOIN ${this.schema}.dim_users credit_user ON credit_user.source_user_id=e.source_user_id
+        WHERE e.occurred_at >= $1 AND e.occurred_at < $2
+          AND NOT COALESCE(credit_user.exclude_from_balance_stats,FALSE)`,
       [start, end]),
       this.pool.query(`
         SELECT u.source_user_id AS id,u.email,u.username,
@@ -514,15 +552,19 @@ export class PostgresRepository {
         SELECT source_account_id,SUM(allocation_weight) AS allocation_weight,SUM(tokens) AS token_weight,SUM(requests) AS request_weight
         FROM usage_by_model_account GROUP BY source_account_id
       ), multiplier_cost AS (
-        SELECT COALESCE(NULLIF(BTRIM(model),''),'未标注模型') AS model,source_account_id,
+        SELECT COALESCE(NULLIF(BTRIM(f.model),''),NULLIF(BTRIM(f.requested_model),''),
+                 NULLIF(BTRIM(f.upstream_model),''),'未标注模型') AS model,
+               snapshot.source_account_id,
                COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
                COALESCE(SUM(user_charge_cny) FILTER (
                  WHERE cost_status NOT IN ('priced','free','fixed_cost')
                ),0) AS unpriced_user_charge_cny,
                MAX(cost_mode) AS cost_mode
-        FROM ${this.schema}.usage_cost_facts
-        WHERE occurred_at >= $3 AND occurred_at < $4
-        GROUP BY COALESCE(NULLIF(BTRIM(model),''),'未标注模型'),source_account_id
+        FROM ${this.schema}.usage_cost_facts snapshot
+        JOIN ${this.schema}.fact_usage_events f ON f.source_usage_id=snapshot.source_usage_id
+        WHERE snapshot.occurred_at >= $3 AND snapshot.occurred_at < $4
+        GROUP BY COALESCE(NULLIF(BTRIM(f.model),''),NULLIF(BTRIM(f.requested_model),''),
+                   NULLIF(BTRIM(f.upstream_model),''),'未标注模型'),snapshot.source_account_id
       ), account_cost AS (
         SELECT p.source_account_id,
                SUM(p.total_cost_cny *
@@ -957,7 +999,10 @@ export class PostgresRepository {
           AND status <> 'void' AND occurred_at >= $2 AND occurred_at < $3
         ORDER BY occurred_at DESC,id DESC LIMIT $4 OFFSET $5`, [userId, start, end, recharge.pageSize, recharge.offset]),
       this.pool.query(`
-        SELECT source_usage_id,occurred_at,model,requested_model,upstream_model,source_account_id,
+        SELECT source_usage_id,occurred_at,
+               COALESCE(NULLIF(BTRIM(model),''),NULLIF(BTRIM(requested_model),''),
+                 NULLIF(BTRIM(upstream_model),''),'未标注模型') AS model,
+               requested_model,upstream_model,source_account_id,
                user_charge_cny,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
                duration_ms,COUNT(*) OVER() AS total_count
         FROM ${this.schema}.fact_usage_events
@@ -1528,7 +1573,8 @@ export class PostgresRepository {
       AND e.direction='in'
       AND e.event_type IN ('admin_adjustment','redeem','affiliate_rebate')
       AND COALESCE(e.cash_basis_cny,0)=0
-      AND COALESCE(e.metadata->>'accounting_scope','') <> 'affiliate_quota'`;
+      AND COALESCE(e.metadata->>'accounting_scope','') <> 'affiliate_quota'
+      AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)`;
     const [result, totals] = await Promise.all([this.pool.query(`
       SELECT e.id,e.source_table,e.source_id,e.event_type,e.credit_amount,e.occurred_at,
              COALESCE(e.metadata->>'action','') AS action,
@@ -1541,6 +1587,7 @@ export class PostgresRepository {
       ORDER BY e.occurred_at DESC,e.id DESC LIMIT $3 OFFSET $4`, [start,end,pageSize,offset]), this.pool.query(`
       SELECT COALESCE(SUM(e.credit_amount),0) AS amount_cny,COUNT(*)::int AS events
       FROM ${this.schema}.credit_events e
+      LEFT JOIN ${this.schema}.dim_users u ON u.source_user_id=e.source_user_id
       WHERE ${conditions}`, [start,end])]);
     const paged = pageResult(result.rows.map((row) => ({
       total_count: row.total_count,
@@ -2610,6 +2657,374 @@ export class PostgresRepository {
         excludeFromBalanceStats: input.excludeFromBalanceStats,
       };
     });
+  }
+
+  async listSupplierConnections({ search = '' } = {}) {
+    const result = await this.pool.query(`
+      SELECT c.*,s.name AS supplier_name,b.balance,
+             COALESCE(keys.key_count,0)::int AS key_count,
+             COALESCE(keys.active_key_count,0)::int AS active_key_count,
+             COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
+             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count
+      FROM ${this.schema}.supplier_connections c
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN LATERAL (
+        SELECT balance FROM ${this.schema}.supplier_balance_snapshots
+        WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
+      ) b ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) FILTER (WHERE removed_at IS NULL) AS key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND status='active') AS active_key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND last_check_status='failed') AS failed_key_count
+        FROM ${this.schema}.supplier_keys WHERE connection_id=c.id
+      ) keys ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS open_alert_count FROM ${this.schema}.supplier_alert_events
+        WHERE connection_id=c.id AND status='open'
+      ) alerts ON TRUE
+      WHERE ($1='' OR s.name ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%'
+        OR c.base_url ILIKE '%'||$1||'%' OR c.credential_label ILIKE '%'||$1||'%')
+      ORDER BY (c.connection_status='failed') DESC,open_alert_count DESC,s.name,c.name`, [search]);
+    return { items: result.rows.map((row) => supplierConnection(row)) };
+  }
+
+  async getSupplierConnection(connectionId, { includeCiphertext = false } = {}) {
+    const result = await this.pool.query(`
+      SELECT c.*,s.name AS supplier_name,b.balance,
+             COALESCE(keys.key_count,0)::int AS key_count,
+             COALESCE(keys.active_key_count,0)::int AS active_key_count,
+             COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
+             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count
+      FROM ${this.schema}.supplier_connections c
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN LATERAL (
+        SELECT balance FROM ${this.schema}.supplier_balance_snapshots
+        WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
+      ) b ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) FILTER (WHERE removed_at IS NULL) AS key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND status='active') AS active_key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND last_check_status='failed') AS failed_key_count
+        FROM ${this.schema}.supplier_keys WHERE connection_id=c.id
+      ) keys ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS open_alert_count FROM ${this.schema}.supplier_alert_events
+        WHERE connection_id=c.id AND status='open'
+      ) alerts ON TRUE
+      WHERE c.id=$1 LIMIT 1`, [connectionId]);
+    if (!result.rowCount) throw httpError('supplier connection not found', 404);
+    return supplierConnection(result.rows[0], { includeCiphertext });
+  }
+
+  async createSupplierConnection(input, credentialsCiphertext, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const supplierId = await this.ensureSupplierInTransaction(client, input.supplierName, actor);
+      await client.query(`UPDATE ${this.schema}.suppliers
+        SET website_url=$2,supplier_type=$3,updated_at=NOW() WHERE id=$1`,
+      [supplierId, input.baseUrl, input.adapterType]);
+      let result;
+      try {
+        result = await client.query(`
+          INSERT INTO ${this.schema}.supplier_connections(
+            supplier_id,name,adapter_type,base_url,auth_mode,credential_label,credentials_ciphertext,
+            enabled,inventory_interval_minutes,active_check_enabled,active_check_limit,
+            low_balance_threshold,balance_currency,created_by,updated_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+          RETURNING *`, [
+          supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalMinutes,input.activeCheckEnabled,
+          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
+        ]);
+      } catch (error) {
+        if (error?.code === '23505') throw httpError('该供应商下已存在同名连接', 409);
+        throw error;
+      }
+      const row = { ...result.rows[0], supplier_name: input.supplierName };
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'create_supplier_connection','supplier_connection',$2,$3::jsonb)`,
+      [actor,String(row.id),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl })]);
+      return supplierConnection(row);
+    });
+  }
+
+  async updateSupplierConnection(connectionId, input, credentialsCiphertext, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const current = await client.query(`SELECT * FROM ${this.schema}.supplier_connections WHERE id=$1 FOR UPDATE`, [connectionId]);
+      if (!current.rowCount) throw httpError('supplier connection not found', 404);
+      const supplierId = await this.ensureSupplierInTransaction(client, input.supplierName, actor);
+      await client.query(`UPDATE ${this.schema}.suppliers
+        SET website_url=$2,supplier_type=$3,updated_at=NOW() WHERE id=$1`,
+      [supplierId,input.baseUrl,input.adapterType]);
+      let result;
+      try {
+        result = await client.query(`
+          UPDATE ${this.schema}.supplier_connections SET
+            supplier_id=$2,name=$3,adapter_type=$4,base_url=$5,auth_mode=$6,credential_label=$7,
+            credentials_ciphertext=$8,enabled=$9,inventory_interval_minutes=$10,
+            active_check_enabled=$11,active_check_limit=$12,low_balance_threshold=$13,
+            balance_currency=$14,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
+            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$15,updated_at=NOW()
+          WHERE id=$1 RETURNING *`, [
+          connectionId,supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalMinutes,input.activeCheckEnabled,
+          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
+        ]);
+      } catch (error) {
+        if (error?.code === '23505') throw httpError('该供应商下已存在同名连接', 409);
+        throw error;
+      }
+      const row = { ...result.rows[0], supplier_name: input.supplierName };
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_supplier_connection','supplier_connection',$2,$3::jsonb)`,
+      [actor,String(connectionId),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl, enabled: input.enabled })]);
+      return supplierConnection(row);
+    });
+  }
+
+  async listDueSupplierConnections(limit = 5) {
+    const result = await this.pool.query(`
+      SELECT c.*,s.name AS supplier_name
+      FROM ${this.schema}.supplier_connections c JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      WHERE c.enabled AND c.next_sync_at<=NOW()
+      ORDER BY c.next_sync_at,c.id LIMIT $1`, [limit]);
+    return result.rows.map((row) => supplierConnection(row, { includeCiphertext: true }));
+  }
+
+  async recordSupplierSyncFailure(connectionId, error) {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.supplier_connections SET
+          connection_status=CASE WHEN $2='unsupported_site' OR $2='adapter_required' THEN 'unsupported' ELSE 'failed' END,
+          last_sync_at=NOW(),consecutive_failures=consecutive_failures+1,last_error=$3,
+          next_sync_at=NOW()+LEAST(INTERVAL '24 hours',
+            inventory_interval_minutes*INTERVAL '1 minute' * POWER(2,LEAST(consecutive_failures+1,6))),updated_at=NOW()
+        WHERE id=$1 RETURNING *`, [connectionId,error.code || 'sync_failed',String(error.message || '供应商同步失败').slice(0,1000)]);
+      if (!result.rowCount) return;
+      await client.query(`
+        INSERT INTO ${this.schema}.supplier_alert_events(
+          connection_id,dedupe_key,alert_type,severity,title,message,details)
+        VALUES($1,'connection:sync_failed','sync_failed','critical','供应商连接同步失败',$2,$3::jsonb)
+        ON CONFLICT(connection_id,dedupe_key) DO UPDATE SET
+          status='open',severity='critical',message=EXCLUDED.message,details=EXCLUDED.details,
+          last_seen_at=NOW(),occurrence_count=supplier_alert_events.occurrence_count+1,
+          resolved_at=NULL`, [connectionId,String(error.message || '供应商同步失败').slice(0,1000),JSON.stringify({ code: error.code || 'sync_failed', httpStatus: error.httpStatus || 0 })]);
+    });
+  }
+
+  async recordSupplierSyncSuccess(connectionId, snapshot, checks) {
+    return inTransaction(this.pool, async (client) => {
+      const connectionResult = await client.query(`SELECT * FROM ${this.schema}.supplier_connections WHERE id=$1 FOR UPDATE`, [connectionId]);
+      if (!connectionResult.rowCount) throw httpError('supplier connection not found', 404);
+      const connection = connectionResult.rows[0];
+      const previousResult = await client.query(`SELECT * FROM ${this.schema}.supplier_keys WHERE connection_id=$1 FOR UPDATE`, [connectionId]);
+      const previousByExternalId = new Map(previousResult.rows.map((row) => [row.external_key_id, row]));
+      const seen = [];
+      const alert = async ({ keyId = null, dedupeKey, type, severity = 'warning', title, message = '', details = {} }) => {
+        await client.query(`
+          INSERT INTO ${this.schema}.supplier_alert_events(
+            connection_id,supplier_key_id,dedupe_key,alert_type,severity,title,message,details)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+          ON CONFLICT(connection_id,dedupe_key) DO UPDATE SET
+            supplier_key_id=EXCLUDED.supplier_key_id,status='open',severity=EXCLUDED.severity,
+            title=EXCLUDED.title,message=EXCLUDED.message,details=EXCLUDED.details,last_seen_at=NOW(),
+            occurrence_count=supplier_alert_events.occurrence_count+1,resolved_at=NULL`,
+        [connectionId,keyId,dedupeKey,type,severity,title,message,JSON.stringify(details)]);
+      };
+      const resolveAlert = (dedupeKey) => client.query(`UPDATE ${this.schema}.supplier_alert_events
+        SET status='resolved',resolved_at=NOW(),last_seen_at=NOW()
+        WHERE connection_id=$1 AND dedupe_key=$2 AND status='open'`, [connectionId,dedupeKey]);
+
+      for (const item of snapshot.keys) {
+        seen.push(item.externalId);
+        const previous = previousByExternalId.get(item.externalId);
+        const keyResult = await client.query(`
+          INSERT INTO ${this.schema}.supplier_keys(
+            connection_id,external_key_id,name,masked_key,key_fingerprint,status,group_id,group_name,
+            rate_multiplier,quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,
+            source_data,last_seen_at,removed_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW(),NULL)
+          ON CONFLICT(connection_id,external_key_id) DO UPDATE SET
+            name=EXCLUDED.name,masked_key=EXCLUDED.masked_key,
+            key_fingerprint=CASE WHEN EXCLUDED.key_fingerprint='' THEN ${this.schema}.supplier_keys.key_fingerprint ELSE EXCLUDED.key_fingerprint END,
+            status=EXCLUDED.status,group_id=EXCLUDED.group_id,group_name=EXCLUDED.group_name,
+            rate_multiplier=EXCLUDED.rate_multiplier,quota_total=EXCLUDED.quota_total,quota_used=EXCLUDED.quota_used,
+            quota_remaining=EXCLUDED.quota_remaining,quota_currency=EXCLUDED.quota_currency,
+            expires_at=EXCLUDED.expires_at,last_used_at=EXCLUDED.last_used_at,source_data=EXCLUDED.source_data,
+            last_seen_at=NOW(),removed_at=NULL,updated_at=NOW()
+          RETURNING *`, [
+          connectionId,item.externalId,item.name,item.maskedKey,item.keyFingerprint || '',item.status,
+          item.groupId,item.groupName,item.rateMultiplier,item.quotaTotal,item.quotaUsed,item.quotaRemaining,
+          item.quotaCurrency,item.expiresAt,item.lastUsedAt,JSON.stringify(item.sourceData || {}),
+        ]);
+        const key = keyResult.rows[0];
+        const multiplierChanged = previous && nullableNumber(previous.rate_multiplier) !== nullableNumber(item.rateMultiplier);
+        const statusChanged = previous && previous.status !== item.status;
+        const groupChanged = previous && (previous.group_id !== item.groupId || previous.group_name !== item.groupName);
+        const quotaChanged = previous && nullableNumber(previous.quota_remaining) !== nullableNumber(item.quotaRemaining);
+        const changeType = !previous ? 'discovered' : multiplierChanged ? 'multiplier_changed' : statusChanged ? 'status_changed' : groupChanged ? 'group_changed' : quotaChanged ? 'quota_changed' : 'snapshot';
+        await client.query(`INSERT INTO ${this.schema}.supplier_key_observations(
+          supplier_key_id,status,group_name,rate_multiplier,quota_remaining,change_type,snapshot_data)
+          VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [key.id,item.status,item.groupName,item.rateMultiplier,item.quotaRemaining,changeType,JSON.stringify(item.sourceData || {})]);
+        if (multiplierChanged) await alert({
+          keyId:key.id,dedupeKey:`key:${key.id}:multiplier`,type:'multiplier_changed',title:'密钥倍率发生变化',
+          message:`${item.name || item.maskedKey}：${previous.rate_multiplier ?? '--'}x → ${item.rateMultiplier ?? '--'}x`,
+          details:{ previous:nullableNumber(previous.rate_multiplier), current:nullableNumber(item.rateMultiplier) },
+        });
+        if (statusChanged && item.status !== 'active') await alert({
+          keyId:key.id,dedupeKey:`key:${key.id}:portal_status`,type:'key_status_changed',title:'密钥状态异常',
+          message:`${item.name || item.maskedKey} 当前状态：${item.status}`,details:{ previous:previous.status,current:item.status },
+        });
+        if (item.status === 'active') await resolveAlert(`key:${key.id}:portal_status`);
+
+        const check = checks.find((candidate) => candidate.externalId === item.externalId);
+        if (check) {
+          await client.query(`INSERT INTO ${this.schema}.supplier_key_checks(
+            supplier_key_id,status,method,http_status,latency_ms,error_code,error_message)
+            VALUES($1,$2,$3,$4,$5,$6,$7)`,
+          [key.id,check.status,check.method,check.httpStatus || 0,check.latencyMs ?? null,check.errorCode || '',String(check.errorMessage || '').slice(0,1000)]);
+          await client.query(`UPDATE ${this.schema}.supplier_keys SET
+            last_check_status=$2,last_check_method=$3,last_check_at=NOW(),last_check_error=$4,updated_at=NOW()
+            WHERE id=$1`, [key.id,check.status,check.method,String(check.errorMessage || '').slice(0,1000)]);
+          if (check.status === 'failed') await alert({
+            keyId:key.id,dedupeKey:`key:${key.id}:check`,type:'key_check_failed',severity:'critical',title:'密钥巡检失败',
+            message:`${item.name || item.maskedKey}：${check.errorMessage || check.errorCode || '不可用'}`,
+            details:{ method:check.method,httpStatus:check.httpStatus || 0,errorCode:check.errorCode || '' },
+          });
+          if (check.status === 'ok') await resolveAlert(`key:${key.id}:check`);
+          if (check.status === 'ok' && check.billing) {
+            const links = await client.query(`SELECT source_account_id FROM ${this.schema}.supplier_account_links WHERE supplier_key_id=$1`, [key.id]);
+            const observedAt = check.billing.observed_at || new Date().toISOString();
+            for (const link of links.rows) await client.query(`
+              INSERT INTO ${this.schema}.account_rate_observations(
+                source_account_id,observation_key,source_kind,status,billing_scope,observed_at,received_at,
+                fresh_until,last_attempt_at,next_probe_at,failure_count,http_status,last_error,
+                group_rate_multiplier,user_rate_multiplier,resolved_rate_multiplier,effective_rate_multiplier,
+                peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data,supplier_key_id)
+              VALUES($1,$2,'supplier_direct_probe','ok','token',$3,NOW(),
+                NOW()+($4*2)*INTERVAL '1 minute',NOW(),NOW()+$4*INTERVAL '1 minute',0,$5,'',
+                $6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15)
+              ON CONFLICT(source_account_id,observation_key) DO NOTHING`, [
+              link.source_account_id,`supplier:${key.id}:${observedAt}`,observedAt,connection.inventory_interval_minutes,
+              check.httpStatus || 200,check.billing.group_rate_multiplier,check.billing.user_rate_multiplier,
+              check.billing.resolved_rate_multiplier,check.billing.effective_rate_multiplier,
+              check.billing.peak_rate_enabled,check.billing.peak_rate_multiplier,check.billing.applied_peak_multiplier,
+              check.billing.timezone || '',JSON.stringify(check.billing),key.id,
+            ]);
+          }
+        }
+      }
+
+      const removed = previousResult.rows.filter((row) => !seen.includes(row.external_key_id) && !row.removed_at);
+      if (seen.length) await client.query(`UPDATE ${this.schema}.supplier_keys
+        SET removed_at=NOW(),status='removed',updated_at=NOW()
+        WHERE connection_id=$1 AND NOT (external_key_id=ANY($2::text[])) AND removed_at IS NULL`, [connectionId,seen]);
+      else await client.query(`UPDATE ${this.schema}.supplier_keys
+        SET removed_at=NOW(),status='removed',updated_at=NOW() WHERE connection_id=$1 AND removed_at IS NULL`, [connectionId]);
+      for (const key of removed) await alert({
+        keyId:key.id,dedupeKey:`key:${key.id}:removed`,type:'key_removed',title:'供应商密钥已移除',
+        message:`${key.name || key.masked_key} 已不在供应商返回的密钥列表中`,
+      });
+
+      if (snapshot.balance !== null && snapshot.balance !== undefined) {
+        await client.query(`INSERT INTO ${this.schema}.supplier_balance_snapshots(connection_id,balance,currency)
+          VALUES($1,$2,$3)`, [connectionId,snapshot.balance,snapshot.balanceCurrency]);
+        if (connection.low_balance_threshold !== null && Number(snapshot.balance) < Number(connection.low_balance_threshold)) await alert({
+          dedupeKey:'connection:low_balance',type:'low_balance',severity:'critical',title:'供应商余额不足',
+          message:`当前余额 ${snapshot.balance} ${snapshot.balanceCurrency}，低于阈值 ${connection.low_balance_threshold} ${connection.balance_currency}`,
+          details:{ balance:snapshot.balance,currency:snapshot.balanceCurrency,threshold:Number(connection.low_balance_threshold) },
+        });
+        else await resolveAlert('connection:low_balance');
+      }
+      await resolveAlert('connection:sync_failed');
+      const failedChecks = checks.filter((check) => check.status === 'failed').length;
+      await client.query(`UPDATE ${this.schema}.supplier_connections SET
+        connection_status=$2,detected_adapter_type=$3,credential_label=COALESCE(NULLIF($4,''),credential_label),
+        balance_currency=$5,last_sync_at=NOW(),last_success_at=NOW(),next_sync_at=NOW()+inventory_interval_minutes*INTERVAL '1 minute',
+        consecutive_failures=0,last_error='',updated_at=NOW() WHERE id=$1`,
+      [connectionId,failedChecks ? 'warning' : 'ok',snapshot.adapterType,snapshot.identity || '',snapshot.balanceCurrency || connection.balance_currency]);
+    });
+  }
+
+  async getSupplierConnectionDetails(connectionId) {
+    const connection = await this.getSupplierConnection(connectionId);
+    const [keys,balances,checks,alerts,links,accounts] = await Promise.all([
+      this.pool.query(`SELECT id,external_key_id,name,masked_key,status,group_id,group_name,rate_multiplier,
+        quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,last_check_status,
+        last_check_method,last_check_at,last_check_error,first_seen_at,last_seen_at,removed_at
+        FROM ${this.schema}.supplier_keys WHERE connection_id=$1
+        ORDER BY (removed_at IS NULL) DESC,(last_check_status='failed') DESC,name,id`, [connectionId]),
+      this.pool.query(`SELECT balance,currency,observed_at FROM ${this.schema}.supplier_balance_snapshots
+        WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 60`, [connectionId]),
+      this.pool.query(`SELECT c.id,c.supplier_key_id,k.name AS key_name,k.masked_key,c.status,c.method,c.http_status,
+        c.latency_ms,c.error_code,c.error_message,c.checked_at
+        FROM ${this.schema}.supplier_key_checks c JOIN ${this.schema}.supplier_keys k ON k.id=c.supplier_key_id
+        WHERE k.connection_id=$1 ORDER BY c.checked_at DESC,c.id DESC LIMIT 100`, [connectionId]),
+      this.pool.query(`SELECT id,supplier_key_id,alert_type,severity,status,title,message,details,first_seen_at,
+        last_seen_at,occurrence_count,acknowledged_at,acknowledged_by,resolved_at
+        FROM ${this.schema}.supplier_alert_events WHERE connection_id=$1
+        ORDER BY (status='open') DESC,last_seen_at DESC,id DESC LIMIT 100`, [connectionId]),
+      this.pool.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name
+        FROM ${this.schema}.supplier_account_links l
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
+        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id WHERE k.connection_id=$1`, [connectionId]),
+      this.pool.query(`SELECT source_account_id AS id,name,platform,status FROM ${this.schema}.dim_accounts
+        WHERE source_deleted_at IS NULL ORDER BY name,source_account_id LIMIT 5000`),
+    ]);
+    const linksByKey = new Map();
+    for (const row of links.rows) {
+      if (!linksByKey.has(String(row.supplier_key_id))) linksByKey.set(String(row.supplier_key_id), []);
+      linksByKey.get(String(row.supplier_key_id)).push({ accountId:Number(row.source_account_id),accountName:row.account_name || '' });
+    }
+    return {
+      connection,
+      keys: keys.rows.map((row) => ({
+        id:Number(row.id),externalId:row.external_key_id,name:row.name,maskedKey:row.masked_key,status:row.status,
+        groupId:row.group_id,groupName:row.group_name,rateMultiplier:nullableNumber(row.rate_multiplier),
+        quotaTotal:nullableNumber(row.quota_total),quotaUsed:nullableNumber(row.quota_used),quotaRemaining:nullableNumber(row.quota_remaining),
+        quotaCurrency:row.quota_currency,expiresAt:row.expires_at,lastUsedAt:row.last_used_at,
+        lastCheckStatus:row.last_check_status,lastCheckMethod:row.last_check_method,lastCheckAt:row.last_check_at,
+        lastCheckError:row.last_check_error,firstSeenAt:row.first_seen_at,lastSeenAt:row.last_seen_at,removedAt:row.removed_at,
+        accountLinks:linksByKey.get(String(row.id)) || [],
+      })),
+      balances: balances.rows.map((row) => ({ balance:Number(row.balance),currency:row.currency,observedAt:row.observed_at })),
+      checks: checks.rows.map((row) => ({
+        id:Number(row.id),keyId:Number(row.supplier_key_id),keyName:row.key_name,maskedKey:row.masked_key,status:row.status,
+        method:row.method,httpStatus:Number(row.http_status),latencyMs:nullableNumber(row.latency_ms),errorCode:row.error_code,
+        errorMessage:row.error_message,checkedAt:row.checked_at,
+      })),
+      alerts: alerts.rows.map((row) => ({
+        id:Number(row.id),keyId:row.supplier_key_id?Number(row.supplier_key_id):null,type:row.alert_type,severity:row.severity,
+        status:row.status,title:row.title,message:row.message,details:row.details || {},firstSeenAt:row.first_seen_at,
+        lastSeenAt:row.last_seen_at,occurrenceCount:Number(row.occurrence_count),acknowledgedAt:row.acknowledged_at,
+        acknowledgedBy:row.acknowledged_by,resolvedAt:row.resolved_at,
+      })),
+      accounts: accounts.rows.map((row) => ({ id:Number(row.id),name:row.name,platform:row.platform,status:row.status })),
+    };
+  }
+
+  async setSupplierKeyAccountLink(keyId, accountId, linked, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const key = await client.query(`SELECT id FROM ${this.schema}.supplier_keys WHERE id=$1`, [keyId]);
+      if (!key.rowCount) throw httpError('supplier key not found', 404);
+      const account = await client.query(`SELECT source_account_id FROM ${this.schema}.dim_accounts WHERE source_account_id=$1`, [accountId]);
+      if (!account.rowCount) throw httpError('account not found', 404);
+      if (linked) await client.query(`INSERT INTO ${this.schema}.supplier_account_links(supplier_key_id,source_account_id,created_by)
+        VALUES($1,$2,$3) ON CONFLICT(source_account_id) DO UPDATE SET supplier_key_id=EXCLUDED.supplier_key_id,created_by=EXCLUDED.created_by,created_at=NOW()`, [keyId,accountId,actor]);
+      else await client.query(`DELETE FROM ${this.schema}.supplier_account_links WHERE supplier_key_id=$1 AND source_account_id=$2`, [keyId,accountId]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_supplier_account_link','supplier_key',$2,$3::jsonb)`,
+      [actor,String(keyId),JSON.stringify({ sourceAccountId:accountId,linked })]);
+      return { keyId,accountId,linked };
+    });
+  }
+
+  async acknowledgeSupplierAlert(alertId, actor='admin') {
+    const result = await this.pool.query(`UPDATE ${this.schema}.supplier_alert_events
+      SET status='acknowledged',acknowledged_at=NOW(),acknowledged_by=$2,last_seen_at=NOW()
+      WHERE id=$1 RETURNING id,status,acknowledged_at,acknowledged_by`, [alertId,actor]);
+    if (!result.rowCount) throw httpError('supplier alert not found', 404);
+    return { id:Number(result.rows[0].id),status:result.rows[0].status,acknowledgedAt:result.rows[0].acknowledged_at,acknowledgedBy:result.rows[0].acknowledged_by };
   }
 
   async getRuntimeDashboard() {

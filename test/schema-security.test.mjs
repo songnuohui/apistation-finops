@@ -147,3 +147,26 @@ test('immutable cost snapshot migration is isolated from sub2api and preserves u
   assert.match(sync, /account_rate_multiplier,?/);
   assert.doesNotMatch(sync, /COALESCE\(account_rate_multiplier,1\)/);
 });
+
+test('canonical model migration rebuilds only FinOps usage aggregates', () => {
+  const migration = read('migrations/015_canonical_usage_models.sql');
+  assert.match(migration, /DELETE FROM \{\{FINOPS_SCHEMA\}\}\.fact_usage_daily/);
+  assert.match(migration, /INSERT INTO \{\{FINOPS_SCHEMA\}\}\.fact_usage_daily/);
+  assert.match(migration, /FROM \{\{FINOPS_SCHEMA\}\}\.fact_usage_events/);
+  assert.match(migration, /NULLIF\(BTRIM\(requested_model\),''\)/);
+  assert.match(migration, /NULLIF\(BTRIM\(upstream_model\),''\)/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM)\s+public\./i);
+  assert.doesNotMatch(migration, /sub2api\.(?:usage_logs|accounts|settings)|credentials/i);
+});
+
+test('supplier monitoring migration stores only FinOps-owned encrypted portal state', () => {
+  const migration = read('migrations/016_supplier_monitoring.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_connections/s);
+  assert.match(migration, /credentials_ciphertext TEXT NOT NULL/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_keys/s);
+  assert.match(migration, /masked_key VARCHAR/);
+  assert.match(migration, /key_fingerprint VARCHAR/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_alert_events/s);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /\braw_key\b|\bapi_key\s+(?:TEXT|VARCHAR)/i);
+});

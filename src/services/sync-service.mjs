@@ -2,6 +2,7 @@ import Decimal from 'decimal.js/decimal.mjs';
 import { inTransaction } from '../db.mjs';
 import {
   calculateMultiplierCostCny,
+  effectiveObservedMultiplierAt,
   normalizeUpstreamBillingSnapshot,
 } from './cost-accounting.mjs';
 
@@ -758,7 +759,16 @@ export class SyncService {
           group_rate.id AS selling_rate_rule_id,
           fixed_period.id AS fixed_period_id,
           observation.id AS rate_observation_id,
-          observation.effective_rate_multiplier AS observed_upstream_multiplier
+          observation.status AS observation_status,
+          observation.source_kind AS observation_source_kind,
+          observation.fresh_until AS observation_fresh_until,
+          observation.resolved_rate_multiplier AS observed_resolved_multiplier,
+          observation.effective_rate_multiplier AS observed_upstream_multiplier,
+          observation.peak_rate_enabled AS observed_peak_enabled,
+          observation.peak_rate_multiplier AS observed_peak_multiplier,
+          observation.timezone AS observed_timezone,
+          observation.snapshot_data->>'peak_start' AS observed_peak_start,
+          observation.snapshot_data->>'peak_end' AS observed_peak_end
         FROM ${this.schema}.fact_usage_events f
         LEFT JOIN ${this.schema}.dim_accounts account
           ON account.source_account_id=f.source_account_id
@@ -797,7 +807,8 @@ export class SyncService {
           LIMIT 1
         ) fixed_period ON TRUE
         LEFT JOIN LATERAL (
-          SELECT o.id,o.status,o.effective_rate_multiplier,o.fresh_until
+          SELECT o.id,o.status,o.source_kind,o.resolved_rate_multiplier,o.effective_rate_multiplier,
+                 o.peak_rate_enabled,o.peak_rate_multiplier,o.timezone,o.snapshot_data,o.fresh_until
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
             AND GREATEST(
@@ -851,12 +862,26 @@ export class SyncService {
           upstreamMultiplier = row.manual_upstream_multiplier;
           upstreamSource = upstreamMultiplier === null || upstreamMultiplier === undefined ? '' : 'manual_rule';
         } else if (costMode === 'probe_multiplier') {
-          if (row.source_account_multiplier !== null && row.source_account_multiplier !== undefined) {
+          const occurredAt = new Date(row.occurred_at).getTime();
+          const freshUntil = new Date(row.observation_fresh_until || 0).getTime();
+          const observationFresh = row.observation_status === 'ok'
+            && Number.isFinite(occurredAt) && Number.isFinite(freshUntil) && freshUntil > occurredAt;
+          const observedMultiplier = observationFresh ? effectiveObservedMultiplierAt({
+            resolvedRateMultiplier: row.observed_resolved_multiplier,
+            effectiveRateMultiplier: row.observed_upstream_multiplier,
+            peakRateEnabled: Boolean(row.observed_peak_enabled),
+            peakStart: row.observed_peak_start,
+            peakEnd: row.observed_peak_end,
+            peakRateMultiplier: row.observed_peak_multiplier,
+            timezone: row.observed_timezone,
+          }, row.occurred_at) : null;
+          if (observedMultiplier !== null) {
+            upstreamMultiplier = observedMultiplier;
+            upstreamSource = row.observation_source_kind === 'supplier_direct_probe'
+              ? 'supplier_direct_probe' : 'probe_observation';
+          } else if (row.source_account_multiplier !== null && row.source_account_multiplier !== undefined) {
             upstreamMultiplier = row.source_account_multiplier;
             upstreamSource = 'usage_log_snapshot';
-          } else if (row.observed_upstream_multiplier !== null && row.observed_upstream_multiplier !== undefined) {
-            upstreamMultiplier = row.observed_upstream_multiplier;
-            upstreamSource = 'probe_observation';
           }
         }
         if (upstreamMultiplier !== null && upstreamMultiplier !== undefined && decimal(upstreamMultiplier).eq(0)) {
@@ -887,7 +912,8 @@ export class SyncService {
           cost_profile_id: row.cost_profile_id || null,
           account_cost_rule_id: row.account_cost_rule_id || null,
           selling_rate_rule_id: row.selling_rate_rule_id || null,
-          rate_observation_id: row.rate_observation_id || null,
+          rate_observation_id: upstreamSource === 'probe_observation' || upstreamSource === 'supplier_direct_probe'
+            ? row.rate_observation_id || null : null,
           selling_multiplier: row.selling_multiplier ?? null,
           upstream_multiplier: upstreamMultiplier,
           cny_per_reference_unit: row.cny_per_reference_unit ?? null,
@@ -895,7 +921,7 @@ export class SyncService {
           cost_status: calculation.status,
           calculated_cost_cny: calculation.costCny,
           snapshot_origin: origin,
-          pricing_version: 1,
+          pricing_version: 2,
         };
       });
       for (let offset = 0; offset < rows.length; offset += MAX_COST_SNAPSHOT_ROWS_PER_INSERT) {
@@ -1251,11 +1277,16 @@ export class SyncService {
         standard_cost_usd_reference,user_charge_cny,
         recognized_revenue_cny)
       SELECT (occurred_at AT TIME ZONE $2)::date,source_user_id,source_api_key_id,source_account_id,source_group_id,
-        model,billing_mode,billing_type,COUNT(*),SUM(input_tokens),SUM(output_tokens),SUM(cache_creation_tokens),SUM(cache_read_tokens),
+        COALESCE(NULLIF(BTRIM(model),''),NULLIF(BTRIM(requested_model),''),
+          NULLIF(BTRIM(upstream_model),''),'未标注模型'),
+        billing_mode,billing_type,COUNT(*),SUM(input_tokens),SUM(output_tokens),SUM(cache_creation_tokens),SUM(cache_read_tokens),
         SUM(standard_cost_usd_reference),SUM(user_charge_cny),SUM(recognized_revenue_cny)
       FROM ${this.schema}.fact_usage_events
       WHERE (occurred_at AT TIME ZONE $2)::date=ANY($1::date[])
-      GROUP BY (occurred_at AT TIME ZONE $2)::date,source_user_id,source_api_key_id,source_account_id,source_group_id,model,billing_mode,billing_type`,
+      GROUP BY (occurred_at AT TIME ZONE $2)::date,source_user_id,source_api_key_id,source_account_id,source_group_id,
+        COALESCE(NULLIF(BTRIM(model),''),NULLIF(BTRIM(requested_model),''),
+          NULLIF(BTRIM(upstream_model),''),'未标注模型'),
+        billing_mode,billing_type`,
     [days, this.config.timezone]);
   }
 

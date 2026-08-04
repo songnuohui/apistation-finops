@@ -100,6 +100,27 @@ test('self-use balance whitelist excludes only reported balances, not usage rank
   assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });
 
+test('self-use balance whitelist excludes non-cash credits from overview and details', async () => {
+  const repository = new DemoRepository(config);
+  const selfUseAccount = repository.users[0];
+  const regularAccount = repository.users[1];
+  repository.nonCashBalanceCredits.push({
+    id: 2, sourceTable: 'redeem_codes', sourceId: 'DEMO-002', type: 'redeem', amountCny: 3,
+    occurredAt: new Date().toISOString(), action: 'used', redeemType: 'balance',
+    sourceUserId: regularAccount.id, email: regularAccount.email, username: regularAccount.username,
+  });
+  selfUseAccount.excludeFromBalanceStats = true;
+
+  const dashboard = await repository.getOverviewDashboard();
+  const credits = await repository.listNonCashBalanceCredits({ page: 1, pageSize: 20 });
+
+  assert.equal(dashboard.totals.nonCashBalanceCreditCny, 3);
+  assert.equal(dashboard.totals.nonCashBalanceCreditCount, 1);
+  assert.deepEqual(credits.summary, { amountCny: 3, events: 1 });
+  assert.deepEqual(credits.items.map((item) => item.sourceId), ['DEMO-002']);
+  assert.ok(dashboard.rankings.userConsumption.some((item) => item.id === selfUseAccount.id));
+});
+
 test('supplier overview groups account economics and exposes purchase rows', async () => {
   const repository = new DemoRepository(config);
   const overview = await repository.getSupplierOverview({ search: 'Cloud Seats' });
@@ -109,6 +130,51 @@ test('supplier overview groups account economics and exposes purchase rows', asy
   assert.ok(overview.items[0].purchaseSpend > 0);
   assert.equal(overview.purchases.length, 2);
   assert.equal(overview.summary.supplierCount, 1);
+});
+
+test('demo supplier connections support create, edit, sync, account links, and alert acknowledgement', async () => {
+  const repository = new DemoRepository(config);
+  const input = {
+    supplierName: 'Demo Provider', name: 'main portal', adapterType: 'sub2api', baseUrl: 'https://supplier.example.test',
+    authMode: 'password', credentialLabel: 'operator@example.test', enabled: true,
+    inventoryIntervalMinutes: 15, activeCheckEnabled: true, activeCheckLimit: 10,
+    lowBalanceThreshold: null, balanceCurrency: 'USD',
+    credentials: {
+      username: 'operator', password: 'secret', accessToken: '', apiKey: '', totpSecret: '',
+      keyName: '', rateMultiplier: null, balance: null, balanceCurrency: '',
+    },
+  };
+
+  const created = await repository.createSupplierConnection(input, 'demo-encrypted');
+  assert.equal(created.credentialsCiphertext, undefined);
+  assert.equal(created.connectionStatus, 'pending');
+
+  const sync = await repository.syncSupplierConnection(created.id);
+  assert.equal(sync.ok, true);
+  const details = await repository.getSupplierConnectionDetails(created.id);
+  assert.equal(details.connection.connectionStatus, 'ok');
+  assert.equal(details.keys.length, 1);
+  assert.equal(details.checks.length, 1);
+
+  const key = details.keys[0];
+  await repository.setSupplierKeyAccountLink(key.id, 2742, true);
+  const linked = await repository.getSupplierConnectionDetails(created.id);
+  assert.deepEqual(linked.keys[0].accountLinks, [{ accountId: 2742, accountName: 'PaulaAcacia8221+see2@outlook.com' }]);
+
+  const updated = await repository.updateSupplierConnection(created.id, {
+    ...input,
+    name: 'updated portal',
+    authMode: 'access_token',
+    credentials: { ...input.credentials, username: '', password: '', accessToken: 'token' },
+  }, 'demo-updated');
+  assert.equal(updated.name, 'updated portal');
+  assert.equal(updated.authMode, 'access_token');
+  assert.equal((await repository.getSupplierConnection(created.id, { includeCiphertext: true })).credentialsCiphertext, 'demo-updated');
+
+  const initial = await repository.getSupplierConnectionDetails(1);
+  const acknowledged = await repository.acknowledgeSupplierAlert(initial.alerts[0].id, 'demo-admin');
+  assert.equal(acknowledged.status, 'acknowledged');
+  assert.equal((await repository.getSupplierConnectionDetails(1)).connection.openAlertCount, 0);
 });
 
 test('sync details expose source-level health without errors', async () => {

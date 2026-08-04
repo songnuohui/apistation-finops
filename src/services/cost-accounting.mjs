@@ -183,6 +183,38 @@ export function calculateMultiplierCostCny({
   };
 }
 
+export function effectiveObservedMultiplierAt(observation, occurredAt) {
+  const resolved = finiteDecimal(observation?.resolvedRateMultiplier);
+  const fallback = finiteDecimal(observation?.effectiveRateMultiplier);
+  if (!resolved || resolved.lt(0)) return fallback && fallback.gte(0) ? fallback.toString() : null;
+  if (!observation?.peakRateEnabled) return resolved.toString();
+  const peak = finiteDecimal(observation?.peakRateMultiplier);
+  const start = String(observation?.peakStart || '');
+  const end = String(observation?.peakEnd || '');
+  const timezone = String(observation?.timezone || '');
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(start);
+  const endMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(end);
+  const at = new Date(occurredAt);
+  if (!peak || peak.lt(0) || !match || !endMatch || !timezone || !Number.isFinite(at.getTime())) {
+    return fallback && fallback.gte(0) ? fallback.toString() : null;
+  }
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(at);
+  } catch {
+    return fallback && fallback.gte(0) ? fallback.toString() : null;
+  }
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value);
+  const currentMinute = hour * 60 + minute;
+  const startMinute = Number(match[1]) * 60 + Number(match[2]);
+  const endMinute = Number(endMatch[1]) * 60 + Number(endMatch[2]);
+  if (startMinute >= endMinute) return fallback && fallback.gte(0) ? fallback.toString() : null;
+  return (currentMinute >= startMinute && currentMinute < endMinute ? resolved.mul(peak) : resolved).toString();
+}
+
 export function splitFixedCostCny(totalAmount, accountIds, strategy = 'equal', weights = {}) {
   const total = finiteDecimal(totalAmount);
   if (!total || total.lt(0) || !Array.isArray(accountIds) || !accountIds.length) {

@@ -108,6 +108,23 @@ function embedOrigins(value) {
   }))];
 }
 
+function hostList(value, name) {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  return [...new Set(raw.split(',').map((item) => item.trim()).filter(Boolean).map((item) => {
+    let parsed;
+    try {
+      parsed = new URL(item.includes('://') ? item : `https://${item}`);
+    } catch {
+      throw new Error(`invalid hostname in ${name}: ${item}`);
+    }
+    if (!parsed.hostname || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.port) {
+      throw new Error(`invalid hostname in ${name}: ${item}`);
+    }
+    return parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  }))];
+}
+
 export function loadConfig(env = process.env) {
   const sourceDatabaseUrl = env.SOURCE_DATABASE_URL?.trim() || '';
   const finopsDatabaseUrl = env.FINOPS_DATABASE_URL?.trim() || '';
@@ -133,6 +150,15 @@ export function loadConfig(env = process.env) {
   if (env.UPSTREAM_USD_TO_CNY_RATE?.trim()) {
     throw new Error('UPSTREAM_USD_TO_CNY_RATE is no longer supported; all FinOps accounting entries must be recorded in CNY');
   }
+  const supplierCredentialsKey = env.SUPPLIER_CREDENTIALS_KEY?.trim() || '';
+  const configuredSupplierBlockedHosts = hostList(env.SUPPLIER_BLOCKED_HOSTS, 'SUPPLIER_BLOCKED_HOSTS');
+  if (nodeEnv === 'production' && supplierCredentialsKey && !configuredSupplierBlockedHosts.length) {
+    throw new Error('SUPPLIER_BLOCKED_HOSTS is required in production when supplier monitoring is enabled');
+  }
+  const supplierBlockedHosts = [...new Set([
+    ...configuredSupplierBlockedHosts,
+    ...(authDisabled ? [] : [new URL(httpUrl(env.SUB2API_AUTH_URL, 'SUB2API_AUTH_URL')).hostname.toLowerCase()]),
+  ])];
 
   return Object.freeze({
     nodeEnv,
@@ -169,6 +195,11 @@ export function loadConfig(env = process.env) {
     sub2apiRedisConnectTimeoutMs: intValue(env.SUB2API_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
     sub2apiRedisRuntimeUserLimit: intValue(env.SUB2API_REDIS_RUNTIME_USER_LIMIT, 500, { min: 1, max: 5_000 }),
     runtimeSnapshotIntervalSeconds: intValue(env.RUNTIME_SNAPSHOT_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
+    supplierCredentialsKey,
+    supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
+    supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 60, { min: 30, max: 3600 }),
+    supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 10_000, { min: 2_000, max: 30_000 }),
+    supplierMaxResponseBytes: intValue(env.SUPPLIER_MAX_RESPONSE_BYTES, 1_048_576, { min: 65_536, max: 5_242_880 }),
     sessionSecret,
     sessionTtlSeconds: intValue(env.SESSION_TTL_SECONDS, 43_200, { min: 900, max: 86_400 }),
     sessionCookieSecure,

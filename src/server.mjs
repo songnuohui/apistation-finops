@@ -16,7 +16,7 @@ import { accountScope, cashScope, pagination, resolveRange, searchTerm, userBala
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
-  normalizeMonitorSettings,
+  normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
   normalizeUserBalanceStatsWhitelist,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
@@ -35,6 +35,8 @@ import {
   Sub2ApiAuthError,
 } from './services/sub2api-auth-service.mjs';
 import { SyncService } from './services/sync-service.mjs';
+import { SupplierMonitorService } from './services/supplier-monitor-service.mjs';
+import { normalizeSupplierBaseUrl } from './services/supplier-adapters.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const webRoot=path.join(root,'web');
@@ -43,6 +45,7 @@ const sourcePool=createSourcePool(config);
 const finopsPool=createFinopsPool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
+const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const pendingLogins=new PendingLoginStore();
@@ -209,6 +212,54 @@ async function api(request,res,url){
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
   })));
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/supplier-connections')return json(res,200,await cached('supplier-connections',config.listCacheTtlSeconds,()=>repository.listSupplierConnections({search:searchTerm(url.searchParams)})));
+  const supplierConnectionDetails=/^\/api\/supplier-connections\/(\d+)\/details$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierConnectionDetails){
+    return json(res,200,await repository.getSupplierConnectionDetails(Number(supplierConnectionDetails[1])));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/supplier-connections'){
+    if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
+    const input=normalizeSupplierConnection(await body(request));
+    input.baseUrl=normalizeSupplierBaseUrl(input.baseUrl,{blockedHosts:config.supplierBlockedHosts});
+    assertSupplierCredentials(input);
+    const ciphertext=config.demoMode?'demo-encrypted':supplierMonitorService.encryptCredentials(input.credentials);
+    const created=await repository.createSupplierConnection(input,ciphertext,auth.actor);
+    const sync=config.demoMode?await repository.syncSupplierConnection(created.id):await supplierMonitorService.syncConnection(created.id);
+    return json(res,201,{connection:await repository.getSupplierConnection(created.id),sync});
+  }
+  const supplierConnectionId=/^\/api\/supplier-connections\/(\d+)$/.exec(url.pathname);
+  if(request.method==='PATCH'&&supplierConnectionId){
+    if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
+    const id=Number(supplierConnectionId[1]);
+    const current=await repository.getSupplierConnection(id,{includeCiphertext:true});
+    const input=normalizeSupplierConnection(await body(request));
+    input.baseUrl=normalizeSupplierBaseUrl(input.baseUrl,{blockedHosts:config.supplierBlockedHosts});
+    const replaceCredentials=assertSupplierCredentials(input,{existing:true});
+    if(!replaceCredentials&&input.authMode!==current.authMode){
+      throw Object.assign(new Error('切换认证方式时必须重新填写访问凭据'),{statusCode:400});
+    }
+    const ciphertext=replaceCredentials?(config.demoMode?'demo-encrypted':supplierMonitorService.encryptCredentials(input.credentials)):current.credentialsCiphertext;
+    await repository.updateSupplierConnection(id,input,ciphertext,auth.actor);
+    const sync=input.enabled?(config.demoMode?await repository.syncSupplierConnection(id):await supplierMonitorService.syncConnection(id)):{ok:false,status:'disabled'};
+    return json(res,200,{connection:await repository.getSupplierConnection(id),sync});
+  }
+  const supplierConnectionSync=/^\/api\/supplier-connections\/(\d+)\/sync$/.exec(url.pathname);
+  if(request.method==='POST'&&supplierConnectionSync){
+    if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
+    const id=Number(supplierConnectionSync[1]);
+    await repository.getSupplierConnection(id);
+    const sync=config.demoMode?await repository.syncSupplierConnection(id):await supplierMonitorService.syncConnection(id,{throwOnError:true});
+    return json(res,200,{sync,connection:await repository.getSupplierConnection(id)});
+  }
+  const supplierKeyLink=/^\/api\/supplier-keys\/(\d+)\/account-link$/.exec(url.pathname);
+  if(request.method==='PATCH'&&supplierKeyLink){
+    const input=normalizeSupplierAccountLink(await body(request));
+    return json(res,200,await repository.setSupplierKeyAccountLink(Number(supplierKeyLink[1]),input.accountId,input.linked,auth.actor));
+  }
+  const supplierAlertAck=/^\/api\/supplier-alerts\/(\d+)\/acknowledge$/.exec(url.pathname);
+  if(request.method==='POST'&&supplierAlertAck){
+    return json(res,200,await repository.acknowledgeSupplierAlert(Number(supplierAlertAck[1]),auth.actor));
+  }
   if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams),scope:cashScope(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/non-cash-balance-credits')return json(res,200,await cached('non-cash-balance-credits',config.listCacheTtlSeconds,()=>repository.listNonCashBalanceCredits({...range(),...page()})));
   if(request.method==='GET'&&url.pathname==='/api/runtime'){
@@ -292,14 +343,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring']],
   );
-  if(migration.rowCount < 13)throw new Error('required FinOps migrations 002_cny_accounting through 014_operational_visibility are not applied');
+  if(migration.rowCount < 15)throw new Error('required FinOps migrations 002_cny_accounting through 016_supplier_monitoring are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };
@@ -344,8 +395,9 @@ const server=http.createServer(async(request,res)=>{
 async function start(){
   if(!config.demoMode)await assertDistinctDatabases(sourcePool,finopsPool);
   if(syncService&&config.syncEnabled){await syncService.validateSourceSchema();syncService.start();}
+  supplierMonitorService?.start();
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();supplierMonitorService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

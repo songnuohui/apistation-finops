@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   calculateMultiplierCostCny,
+  effectiveObservedMultiplierAt,
   normalizeUpstreamBillingSnapshot,
   splitFixedCostCny,
 } from '../src/services/cost-accounting.mjs';
@@ -62,6 +63,32 @@ test('probe snapshot keeps sanitized billing fields and excludes unrelated data'
   assert.equal(result.data.credentials, undefined);
   assert.equal(result.data.effective_rate_multiplier, '0.9');
   assert.match(result.snapshotKey, /^ok\|/);
+});
+
+test('observed multiplier is recalculated for the usage time in the declared timezone', () => {
+  const observation = {
+    resolvedRateMultiplier: '0.8',
+    effectiveRateMultiplier: '0.8',
+    peakRateEnabled: true,
+    peakStart: '09:00',
+    peakEnd: '18:00',
+    peakRateMultiplier: '1.5',
+    timezone: 'Asia/Shanghai',
+  };
+  assert.equal(effectiveObservedMultiplierAt(observation, '2026-07-31T02:00:00Z'), '1.2');
+  assert.equal(effectiveObservedMultiplierAt(observation, '2026-07-31T12:00:00Z'), '0.8');
+});
+
+test('invalid peak metadata falls back to the effective multiplier observed upstream', () => {
+  assert.equal(effectiveObservedMultiplierAt({
+    resolvedRateMultiplier: '0.8',
+    effectiveRateMultiplier: '1.2',
+    peakRateEnabled: true,
+    peakStart: '22:00',
+    peakEnd: '02:00',
+    peakRateMultiplier: '1.5',
+    timezone: 'Asia/Shanghai',
+  }, '2026-07-31T12:00:00Z'), '1.2');
 });
 
 test('bulk fixed cost allocation preserves the exact decimal total', () => {

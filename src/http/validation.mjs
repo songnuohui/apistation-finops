@@ -11,6 +11,8 @@ const CASH_TYPES = new Set([
   'subscription_renewal', 'affiliate_rebate', 'manual_adjustment', 'refund',
 ]);
 const DIRECTIONS = new Set(['in', 'out']);
+const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_compatible', 'custom']);
+const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'api_key']);
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -216,6 +218,68 @@ export function normalizeBulkUserBalanceStatsWhitelist(input) {
   return {
     userIds: idList(input.userIds, 'userIds'),
     excludeFromBalanceStats: booleanValue(input.excludeFromBalanceStats, 'excludeFromBalanceStats'),
+  };
+}
+
+export function normalizeSupplierConnection(input) {
+  const adapterType = enumValue(input.adapterType || 'auto', 'adapterType', SUPPLIER_ADAPTER_TYPES);
+  const authMode = enumValue(input.authMode || (adapterType === 'openai_compatible' ? 'api_key' : 'password'), 'authMode', SUPPLIER_AUTH_MODES);
+  const credentials = input.credentials && typeof input.credentials === 'object' && !Array.isArray(input.credentials)
+    ? input.credentials : {};
+  return {
+    supplierName: textValue(input.supplierName, 'supplierName', { max: 160 }),
+    name: textValue(input.name, 'name', { max: 160 }),
+    adapterType,
+    baseUrl: textValue(input.baseUrl, 'baseUrl', { max: 1000 }),
+    authMode,
+    credentialLabel: textValue(input.credentialLabel, 'credentialLabel', { required: false, max: 255 }),
+    enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
+    inventoryIntervalMinutes: input.inventoryIntervalMinutes === undefined
+      ? 10 : integerValue(input.inventoryIntervalMinutes, 'inventoryIntervalMinutes', { min: 5, max: 1440 }),
+    activeCheckEnabled: input.activeCheckEnabled === undefined ? true : booleanValue(input.activeCheckEnabled, 'activeCheckEnabled'),
+    activeCheckLimit: input.activeCheckLimit === undefined
+      ? 20 : integerValue(input.activeCheckLimit, 'activeCheckLimit', { min: 1, max: 100 }),
+    lowBalanceThreshold: optionalDecimal(input.lowBalanceThreshold, 'lowBalanceThreshold', { min: 0, allowZero: true }),
+    balanceCurrency: currencyValue(input.balanceCurrency || 'USD', 'balanceCurrency'),
+    credentials: {
+      username: textValue(credentials.username, 'credentials.username', { required: false, max: 255 }),
+      password: textValue(credentials.password, 'credentials.password', { required: false, max: 8192 }),
+      accessToken: textValue(credentials.accessToken, 'credentials.accessToken', { required: false, max: 16384 }),
+      apiKey: textValue(credentials.apiKey, 'credentials.apiKey', { required: false, max: 16384 }),
+      totpSecret: textValue(credentials.totpSecret, 'credentials.totpSecret', { required: false, max: 256 }),
+      keyName: textValue(credentials.keyName, 'credentials.keyName', { required: false, max: 200 }),
+      rateMultiplier: optionalDecimal(credentials.rateMultiplier, 'credentials.rateMultiplier', { min: 0, allowZero: false }),
+      balance: optionalDecimal(credentials.balance, 'credentials.balance', { min: 0, allowZero: true }),
+      balanceCurrency: credentials.balanceCurrency ? currencyValue(credentials.balanceCurrency, 'credentials.balanceCurrency') : '',
+    },
+  };
+}
+
+export function assertSupplierCredentials(input, { existing = false } = {}) {
+  const provided = Object.values(input.credentials).some((value) => value !== null && value !== '');
+  if (input.adapterType === 'openai_compatible' && input.authMode !== 'api_key') {
+    throw badRequest('openai_compatible requires api_key authentication');
+  }
+  if (['auto', 'sub2api', 'newapi'].includes(input.adapterType) && input.authMode === 'api_key') {
+    throw badRequest(`${input.adapterType} does not support api_key portal authentication`);
+  }
+  if (existing && !provided) return false;
+  if (input.authMode === 'password' && (!input.credentials.username || !input.credentials.password)) {
+    throw badRequest('password authentication requires username and password');
+  }
+  if (input.authMode === 'access_token' && !input.credentials.accessToken) {
+    throw badRequest('access_token authentication requires accessToken');
+  }
+  if (input.authMode === 'api_key' && !input.credentials.apiKey) {
+    throw badRequest('api_key authentication requires apiKey');
+  }
+  return true;
+}
+
+export function normalizeSupplierAccountLink(input) {
+  return {
+    accountId: optionalId(input.accountId, 'accountId') ?? (() => { throw badRequest('missing field: accountId'); })(),
+    linked: booleanValue(input.linked, 'linked'),
   };
 }
 
