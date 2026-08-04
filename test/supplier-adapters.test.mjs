@@ -168,3 +168,36 @@ test('NewAPI adapter handles password 2FA and does not request plaintext token k
     '/api/user/login', '/api/user/login/2fa',
   ]);
 });
+
+test('NewAPI adapter falls back to a login session cookie when no access token is returned', async () => {
+  const requests = [];
+  const registry = new SupplierAdapterRegistry(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      const parsed = new URL(url);
+      requests.push({ path: parsed.pathname, cookie: options.headers.Cookie || '', authorization: options.headers.Authorization || '' });
+      if (parsed.pathname === '/api/user/login') {
+        return new Response(JSON.stringify({ success: true, data: { username: 'legacy' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'set-cookie': 'session=legacy-session; Path=/' },
+        });
+      }
+      if (parsed.pathname === '/api/status') return json({ success: true, data: {
+        quota_per_unit: 1, quota_display_type: 'USD',
+      } });
+      if (parsed.pathname === '/api/user/self') return json({ success: true, data: { username: 'legacy', quota: 7 } });
+      if (parsed.pathname === '/api/user/self/groups') return json({ success: true, data: {} });
+      if (parsed.pathname === '/api/token/') return json({ success: true, data: { items: [], total: 0 } });
+      assert.fail(`unexpected request: ${parsed.pathname}`);
+    },
+  });
+  const snapshot = await registry.snapshot(
+    { adapterType: 'newapi', authMode: 'password', baseUrl: 'https://supplier.example.test' },
+    { username: 'legacy', password: 'secret' },
+  );
+  assert.equal(snapshot.accessToken, '');
+  assert.equal(snapshot.sessionCookie, 'session=legacy-session');
+  assert.equal(snapshot.balance, 7);
+  assert.ok(requests.filter((request) => ['/api/user/self', '/api/user/self/groups', '/api/token/'].includes(request.path))
+    .every((request) => request.cookie === 'session=legacy-session'));
+});

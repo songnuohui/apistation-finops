@@ -91,10 +91,13 @@ export class SupplierMonitorService {
       // Portal access tokens are short lived. Keep the latest token encrypted
       // in the FinOps connection so the next cycle can reuse it. Passwords
       // remain the recovery path after expiry or a 401/403 response.
-      if (connection.authMode === 'password' && snapshot.accessToken && this.repository.updateSupplierConnectionAccessToken) {
+      if (connection.authMode === 'password'
+        && (snapshot.accessToken || snapshot.sessionCookie)
+        && this.repository.updateSupplierConnectionAccessToken) {
         const nextCredentials = {
           ...credentials,
-          accessToken: snapshot.accessToken,
+          accessToken: snapshot.accessToken || '',
+          sessionCookie: snapshot.sessionCookie || '',
           accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
         };
         await this.repository.updateSupplierConnectionAccessToken(
@@ -130,9 +133,11 @@ export class SupplierMonitorService {
         keys: snapshot.keys.map(({ rawKey, ...key }) => key),
       };
       delete sanitizedSnapshot.accessToken;
+      delete sanitizedSnapshot.sessionCookie;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
       for (const key of snapshot.keys) key.rawKey = '';
       if ('accessToken' in snapshot) snapshot.accessToken = '';
+      if ('sessionCookie' in snapshot) snapshot.sessionCookie = '';
       return { ok: true, adapterType: snapshot.adapterType, keyCount: snapshot.keys.length, checked: checkResults.length };
     } catch (error) {
       const failure = publicError(error);

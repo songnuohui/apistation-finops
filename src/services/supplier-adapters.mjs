@@ -171,6 +171,26 @@ function rawKey(value) {
   return !key || key.includes('...') || key.includes('*') ? '' : key;
 }
 
+function responseSetCookies(headers) {
+  if (!headers) return [];
+  if (typeof headers.getSetCookie === 'function') return headers.getSetCookie();
+  const value = headers.get?.('set-cookie') ?? headers['set-cookie'];
+  if (Array.isArray(value)) return value;
+  return value ? [String(value)] : [];
+}
+
+function cookieHeader(setCookies) {
+  const values = Array.isArray(setCookies) ? setCookies : [setCookies];
+  const cookies = new Map();
+  for (const item of values) {
+    const pair = String(item || '').split(';', 1)[0].trim();
+    const separator = pair.indexOf('=');
+    if (separator <= 0) continue;
+    cookies.set(pair.slice(0, separator).trim(), pair.slice(separator + 1).trim());
+  }
+  return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
 function items(value) {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== 'object') return [];
@@ -309,7 +329,7 @@ export class SupplierHttpClient {
     this.dnsLookup = dnsLookup;
   }
 
-  async request(baseUrl, pathname, { method = 'GET', token = '', body, headers = {}, allowError = false } = {}) {
+  async request(baseUrl, pathname, { method = 'GET', token = '', cookie = '', body, headers = {}, allowError = false } = {}) {
     const requestPath = new URL(endpoint(baseUrl, pathname)).pathname;
     const stage = `${method} ${requestPath}`;
     const targets = await assertPublicSupplierUrl(baseUrl, this.dnsLookup, this.config.supplierBlockedHosts || []);
@@ -325,6 +345,7 @@ export class SupplierHttpClient {
         'Content-Length': Buffer.byteLength(serializedBody),
       }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { Cookie: cookie } : {}),
       ...headers,
     };
     try {
@@ -384,7 +405,12 @@ export class SupplierHttpClient {
           { httpStatus: response.status },
         );
       }
-      return { response, payload, latencyMs: Date.now() - startedAt };
+      return {
+        response,
+        payload,
+        setCookies: responseSetCookies(response.headers),
+        latencyMs: Date.now() - startedAt,
+      };
     } catch (error) {
       if (error instanceof SupplierAdapterError) {
         if (['timeout', 'request_failed'].includes(error.code)) {
@@ -507,26 +533,75 @@ async function sub2ApiSnapshot(connection, credentials, client) {
   }
 }
 
+function newApiLoginPayload(result) {
+  const payload = result?.payload;
+  if (result?.response && !result.response.ok && payload?.success !== false) {
+    const message = String(payload?.message || payload?.error?.message || `HTTP ${result.response.status}`).slice(0, 300);
+    throw new SupplierAdapterError('authentication_failed', message, {
+      statusCode: result.response.status === 403 ? 422 : 401,
+      httpStatus: result.response.status,
+    });
+  }
+  if (payload && typeof payload === 'object' && payload.success === false) {
+    const message = String(payload.message || payload.error?.message || 'supplier rejected login').slice(0, 300);
+    const turnstile = /turnstile|captcha|challenge|验证|验证码/i.test(message);
+    throw new SupplierAdapterError(
+      turnstile ? 'turnstile_required' : 'authentication_failed',
+      turnstile
+        ? 'NewAPI requires a Turnstile verification token; configure an access token or use a non-challenged login'
+        : message,
+      { statusCode: turnstile ? 422 : 401, httpStatus: result?.response?.status || 200 },
+    );
+  }
+  return unwrap(payload) || {};
+}
+
+function newApiAuthFromLogin(result, login) {
+  const accessToken = String(login.access_token || login.token || '').trim();
+  const sessionCookie = cookieHeader(result?.setCookies || []);
+  if (!accessToken && !sessionCookie) {
+    throw new SupplierAdapterError(
+      'authentication_failed',
+      'supplier login returned neither an access token nor a session cookie; check the NewAPI version and login protection',
+      { statusCode: 502, httpStatus: result?.response?.status || 0 },
+    );
+  }
+  return {
+    accessToken,
+    sessionCookie,
+    accessTokenExpiresAt: tokenExpiry(accessToken),
+  };
+}
+
 async function newApiToken(connection, credentials, client) {
   if (connection.authMode === 'access_token') {
     if (!credentials.accessToken) throw new SupplierAdapterError('missing_credentials', 'access token is not configured', { statusCode: 400 });
-    return credentials.accessToken;
+    return { accessToken: credentials.accessToken, sessionCookie: '' };
   }
   if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
     throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
   }
-  if (credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now())) {
-    return credentials.accessToken;
+  if ((credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now()))
+    || credentials.sessionCookie) {
+    return {
+      accessToken: credentials.accessToken || '',
+      sessionCookie: credentials.sessionCookie || '',
+      accessTokenExpiresAt: credentials.accessTokenExpiresAt || null,
+    };
   }
-  const login = unwrap((await client.request(connection.baseUrl, '/api/user/login', {
+  const result = await client.request(connection.baseUrl, '/api/user/login', {
     method: 'POST', body: { username: credentials.username, password: credentials.password },
-  })).payload) || {};
-  if (!login.require_2fa) return login.access_token || login.token;
+    allowError: true,
+  });
+  const login = newApiLoginPayload(result);
+  if (!login.require_2fa) return newApiAuthFromLogin(result, login);
   if (!credentials.totpSecret) throw new SupplierAdapterError('two_factor_required', 'TOTP secret is required for this supplier account');
-  const verified = unwrap((await client.request(connection.baseUrl, '/api/user/login/2fa', {
+  const verifiedResult = await client.request(connection.baseUrl, '/api/user/login/2fa', {
     method: 'POST', body: { flow_token: login.flow_token, code: totpCode(credentials.totpSecret) },
-  })).payload) || {};
-  return verified.access_token || verified.token;
+    allowError: true,
+  });
+  const verified = newApiLoginPayload(verifiedResult);
+  return newApiAuthFromLogin(verifiedResult, verified);
 }
 
 function newApiQuotaConverter(site) {
@@ -557,12 +632,15 @@ function newApiQuotaConverter(site) {
   return { currency: 'QUOTA', convert: number };
 }
 
-async function newApiSnapshotWithToken(connection, credentials, client, accessToken) {
-  if (!accessToken) throw new SupplierAdapterError('authentication_failed', 'supplier login did not return an access token');
+async function newApiSnapshotWithToken(connection, credentials, client, auth) {
+  const accessToken = auth?.accessToken || '';
+  const sessionCookie = auth?.sessionCookie || '';
+  if (!accessToken && !sessionCookie) throw new SupplierAdapterError('authentication_failed', 'supplier authentication did not return a usable token or session');
+  const authOptions = { token: accessToken, cookie: sessionCookie };
   const [statusResult, profileResult, groupsResult] = await Promise.all([
     client.request(connection.baseUrl, '/api/status'),
-    client.request(connection.baseUrl, '/api/user/self', { token: accessToken }),
-    client.request(connection.baseUrl, '/api/user/self/groups', { token: accessToken }),
+    client.request(connection.baseUrl, '/api/user/self', authOptions),
+    client.request(connection.baseUrl, '/api/user/self/groups', authOptions),
   ]);
   const site = unwrap(statusResult.payload) || {};
   const profile = unwrap(profileResult.payload) || {};
@@ -572,7 +650,7 @@ async function newApiSnapshotWithToken(connection, credentials, client, accessTo
   let page = 1;
   let total = 0;
   do {
-    const result = unwrap((await client.request(connection.baseUrl, `/api/token/?p=${page}&size=100`, { token: accessToken })).payload) || {};
+    const result = unwrap((await client.request(connection.baseUrl, `/api/token/?p=${page}&size=100`, authOptions)).payload) || {};
     const listed = items(result);
     for (const key of listed) {
       const group = String(key.group || '');
@@ -611,18 +689,19 @@ async function newApiSnapshotWithToken(connection, credentials, client, accessTo
     balanceCurrency: quota.currency,
     keys,
     accessToken,
-    accessTokenExpiresAt: tokenExpiry(accessToken),
+    sessionCookie,
+    accessTokenExpiresAt: auth?.accessTokenExpiresAt || tokenExpiry(accessToken),
   };
 }
 
 async function newApiSnapshot(connection, credentials, client) {
-  let accessToken = await newApiToken(connection, credentials, client);
+  let auth = await newApiToken(connection, credentials, client);
   try {
-    return await newApiSnapshotWithToken(connection, credentials, client, accessToken);
+    return await newApiSnapshotWithToken(connection, credentials, client, auth);
   } catch (error) {
-    if (connection.authMode === 'password' && credentials.accessToken && error?.code === 'authentication_failed') {
-      accessToken = await newApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0 }, client);
-      return newApiSnapshotWithToken(connection, credentials, client, accessToken);
+    if (connection.authMode === 'password' && (credentials.accessToken || credentials.sessionCookie) && error?.code === 'authentication_failed') {
+      auth = await newApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0, sessionCookie: '' }, client);
+      return newApiSnapshotWithToken(connection, credentials, client, auth);
     }
     throw error;
   }
