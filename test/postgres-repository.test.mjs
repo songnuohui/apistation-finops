@@ -148,6 +148,9 @@ test('overview consumption rankings and model breakdown expose displayable model
   assert.match(usageBreakdown, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
   assert.match(usageBreakdown, /JOIN "finops"\.fact_usage_events f ON f\.source_usage_id=snapshot\.source_usage_id/);
   assert.match(usageBreakdown, /NULLIF\(BTRIM\(f\.requested_model\),''\)/);
+  assert.match(usageBreakdown, /SUM\(snapshot\.calculated_cost_cny\) FILTER \(WHERE snapshot\.cost_status='priced'\)/);
+  assert.match(usageBreakdown, /SUM\(snapshot\.user_charge_cny\) FILTER \(\s*WHERE snapshot\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
+  assert.match(usageBreakdown, /MAX\(snapshot\.cost_mode\) AS cost_mode/);
 });
 
 test('usage event details are read from FinOps facts with searchable model fallback and immutable cost status', async () => {

@@ -555,11 +555,11 @@ export class PostgresRepository {
         SELECT COALESCE(NULLIF(BTRIM(f.model),''),NULLIF(BTRIM(f.requested_model),''),
                  NULLIF(BTRIM(f.upstream_model),''),'未标注模型') AS model,
                snapshot.source_account_id,
-               COALESCE(SUM(calculated_cost_cny) FILTER (WHERE cost_status='priced'),0) AS multiplier_cost_cny,
-               COALESCE(SUM(user_charge_cny) FILTER (
-                 WHERE cost_status NOT IN ('priced','free','fixed_cost')
-               ),0) AS unpriced_user_charge_cny,
-               MAX(cost_mode) AS cost_mode
+               COALESCE(SUM(snapshot.calculated_cost_cny) FILTER (WHERE snapshot.cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(snapshot.user_charge_cny) FILTER (
+                  WHERE snapshot.cost_status NOT IN ('priced','free','fixed_cost')
+                ),0) AS unpriced_user_charge_cny,
+               MAX(snapshot.cost_mode) AS cost_mode
         FROM ${this.schema}.usage_cost_facts snapshot
         JOIN ${this.schema}.fact_usage_events f ON f.source_usage_id=snapshot.source_usage_id
         WHERE snapshot.occurred_at >= $3 AND snapshot.occurred_at < $4
