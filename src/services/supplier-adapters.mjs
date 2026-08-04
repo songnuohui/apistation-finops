@@ -559,6 +559,15 @@ function newApiLoginPayload(result) {
 function newApiAuthFromLogin(result, login) {
   const accessToken = String(login.access_token || login.token || '').trim();
   const sessionCookie = cookieHeader(result?.setCookies || []);
+  const userIdCandidates = [
+    login.id,
+    login.user?.id,
+    login.user_id,
+    login.userId,
+  ];
+  const userId = userIdCandidates
+    .map((value) => String(value ?? '').trim())
+    .find((value) => /^\d+$/.test(value) && Number(value) > 0) || '';
   if (!accessToken && !sessionCookie) {
     throw new SupplierAdapterError(
       'authentication_failed',
@@ -566,9 +575,17 @@ function newApiAuthFromLogin(result, login) {
       { statusCode: 502, httpStatus: result?.response?.status || 0 },
     );
   }
+  if (sessionCookie && !accessToken && !userId) {
+    throw new SupplierAdapterError(
+      'authentication_failed',
+      'NewAPI login returned a session cookie without the user ID required by this supplier',
+      { statusCode: 502, httpStatus: result?.response?.status || 0 },
+    );
+  }
   return {
     accessToken,
     sessionCookie,
+    userId,
     accessTokenExpiresAt: tokenExpiry(accessToken),
   };
 }
@@ -576,16 +593,17 @@ function newApiAuthFromLogin(result, login) {
 async function newApiToken(connection, credentials, client) {
   if (connection.authMode === 'access_token') {
     if (!credentials.accessToken) throw new SupplierAdapterError('missing_credentials', 'access token is not configured', { statusCode: 400 });
-    return { accessToken: credentials.accessToken, sessionCookie: '' };
+    return { accessToken: credentials.accessToken, sessionCookie: '', userId: '' };
   }
   if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
     throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
   }
   if ((credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now()))
-    || credentials.sessionCookie) {
+    || (credentials.sessionCookie && credentials.userId)) {
     return {
       accessToken: credentials.accessToken || '',
       sessionCookie: credentials.sessionCookie || '',
+      userId: String(credentials.userId || '').trim(),
       accessTokenExpiresAt: credentials.accessTokenExpiresAt || null,
     };
   }
@@ -635,8 +653,13 @@ function newApiQuotaConverter(site) {
 async function newApiSnapshotWithToken(connection, credentials, client, auth) {
   const accessToken = auth?.accessToken || '';
   const sessionCookie = auth?.sessionCookie || '';
+  const userId = String(auth?.userId || '').trim();
   if (!accessToken && !sessionCookie) throw new SupplierAdapterError('authentication_failed', 'supplier authentication did not return a usable token or session');
-  const authOptions = { token: accessToken, cookie: sessionCookie };
+  const authOptions = {
+    token: accessToken,
+    cookie: sessionCookie,
+    ...(userId ? { headers: { 'New-Api-User': userId } } : {}),
+  };
   const [statusResult, profileResult, groupsResult] = await Promise.all([
     client.request(connection.baseUrl, '/api/status'),
     client.request(connection.baseUrl, '/api/user/self', authOptions),
@@ -690,6 +713,7 @@ async function newApiSnapshotWithToken(connection, credentials, client, auth) {
     keys,
     accessToken,
     sessionCookie,
+    userId,
     accessTokenExpiresAt: auth?.accessTokenExpiresAt || tokenExpiry(accessToken),
   };
 }
@@ -700,7 +724,9 @@ async function newApiSnapshot(connection, credentials, client) {
     return await newApiSnapshotWithToken(connection, credentials, client, auth);
   } catch (error) {
     if (connection.authMode === 'password' && (credentials.accessToken || credentials.sessionCookie) && error?.code === 'authentication_failed') {
-      auth = await newApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0, sessionCookie: '' }, client);
+      auth = await newApiToken(connection, {
+        ...credentials, accessToken: '', accessTokenExpiresAt: 0, sessionCookie: '', userId: '',
+      }, client);
       return newApiSnapshotWithToken(connection, credentials, client, auth);
     }
     throw error;

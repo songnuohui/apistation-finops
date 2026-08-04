@@ -175,9 +175,14 @@ test('NewAPI adapter falls back to a login session cookie when no access token i
     dnsLookup: publicDns,
     fetchImpl: async (url, options) => {
       const parsed = new URL(url);
-      requests.push({ path: parsed.pathname, cookie: options.headers.Cookie || '', authorization: options.headers.Authorization || '' });
+      requests.push({
+        path: parsed.pathname,
+        cookie: options.headers.Cookie || '',
+        authorization: options.headers.Authorization || '',
+        userId: options.headers['New-Api-User'] || '',
+      });
       if (parsed.pathname === '/api/user/login') {
-        return new Response(JSON.stringify({ success: true, data: { username: 'legacy' } }), {
+        return new Response(JSON.stringify({ success: true, data: { id: 42, username: 'legacy' } }), {
           status: 200,
           headers: { 'content-type': 'application/json', 'set-cookie': 'session=legacy-session; Path=/' },
         });
@@ -197,7 +202,33 @@ test('NewAPI adapter falls back to a login session cookie when no access token i
   );
   assert.equal(snapshot.accessToken, '');
   assert.equal(snapshot.sessionCookie, 'session=legacy-session');
+  assert.equal(snapshot.userId, '42');
   assert.equal(snapshot.balance, 7);
   assert.ok(requests.filter((request) => ['/api/user/self', '/api/user/self/groups', '/api/token/'].includes(request.path))
     .every((request) => request.cookie === 'session=legacy-session'));
+  assert.ok(requests.filter((request) => ['/api/user/self', '/api/user/self/groups', '/api/token/'].includes(request.path))
+    .every((request) => request.userId === '42'));
+});
+
+test('NewAPI cookie login fails clearly when the legacy user ID is missing', async () => {
+  const registry = new SupplierAdapterRegistry(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/api/user/login') {
+        return new Response(JSON.stringify({ success: true, data: { username: 'legacy' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'set-cookie': 'session=legacy-session; Path=/' },
+        });
+      }
+      assert.fail(`unexpected request: ${parsed.pathname}`);
+    },
+  });
+  await assert.rejects(
+    registry.snapshot(
+      { adapterType: 'newapi', authMode: 'password', baseUrl: 'https://supplier.example.test' },
+      { username: 'legacy', password: 'secret' },
+    ),
+    (error) => error.code === 'authentication_failed' && /user ID required/.test(error.message),
+  );
 });

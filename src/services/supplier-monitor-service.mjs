@@ -98,6 +98,7 @@ export class SupplierMonitorService {
           ...credentials,
           accessToken: snapshot.accessToken || '',
           sessionCookie: snapshot.sessionCookie || '',
+          userId: snapshot.userId || '',
           accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
         };
         await this.repository.updateSupplierConnectionAccessToken(
@@ -134,10 +135,12 @@ export class SupplierMonitorService {
       };
       delete sanitizedSnapshot.accessToken;
       delete sanitizedSnapshot.sessionCookie;
+      delete sanitizedSnapshot.userId;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
       for (const key of snapshot.keys) key.rawKey = '';
       if ('accessToken' in snapshot) snapshot.accessToken = '';
       if ('sessionCookie' in snapshot) snapshot.sessionCookie = '';
+      if ('userId' in snapshot) snapshot.userId = '';
       return { ok: true, adapterType: snapshot.adapterType, keyCount: snapshot.keys.length, checked: checkResults.length };
     } catch (error) {
       const failure = publicError(error);
