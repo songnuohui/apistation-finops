@@ -170,3 +170,12 @@ test('supplier monitoring migration stores only FinOps-owned encrypted portal st
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
   assert.doesNotMatch(migration, /\braw_key\b|\bapi_key\s+(?:TEXT|VARCHAR)/i);
 });
+
+test('supplier key cost rules remain FinOps-owned and reference only sanitized key inventory', () => {
+  const migration = read('migrations/017_supplier_key_cost_rules.sql');
+  assert.match(migration, /ALTER TABLE .*account_cost_rules/s);
+  assert.match(migration, /supplier_key_id BIGINT/);
+  assert.match(migration, /REFERENCES .*supplier_keys\(id\)/s);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /credentials|raw_key|api_key\s+(?:TEXT|VARCHAR)/i);
+});

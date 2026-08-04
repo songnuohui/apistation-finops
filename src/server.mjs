@@ -266,7 +266,13 @@ async function api(request,res,url){
   const supplierKeyLink=/^\/api\/supplier-keys\/(\d+)\/account-link$/.exec(url.pathname);
   if(request.method==='PATCH'&&supplierKeyLink){
     const input=normalizeSupplierAccountLink(await body(request));
-    return json(res,200,await repository.setSupplierKeyAccountLink(Number(supplierKeyLink[1]),input.accountId,input.linked,auth.actor));
+    const link=await repository.setSupplierKeyAccountLink(Number(supplierKeyLink[1]),input.accountId,input.linked,auth.actor);
+    const sync=input.linked
+      ? config.demoMode
+        ? await repository.syncSupplierConnection(link.connectionId)
+        : await supplierMonitorService.syncConnection(link.connectionId)
+      : null;
+    return json(res,200,{...link,sync});
   }
   const supplierAlertAck=/^\/api\/supplier-alerts\/(\d+)\/acknowledge$/.exec(url.pathname);
   if(request.method==='POST'&&supplierAlertAck){
@@ -358,14 +364,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules']],
   );
-  if(migration.rowCount < 15)throw new Error('required FinOps migrations 002_cny_accounting through 016_supplier_monitoring are not applied');
+  if(migration.rowCount < 16)throw new Error('required FinOps migrations 002_cny_accounting through 017_supplier_key_cost_rules are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

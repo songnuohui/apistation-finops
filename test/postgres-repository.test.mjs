@@ -669,6 +669,65 @@ test('current-day multiplier correction replaces every open version from local m
   assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
 });
 
+test('linking an active Sub2API supplier key creates a key-bound automatic cost rule', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('FROM "finops".supplier_keys k') && text.includes('FOR UPDATE OF k')) {
+        return {
+          rows: [{
+            id: '77', connection_id: '9', external_key_id: '596', name: 'upstream-key', masked_key: 'sk-...test',
+            status: 'active', removed_at: null, last_check_status: 'ok',
+            last_check_at: '2026-08-04T08:00:00.000Z', adapter_type: 'sub2api',
+            detected_adapter_type: 'sub2api', enabled: true, supplier_name: 'Provider A',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT source_account_id FROM "finops".dim_accounts')) {
+        return { rows: [{ source_account_id: '8' }], rowCount: 1 };
+      }
+      if (text.includes('FROM "finops".supplier_account_links') && text.includes('FOR UPDATE')) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('FROM "finops".account_cost_periods')) return { rows: [], rowCount: 0 };
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return {
+          rows: [{
+            now_at: '2026-08-04T08:05:00.000Z',
+            day_start: '2026-08-03T16:00:00.000Z',
+            has_multiplier_before_today: false,
+            first_today_multiplier_rule_id: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT *') && text.includes('account_cost_rules') && text.includes('FOR UPDATE')) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) {
+        return { rows: [{ id: '55', effective_from: params[7], supplier_key_id: params[11] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+
+  const result = await repository.setSupplierKeyAccountLink(77, 8, true, 'finance@example.com');
+
+  assert.equal(result.connectionId, 9);
+  assert.equal(result.costMode, 'probe_multiplier');
+  const linkInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_account_links'));
+  assert.deepEqual(linkInsert.params, [77, 8, 'finance@example.com']);
+  const ruleInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
+  assert.equal(ruleInsert.params[2], 'probe_multiplier');
+  assert.equal(ruleInsert.params[11], 77);
+  const accountUpdate = queries.find((query) => query.text.includes('SET cost_profile_id=NULL'));
+  assert.deepEqual(accountUpdate.params, [8, 'Provider A', 'upstream-key · ID 596']);
+});
+
 test('cost archive finalizes only FinOps snapshots and writes an audit event', async () => {
   const queries = [];
   const client = {

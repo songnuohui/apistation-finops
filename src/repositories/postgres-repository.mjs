@@ -10,6 +10,15 @@ function nullableNumber(value) {
   return value === null || value === undefined ? null : Number(value);
 }
 
+function supplierKeyPurchaseBatch(row) {
+  const externalId = String(row?.external_key_id ?? row?.externalId ?? '').trim();
+  const identity = String(row?.name || '').trim()
+    || String(row?.masked_key ?? row?.maskedKey ?? '').trim()
+    || (externalId ? `密钥 ${externalId}` : '供应商密钥');
+  const suffix = externalId && !identity.includes(externalId) ? ` · ID ${externalId}` : '';
+  return `${identity}${suffix}`.slice(0, 120);
+}
+
 function supplierConnection(row, { includeCiphertext = false } = {}) {
   if (!row) return null;
   const result = {
@@ -1117,16 +1126,24 @@ export class PostgresRepository {
                COALESCE(rule.basis_mode,cp.basis_mode,'revenue_backsolve') AS basis_mode,
                COALESCE(rule.cny_per_reference_unit,cp.cny_per_reference_unit) AS cny_per_reference_unit,
                COALESCE(
-                 CASE
-                   WHEN rule.cost_mode='manual_multiplier' AND rule.upstream_multiplier IS NOT NULL THEN 'manual_rule'
-                   WHEN rule.cost_mode='probe_multiplier' AND probe.status='ok' AND probe.fresh_until>NOW() THEN 'probe_snapshot'
-                   ELSE NULL
-                 END,
+                  CASE
+                    WHEN rule.cost_mode='manual_multiplier' AND rule.upstream_multiplier IS NOT NULL THEN 'manual_rule'
+                    WHEN rule.cost_mode='probe_multiplier' AND probe.status='ok' AND probe.fresh_until>NOW()
+                      THEN CASE WHEN probe.source_kind='supplier_direct_probe' THEN 'supplier_direct_probe' ELSE 'probe_snapshot' END
+                    ELSE NULL
+                  END,
                  NULLIF(m.upstream_multiplier_source,''),
                  CASE WHEN probe.status='ok' AND probe.fresh_until>NOW() THEN 'probe_snapshot' ELSE '' END
                ) AS upstream_multiplier_source,
-              probe.status AS probe_status,probe.observed_at AS probe_observed_at,probe.fresh_until AS probe_fresh_until,
-              COALESCE(c.cost_record_count,0) AS cost_record_count,
+               probe.status AS probe_status,probe.source_kind AS probe_source_kind,
+               probe.observed_at AS probe_observed_at,probe.fresh_until AS probe_fresh_until,
+               supplier_link.supplier_key_id,supplier_link.created_at AS supplier_key_linked_at,
+               linked_key.name AS supplier_key_name,linked_key.masked_key AS supplier_key_masked,
+               linked_key.group_name AS supplier_key_group_name,linked_key.rate_multiplier AS supplier_key_inventory_multiplier,
+               linked_key.last_check_status AS supplier_key_check_status,linked_key.last_check_at AS supplier_key_check_at,
+               linked_connection.id AS supplier_connection_id,linked_connection.name AS supplier_connection_name,
+               linked_supplier.name AS linked_supplier_name,
+               COALESCE(c.cost_record_count,0) AS cost_record_count,
               period.id AS current_cost_period_id,period.cost_profile_id AS current_cost_profile_id,
               period.original_amount AS current_original_amount,period.fee_amount AS current_fee_amount,
               period.tax_amount AS current_tax_amount,period.effective_from AS current_effective_from,
@@ -1141,13 +1158,21 @@ export class PostgresRepository {
       LEFT JOIN usage u ON u.source_account_id=a.source_account_id
       LEFT JOIN costs c ON c.source_account_id=a.source_account_id
       LEFT JOIN multiplier_costs m ON m.source_account_id=a.source_account_id
-        LEFT JOIN LATERAL (
+      LEFT JOIN LATERAL (
         SELECT r.*
         FROM ${this.schema}.account_cost_rules r
         WHERE r.source_account_id=a.source_account_id AND r.status='active'
           AND (r.effective_to IS NULL OR r.effective_to > NOW())
         ORDER BY r.effective_from DESC,r.id DESC LIMIT 1
       ) rule ON TRUE
+      LEFT JOIN ${this.schema}.supplier_account_links supplier_link
+        ON supplier_link.source_account_id=a.source_account_id
+      LEFT JOIN ${this.schema}.supplier_keys linked_key
+        ON linked_key.id=supplier_link.supplier_key_id
+      LEFT JOIN ${this.schema}.supplier_connections linked_connection
+        ON linked_connection.id=linked_key.connection_id
+      LEFT JOIN ${this.schema}.suppliers linked_supplier
+        ON linked_supplier.id=linked_connection.supplier_id
       LEFT JOIN LATERAL (
         SELECT r.id,r.updated_at,r.created_by
         FROM ${this.schema}.account_cost_rules r
@@ -1161,10 +1186,19 @@ export class PostgresRepository {
         ORDER BY archived.cutoff_at DESC,archived.id DESC LIMIT 1
       ) archive ON TRUE
       LEFT JOIN LATERAL (
-        SELECT s.*
-        FROM ${this.schema}.upstream_billing_snapshots s
-        WHERE s.source_account_id=a.source_account_id
-        ORDER BY COALESCE(s.observed_at,s.received_at,s.last_attempt_at) DESC,s.id DESC LIMIT 1
+        SELECT o.*
+        FROM ${this.schema}.account_rate_observations o
+        WHERE o.source_account_id=a.source_account_id
+          AND (
+            COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id) IS NULL
+            OR o.supplier_key_id=COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id)
+          )
+        ORDER BY GREATEST(
+          COALESCE(o.observed_at,'-infinity'::timestamptz),
+          COALESCE(o.received_at,'-infinity'::timestamptz),
+          COALESCE(o.last_attempt_at,'-infinity'::timestamptz),
+          COALESCE(o.captured_at,'-infinity'::timestamptz)
+        ) DESC,o.id DESC LIMIT 1
       ) probe ON TRUE
       LEFT JOIN LATERAL (
         SELECT p.id,p.cost_profile_id,p.original_amount,p.fee_amount,p.tax_amount,p.effective_from,p.effective_to,p.notes
@@ -1195,6 +1229,7 @@ export class PostgresRepository {
         costMode: row.cost_type,
         costType: row.cost_type,
         costProfileId: row.cost_profile_id ? number(row.cost_profile_id) : null,
+        purchaseBatch: row.purchase_batch || '',
         revenue,
         revenueCny: revenue,
         recognizedRevenueCny: revenue,
@@ -1229,13 +1264,25 @@ export class PostgresRepository {
         currentCostNotes: row.current_cost_notes || '',
         sourceDeletedAt: row.source_deleted_at || null,
         lifecycle: row.source_deleted_at ? 'deleted' : row.status === 'active' ? 'current' : 'inactive',
-        upstreamMultiplier: number(row.upstream_multiplier) || null,
+        upstreamMultiplier: nullableNumber(row.upstream_multiplier),
         basisMode: row.basis_mode || 'revenue_backsolve',
-        cnyPerReferenceUnit: number(row.cny_per_reference_unit) || null,
+        cnyPerReferenceUnit: nullableNumber(row.cny_per_reference_unit),
         upstreamMultiplierSource: row.upstream_multiplier_source || '',
         probeStatus: row.probe_status || '',
+        probeSourceKind: row.probe_source_kind || '',
         probeObservedAt: row.probe_observed_at || null,
         probeFreshUntil: row.probe_fresh_until || null,
+        supplierKeyId: row.supplier_key_id ? number(row.supplier_key_id) : null,
+        supplierKeyLinkedAt: row.supplier_key_linked_at || null,
+        supplierKeyName: row.supplier_key_name || '',
+        supplierKeyMasked: row.supplier_key_masked || '',
+        supplierKeyGroupName: row.supplier_key_group_name || '',
+        supplierKeyInventoryMultiplier: nullableNumber(row.supplier_key_inventory_multiplier),
+        supplierKeyCheckStatus: row.supplier_key_check_status || '',
+        supplierKeyCheckAt: row.supplier_key_check_at || null,
+        supplierConnectionId: row.supplier_connection_id ? number(row.supplier_connection_id) : null,
+        supplierConnectionName: row.supplier_connection_name || '',
+        linkedSupplierName: row.linked_supplier_name || '',
         lastCostRuleId: row.last_cost_rule_id ? number(row.last_cost_rule_id) : null,
         lastCostRuleChangedAt: row.last_cost_rule_changed_at || null,
         lastCostRuleChangedBy: row.last_cost_rule_changed_by || '',
@@ -1522,7 +1569,7 @@ export class PostgresRepository {
   }
 
   async listPurchaseCatalog() {
-    const [suppliers, batches] = await Promise.all([
+    const [suppliers, batches, supplierKeys] = await Promise.all([
       this.pool.query(`
         SELECT DISTINCT ON (LOWER(name)) name
         FROM (
@@ -1550,10 +1597,51 @@ export class PostgresRepository {
         WHERE supplier IS NOT NULL AND supplier <> ''
           AND purchase_batch IS NOT NULL AND purchase_batch <> ''
         ORDER BY LOWER(supplier),purchase_batch`),
+      this.pool.query(`
+        SELECT k.id,k.external_key_id,k.name,k.masked_key,k.group_name,k.rate_multiplier,k.last_check_status,
+               k.last_check_at,c.id AS connection_id,c.name AS connection_name,s.name AS supplier_name,
+               l.source_account_id
+        FROM ${this.schema}.supplier_keys k
+        JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+        WHERE k.removed_at IS NULL AND k.status='active' AND c.enabled
+          AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type)='sub2api'
+        ORDER BY s.name,c.name,k.name,k.id`),
     ]);
+    const keyCatalog = supplierKeys.rows.map((row) => ({
+      id:Number(row.id),
+      externalId:row.external_key_id,
+      supplier:row.supplier_name,
+      connectionId:Number(row.connection_id),
+      connectionName:row.connection_name,
+      name:row.name,
+      maskedKey:row.masked_key,
+      groupName:row.group_name,
+      purchaseBatch:supplierKeyPurchaseBatch(row),
+      rateMultiplier:nullableNumber(row.rate_multiplier),
+      checkStatus:row.last_check_status,
+      checkedAt:row.last_check_at,
+      accountId:row.source_account_id ? Number(row.source_account_id) : null,
+    }));
+    const batchCatalog = [
+      ...batches.rows.map((row) => ({ supplier: row.supplier, purchaseBatch: row.purchase_batch })),
+      ...keyCatalog.map((row) => ({
+        supplier: row.supplier,
+        purchaseBatch: row.purchaseBatch,
+        supplierKeyId: row.id,
+        source: 'sub2api_key',
+      })),
+    ];
+    const uniqueBatches = new Map();
+    for (const item of batchCatalog) {
+      const key = `${String(item.supplier || '').toLowerCase()}\u0000${String(item.purchaseBatch || '')}`;
+      if (!uniqueBatches.has(key)) uniqueBatches.set(key, item);
+    }
     return {
       suppliers: suppliers.rows.map((row) => row.name),
-      batches: batches.rows.map((row) => ({ supplier: row.supplier, purchaseBatch: row.purchase_batch })),
+      batches: [...uniqueBatches.values()],
+      supplierKeys: keyCatalog,
     };
   }
 
@@ -2126,6 +2214,7 @@ export class PostgresRepository {
     const costMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : 'fixed_purchase');
     const basisMode = input.basisMode || profile?.basis_mode || 'revenue_backsolve';
     const changeStrategy = input.changeStrategy || 'future_only';
+    const supplierKeyId = input.supplierKeyId ?? null;
     const upstreamMultiplier = input.upstreamMultiplier ?? (
       costMode === 'manual_multiplier' ? profile?.variable_multiplier : null
     );
@@ -2176,6 +2265,7 @@ export class PostgresRepository {
       && String(currentRule.upstream_multiplier ?? '') === String(upstreamMultiplier ?? '')
       && String(currentRule.selling_multiplier ?? '') === String(sourceSellingMultiplier ?? '')
       && String(currentRule.cny_per_reference_unit ?? '') === String(cnyPerReferenceUnit ?? '')
+      && String(currentRule.supplier_key_id ?? '') === String(supplierKeyId ?? '')
       && String(currentRule.notes || '') === String(input.notes || '');
     const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(costMode);
     if (sameCurrentRule && changeStrategy !== 'current_day') return { ...currentRule, unchanged: true };
@@ -2230,11 +2320,13 @@ export class PostgresRepository {
     const result = await client.query(`
       INSERT INTO ${this.schema}.account_cost_rules(
         source_account_id,cost_profile_id,cost_mode,basis_mode,upstream_multiplier,
-        selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by,change_strategy)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11) RETURNING *`,
+        selling_multiplier,cny_per_reference_unit,effective_from,status,notes,created_by,change_strategy,
+        supplier_key_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12) RETURNING *`,
     [
       accountId,costProfileId,costMode,basisMode,
       upstreamMultiplier,sourceSellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,changeStrategy,
+      supplierKeyId,
     ]);
     return result.rows[0];
   }
@@ -2593,6 +2685,30 @@ export class PostgresRepository {
         profile = profileResult.rows[0];
       }
       const selectedMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : null);
+      let supplierKeyId = null;
+      let linkedSupplier = null;
+      let linkedPurchaseBatch = null;
+      if (selectedMode === 'probe_multiplier') {
+        const linkedKey = await client.query(`
+          SELECT k.id,k.external_key_id,k.name,k.masked_key,k.group_name,s.name AS supplier_name
+          FROM ${this.schema}.supplier_account_links l
+          JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+          JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+          JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+          WHERE l.source_account_id=$1
+            AND ($2::bigint IS NULL OR k.id=$2)
+            AND k.removed_at IS NULL AND k.status='active' AND c.enabled
+            AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type)='sub2api'
+          LIMIT 1`, [accountId,input.supplierKeyId]);
+        if (input.supplierKeyId && !linkedKey.rowCount) {
+          throw httpError('link the selected Sub2API supplier key to this account before saving automatic multiplier costs', 409);
+        }
+        if (linkedKey.rowCount) {
+          supplierKeyId = Number(linkedKey.rows[0].id);
+          linkedSupplier = linkedKey.rows[0].supplier_name;
+          linkedPurchaseBatch = supplierKeyPurchaseBatch(linkedKey.rows[0]);
+        }
+      }
       if (['manual_multiplier','probe_multiplier','free'].includes(selectedMode)) {
         const periods = await client.query(`SELECT 1 FROM ${this.schema}.account_cost_periods
           WHERE source_account_id=$1 AND status='active' AND effective_to>NOW() LIMIT 1`, [accountId]);
@@ -2607,12 +2723,18 @@ export class PostgresRepository {
       }
       let rule = null;
       if (selectedMode) {
-        rule = await this.upsertAccountCostRule(client, accountId, input, profile, actor);
+        rule = await this.upsertAccountCostRule(client, accountId, { ...input, supplierKeyId }, profile, actor);
       }
       const result = await client.query(`UPDATE ${this.schema}.dim_accounts
         SET cost_profile_id=$2,supplier=$3,purchase_batch=$4,tags=$5::jsonb,synced_at=NOW()
         WHERE source_account_id=$1 RETURNING *`,
-      [accountId, input.costProfileId, input.supplier, input.purchaseBatch, JSON.stringify(input.tags)]);
+      [
+        accountId,
+        input.costProfileId,
+        selectedMode === 'probe_multiplier' ? linkedSupplier || '' : input.supplier,
+        selectedMode === 'probe_multiplier' ? linkedPurchaseBatch || '' : input.purchaseBatch,
+        JSON.stringify(input.tags),
+      ]);
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'update','account_ledger',$2,$3::jsonb)`,
       [actor, String(accountId), JSON.stringify({ account: result.rows[0], rule })]);
@@ -2905,6 +3027,15 @@ export class PostgresRepository {
     return result.rows.map((row) => supplierConnection(row, { includeCiphertext: true }));
   }
 
+  async listLinkedSupplierKeyExternalIds(connectionId) {
+    const result = await this.pool.query(`
+      SELECT DISTINCT k.external_key_id
+      FROM ${this.schema}.supplier_account_links l
+      JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+      WHERE k.connection_id=$1`, [connectionId]);
+    return result.rows.map((row) => String(row.external_key_id));
+  }
+
   async recordSupplierSyncFailure(connectionId, error) {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`
@@ -2928,7 +3059,12 @@ export class PostgresRepository {
 
   async recordSupplierSyncSuccess(connectionId, snapshot, checks) {
     return inTransaction(this.pool, async (client) => {
-      const connectionResult = await client.query(`SELECT * FROM ${this.schema}.supplier_connections WHERE id=$1 FOR UPDATE`, [connectionId]);
+      const connectionResult = await client.query(`
+        SELECT c.*,s.name AS supplier_name
+        FROM ${this.schema}.supplier_connections c
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE c.id=$1
+        FOR UPDATE OF c`, [connectionId]);
       if (!connectionResult.rowCount) throw httpError('supplier connection not found', 404);
       const connection = connectionResult.rows[0];
       const previousResult = await client.query(`SELECT * FROM ${this.schema}.supplier_keys WHERE connection_id=$1 FOR UPDATE`, [connectionId]);
@@ -2972,6 +3108,12 @@ export class PostgresRepository {
           item.quotaCurrency,item.expiresAt,item.lastUsedAt,JSON.stringify(item.sourceData || {}),
         ]);
         const key = keyResult.rows[0];
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts a
+          SET supplier=$2,purchase_batch=$3,synced_at=NOW()
+          FROM ${this.schema}.supplier_account_links l
+          WHERE l.supplier_key_id=$1 AND l.source_account_id=a.source_account_id`,
+        [key.id,connection.supplier_name,supplierKeyPurchaseBatch(key)]);
         const multiplierChanged = previous && nullableNumber(previous.rate_multiplier) !== nullableNumber(item.rateMultiplier);
         const statusChanged = previous && previous.status !== item.status;
         const groupChanged = previous && (previous.group_id !== item.groupId || previous.group_name !== item.groupName);
@@ -3120,17 +3262,110 @@ export class PostgresRepository {
 
   async setSupplierKeyAccountLink(keyId, accountId, linked, actor='admin') {
     return inTransaction(this.pool, async (client) => {
-      const key = await client.query(`SELECT id FROM ${this.schema}.supplier_keys WHERE id=$1`, [keyId]);
-      if (!key.rowCount) throw httpError('supplier key not found', 404);
+      const keyResult = await client.query(`
+        SELECT k.id,k.connection_id,k.external_key_id,k.name,k.masked_key,k.group_name,k.status,k.removed_at,
+               k.last_check_status,k.last_check_at,c.adapter_type,c.detected_adapter_type,
+               c.enabled,s.name AS supplier_name
+        FROM ${this.schema}.supplier_keys k
+        JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE k.id=$1
+        FOR UPDATE OF k`, [keyId]);
+      if (!keyResult.rowCount) throw httpError('supplier key not found', 404);
+      const key = keyResult.rows[0];
       const account = await client.query(`SELECT source_account_id FROM ${this.schema}.dim_accounts WHERE source_account_id=$1`, [accountId]);
       if (!account.rowCount) throw httpError('account not found', 404);
-      if (linked) await client.query(`INSERT INTO ${this.schema}.supplier_account_links(supplier_key_id,source_account_id,created_by)
-        VALUES($1,$2,$3) ON CONFLICT(source_account_id) DO UPDATE SET supplier_key_id=EXCLUDED.supplier_key_id,created_by=EXCLUDED.created_by,created_at=NOW()`, [keyId,accountId,actor]);
-      else await client.query(`DELETE FROM ${this.schema}.supplier_account_links WHERE supplier_key_id=$1 AND source_account_id=$2`, [keyId,accountId]);
+      const previousLink = await client.query(`
+        SELECT supplier_key_id
+        FROM ${this.schema}.supplier_account_links
+        WHERE source_account_id=$1
+        FOR UPDATE`, [accountId]);
+      const previousKeyId = previousLink.rowCount ? Number(previousLink.rows[0].supplier_key_id) : null;
+      let rule = null;
+      if (linked) {
+        const adapterType = key.detected_adapter_type || key.adapter_type;
+        if (adapterType !== 'sub2api') {
+          throw httpError('only Sub2API supplier keys can drive automatic account multipliers', 409);
+        }
+        if (!key.enabled || key.removed_at || key.status !== 'active') {
+          throw httpError('the Sub2API supplier key is not currently active', 409);
+        }
+        const fixedCosts = await client.query(`
+          SELECT 1
+          FROM ${this.schema}.account_cost_periods
+          WHERE source_account_id=$1 AND status='active' AND effective_to>NOW()
+          LIMIT 1`, [accountId]);
+        if (fixedCosts.rowCount) {
+          throw httpError('end the active fixed-cost period before linking a supplier key to avoid double-counting', 409);
+        }
+        if (previousKeyId && previousKeyId !== Number(keyId)) {
+          await client.query(`
+            UPDATE ${this.schema}.account_rate_observations
+            SET fresh_until=LEAST(COALESCE(fresh_until,NOW()),NOW())
+            WHERE source_account_id=$1 AND supplier_key_id=$2 AND fresh_until>NOW()`,
+          [accountId,previousKeyId]);
+        }
+        await client.query(`
+          INSERT INTO ${this.schema}.supplier_account_links(supplier_key_id,source_account_id,created_by)
+          VALUES($1,$2,$3)
+          ON CONFLICT(source_account_id) DO UPDATE SET
+            supplier_key_id=EXCLUDED.supplier_key_id,
+            created_by=EXCLUDED.created_by,
+            created_at=NOW()`, [keyId,accountId,actor]);
+        rule = await this.upsertAccountCostRule(client, accountId, {
+          costProfileId: null,
+          costMode: 'probe_multiplier',
+          basisMode: 'revenue_backsolve',
+          upstreamMultiplier: null,
+          cnyPerReferenceUnit: null,
+          changeStrategy: 'future_only',
+          supplierKeyId: Number(keyId),
+          notes: '',
+        }, null, actor);
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts
+          SET cost_profile_id=NULL,supplier=$2,purchase_batch=$3,synced_at=NOW()
+          WHERE source_account_id=$1`,
+        [accountId,key.supplier_name,supplierKeyPurchaseBatch(key)]);
+      } else {
+        await client.query(`
+          DELETE FROM ${this.schema}.supplier_account_links
+          WHERE supplier_key_id=$1 AND source_account_id=$2`, [keyId,accountId]);
+        await client.query(`
+          UPDATE ${this.schema}.account_rate_observations
+          SET fresh_until=LEAST(COALESCE(fresh_until,NOW()),NOW())
+          WHERE source_account_id=$1 AND supplier_key_id=$2 AND fresh_until>NOW()`,
+        [accountId,keyId]);
+        await client.query(`
+          UPDATE ${this.schema}.account_cost_rules
+          SET effective_to=NOW(),status='superseded',updated_at=NOW()
+          WHERE source_account_id=$1 AND supplier_key_id=$2
+            AND status='active' AND effective_to IS NULL`, [accountId,keyId]);
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts
+          SET supplier=CASE WHEN supplier=$2 THEN '' ELSE supplier END,
+              purchase_batch=CASE WHEN purchase_batch=$3 THEN '' ELSE purchase_batch END,
+              synced_at=NOW()
+          WHERE source_account_id=$1`,
+        [accountId,key.supplier_name,supplierKeyPurchaseBatch(key)]);
+      }
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'update_supplier_account_link','supplier_key',$2,$3::jsonb)`,
-      [actor,String(keyId),JSON.stringify({ sourceAccountId:accountId,linked })]);
-      return { keyId,accountId,linked };
+      [actor,String(keyId),JSON.stringify({
+        sourceAccountId:accountId,linked,previousSupplierKeyId:previousKeyId,
+        connectionId:Number(key.connection_id),costRuleId:rule?.id ? Number(rule.id) : null,
+      })]);
+      return {
+        keyId:Number(keyId),
+        accountId:Number(accountId),
+        linked:Boolean(linked),
+        connectionId:Number(key.connection_id),
+        supplierName:key.supplier_name,
+        keyName:key.name || key.masked_key || '',
+        costMode:linked ? 'probe_multiplier' : '',
+        probeStatus:key.last_check_status || 'pending',
+        probeCheckedAt:key.last_check_at || null,
+      };
     });
   }
 

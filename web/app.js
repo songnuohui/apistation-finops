@@ -877,6 +877,7 @@ function multiplierSourceLabel(value) {
     usage_log_snapshot: '请求倍率快照',
     probe_observation: '自动探测',
     probe_snapshot: '自动探测',
+    supplier_direct_probe: '供应商密钥探测',
     manual_rule: '手动规则',
     audited_reprice: '审计重算',
   })[value] || '待确认来源';
@@ -887,6 +888,7 @@ function probeStatusLabel(value) {
     ok: '探测已确认',
     unsupported: '上游未提供探测',
     pending: '等待探测',
+    skipped: '密钥不可探测',
     failed: '探测失败',
     unknown: '尚无探测结果',
   })[String(value || '').toLowerCase()] || '尚无探测结果';
@@ -904,10 +906,13 @@ function accountPricingDetail(account) {
     return `<span class="primary-text">手动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">按消费记录销售倍率自动计算成本</div>`;
   }
   if (mode === 'probe_multiplier') {
+    const keyLabel = account.supplierKeyName || account.supplierKeyMasked || '';
     if (account.upstreamMultiplier) {
-      return `<span class="primary-text">自动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">${escapeHtml(multiplierSourceLabel(account.upstreamMultiplierSource))} · ${escapeHtml(probeStatusLabel(account.probeStatus))}</div>`;
+      return `<span class="primary-text">自动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">${escapeHtml(keyLabel || multiplierSourceLabel(account.upstreamMultiplierSource))} · ${escapeHtml(probeStatusLabel(account.probeStatus))}</div>`;
     }
-    const nextStep = account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '等待有效倍率快照';
+    const nextStep = account.supplierKeyId
+      ? `${keyLabel || '已关联密钥'} · 等待有效倍率快照`
+      : account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '请关联 Sub2API 供应商密钥';
     return `<span class="secondary-text">${escapeHtml(probeStatusLabel(account.probeStatus))}</span><div class="secondary-text">${nextStep}</div>`;
   }
   return '<span class="secondary-text">先选择固定成本或倍率模式</span>';
@@ -1433,7 +1438,9 @@ async function renderAccounts(search = state.accountSearch) {
       ], data.items.map((item) => [
         `<input type="checkbox" data-account-select="${item.id}" ${state.selectedAccounts.has(Number(item.id)) ? 'checked' : ''}>`,
         `<span class="primary-text">${escapeHtml(item.name)}</span><div class="secondary-text">#${item.id} · ${tags(item.tags)} ${accountLifecycle(item)}</div>`,
-        `<span class="primary-text">${escapeHtml(item.platform)}</span><div class="secondary-text">${escapeHtml(item.supplier || '未标记供应商')}</div>`,
+        `<span class="primary-text">${escapeHtml(item.platform)}</span><div class="secondary-text">${escapeHtml(item.supplier || '未标记供应商')}${
+          item.purchaseBatch ? ` · ${escapeHtml(item.purchaseBatch)}` : ''
+        }</div>`,
         `<span class="tag neutral">${escapeHtml(costModeLabel(item.costMode || item.costType))}</span><div class="secondary-text">${
           item.costMode === 'probe_multiplier' ? probeStatusLabel(item.probeStatus) : item.upstreamMultiplier ? `上游 ${multiplier(item.upstreamMultiplier)}` : ''
         }</div>`,
@@ -2006,11 +2013,13 @@ function renderSupplierKeyLinkPickerResults(detail, keyId, search = '') {
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
-        await api(`/supplier-keys/${keyId}/account-link`, {
+        const result = await api(`/supplier-keys/${keyId}/account-link`, {
           method: 'PATCH', range: false,
           body: JSON.stringify({ accountId: Number(button.dataset.supplierLinkAccount), linked: true }),
         });
-        toast('已关联本地账号');
+        toast(result.sync?.ok === false
+          ? '账号已关联并切换为自动倍率，供应商同步暂未成功'
+          : '账号已关联，成本将按该密钥的探测倍率自动计算');
         await loadSupplierConnectionDetails(detail.connection.id);
       } catch (error) {
         toast(error.message);
@@ -2378,6 +2387,30 @@ function catalogPurchaseBatchOptions(catalog, supplier, selected = '', { allowNe
   return options;
 }
 
+function catalogSupplierKeyOptions(catalog, account) {
+  const keys = new Map();
+  for (const item of catalog?.supplierKeys || []) {
+    if (!keys.has(String(item.id))) keys.set(String(item.id), item);
+  }
+  const options = [['', '请选择已接入的 Sub2API 供应商密钥']];
+  for (const item of keys.values()) {
+    const identity = item.name || item.maskedKey || `密钥 #${item.id}`;
+    const group = item.groupName ? ` · ${item.groupName}` : '';
+    const rate = item.rateMultiplier === null || item.rateMultiplier === undefined
+      ? '' : ` · ${multiplier(item.rateMultiplier)}`;
+    const linked = item.accountId && String(item.accountId) !== String(account?.id)
+      ? ` · 已关联账号 #${item.accountId}` : '';
+    options.push([item.id, `${item.supplier} · ${identity}${group}${rate}${linked}`]);
+  }
+  if (account?.supplierKeyId && !keys.has(String(account.supplierKeyId))) {
+    options.splice(1, 0, [
+      account.supplierKeyId,
+      `${account.linkedSupplierName || account.supplier || '历史供应商'} · ${account.supplierKeyName || account.supplierKeyMasked || `密钥 #${account.supplierKeyId}`}（历史关联）`,
+    ]);
+  }
+  return options;
+}
+
 function setFormFieldVisible(form, name, visible) {
   const control = form.elements[name];
   const field = control?.closest('.field');
@@ -2557,8 +2590,9 @@ function ledgerFields(profiles, account, catalog) {
   const profileId = account.costProfileId || '';
   return [
     { name: 'costProfileId', label: '成本模板（可选）', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...profiles.map((item) => [item.id, item.name])] },
-    { name: 'costMode', label: '账号成本方式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['fixed_purchase', '固定采购成本（自有账号）'], ['probe_multiplier', '自动探测上游倍率'], ['manual_multiplier', '手动填写上游倍率'], ['free', '免费资源']] },
+    { name: 'costMode', label: '账号成本方式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['fixed_purchase', '固定采购成本（自有账号）'], ['probe_multiplier', 'Sub2API 密钥自动倍率'], ['manual_multiplier', '手动填写上游倍率'], ['free', '免费资源']] },
     { type: 'notice', hook: 'account-cost-mode-hint' },
+    { name: 'supplierKeyId', label: '采购批次（Sub2API 密钥）', type: 'select', required: false, value: account.supplierKeyId || '', options: catalogSupplierKeyOptions(catalog, account) },
     { name: 'basisMode', label: '倍率计价基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '按实际消费记录回推（推荐）'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'upstreamMultiplier', label: '上游进货倍率', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
@@ -2572,7 +2606,7 @@ function ledgerFields(profiles, account, catalog) {
 function accountCostModeHint(mode) {
   return ({
     fixed_purchase: '固定采购成本按已登记的采购金额和生效期分摊；金额不填在倍率字段里。',
-    probe_multiplier: 'FinOps 读取供应商或 sub2api 已确认的上游倍率，并按每笔实际消费记录自动计算成本。',
+    probe_multiplier: '选择已接入的 Sub2API 供应商密钥；该密钥会自动成为采购批次和供应商统计维度，FinOps 读取权威倍率并按每笔实际消费记录自动计算成本。',
     manual_multiplier: '填写实际进货倍率；销售倍率由 sub2api 每笔消费记录读取，无需在这里配置。',
     free: '该账号不计入上游成本。存在未结束固定成本期时不能切换为免费资源。',
   })[mode] || '请选择该账号实际采用的成本方式。';
@@ -2593,10 +2627,13 @@ function syncAccountLedgerForm(form, profiles, { applyProfile = false } = {}) {
   const mode = form.elements.costMode.value;
   const multiplierMode = ['probe_multiplier', 'manual_multiplier'].includes(mode);
   const referenceBasis = multiplierMode && form.elements.basisMode.value === 'reference_cny';
+  setLedgerFieldVisible(form, 'supplierKeyId', mode === 'probe_multiplier');
   setLedgerFieldVisible(form, 'basisMode', multiplierMode);
   setLedgerFieldVisible(form, 'upstreamMultiplier', mode === 'manual_multiplier');
   setLedgerFieldVisible(form, 'cnyPerReferenceUnit', referenceBasis);
   setLedgerFieldVisible(form, 'changeStrategy', multiplierMode);
+  setLedgerFieldVisible(form, 'supplier', mode === 'fixed_purchase' || mode === 'manual_multiplier');
+  setLedgerFieldVisible(form, 'purchaseBatch', mode === 'fixed_purchase');
   const hint = form.querySelector('[data-account-cost-mode-hint]');
   if (hint) hint.textContent = accountCostModeHint(mode);
 }
@@ -2617,8 +2654,9 @@ function accountAutoPricingText(account) {
   if (account.costMode === 'manual_multiplier') return '手动倍率不会被自动探测覆盖';
   if (account.costMode !== 'probe_multiplier') return '当前规则不使用倍率计价';
   const status = probeStatusLabel(account.probeStatus);
-  if (!account.upstreamMultiplier) return `${status} · 等待可用倍率`;
-  return `${status} · ${multiplier(account.upstreamMultiplier)} · ${multiplierSourceLabel(account.upstreamMultiplierSource)}`;
+  const key = account.supplierKeyName || account.supplierKeyMasked || '';
+  if (!account.upstreamMultiplier) return `${status} · ${key || '未关联供应商密钥'} · 等待可用倍率`;
+  return `${status} · ${key || multiplierSourceLabel(account.upstreamMultiplierSource)} · ${multiplier(account.upstreamMultiplier)}`;
 }
 
 function accountRuleContext(account) {
@@ -2631,14 +2669,39 @@ function accountRuleContext(account) {
 }
 
 function openAccountLedgerModal(account, profiles, catalog) {
-  openModal('配置账号成本', ledgerFields(profiles, account, catalog), (data) => api(`/accounts/${account.id}`, {
-    method: 'PATCH',
-    range: false,
-    body: JSON.stringify({
-      ...normalizePurchaseSelection(data),
-      tags: data.tags ? data.tags.split(',').map((item) => item.trim()).filter(Boolean) : [],
-    }),
-  }), {
+  openModal('配置账号成本', ledgerFields(profiles, account, catalog), async (data) => {
+    const payload = normalizePurchaseSelection(data);
+    payload.tags = data.tags ? data.tags.split(',').map((item) => item.trim()).filter(Boolean) : [];
+    if (payload.costMode === 'probe_multiplier') {
+      if (!payload.supplierKeyId) throw new Error('请选择用于该账号成本核算的 Sub2API 供应商密钥');
+      const selectedKey = (catalog.supplierKeys || []).find((item) => String(item.id) === String(payload.supplierKeyId));
+      if (String(account.supplierKeyId || '') !== String(payload.supplierKeyId)) {
+        await api(`/supplier-keys/${payload.supplierKeyId}/account-link`, {
+          method: 'PATCH',
+          range: false,
+          body: JSON.stringify({ accountId: Number(account.id), linked: true }),
+        });
+      }
+      payload.supplier = selectedKey?.supplier || account.linkedSupplierName || account.supplier || '';
+      payload.purchaseBatch = selectedKey?.purchaseBatch || '';
+      payload.basisMode = 'revenue_backsolve';
+      payload.cnyPerReferenceUnit = '';
+      payload.upstreamMultiplier = '';
+    }
+    const result = await api(`/accounts/${account.id}`, {
+      method: 'PATCH',
+      range: false,
+      body: JSON.stringify(payload),
+    });
+    if (payload.costMode !== 'probe_multiplier' && account.supplierKeyId) {
+      await api(`/supplier-keys/${account.supplierKeyId}/account-link`, {
+        method: 'PATCH',
+        range: false,
+        body: JSON.stringify({ accountId: Number(account.id), linked: false }),
+      });
+    }
+    return result;
+  }, {
     onSaved: async () => {
       closeModal();
       await renderAccounts(state.accountSearch);

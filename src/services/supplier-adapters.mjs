@@ -92,7 +92,7 @@ async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts) {
     if (privateAddress(host) || blockedSupplierHost(host, blockedHosts)) {
       throw new SupplierAdapterError('private_address_blocked', 'supplier URL resolves to a private or reserved address', { statusCode: 400 });
     }
-    return { address: host, family: net.isIP(host) };
+    return [{ address: host, family: net.isIP(host) }];
   }
   let records;
   try {
@@ -107,11 +107,18 @@ async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts) {
   })) {
     throw new SupplierAdapterError('private_address_blocked', 'supplier URL resolves to a private or reserved address', { statusCode: 400 });
   }
-  const selected = addresses[0];
-  return {
-    address: selected?.address || selected,
-    family: Number(selected?.family) || net.isIP(selected?.address || selected),
-  };
+  const targets = [];
+  const seen = new Set();
+  for (const record of addresses) {
+    const address = record?.address || record;
+    if (seen.has(address)) continue;
+    seen.add(address);
+    targets.push({
+      address,
+      family: Number(record?.family) || net.isIP(address),
+    });
+  }
+  return targets;
 }
 
 function endpoint(baseUrl, pathname) {
@@ -292,7 +299,9 @@ export class SupplierHttpClient {
   }
 
   async request(baseUrl, pathname, { method = 'GET', token = '', body, headers = {}, allowError = false } = {}) {
-    const target = await assertPublicSupplierUrl(baseUrl, this.dnsLookup, this.config.supplierBlockedHosts || []);
+    const requestPath = new URL(endpoint(baseUrl, pathname)).pathname;
+    const stage = `${method} ${requestPath}`;
+    const targets = await assertPublicSupplierUrl(baseUrl, this.dnsLookup, this.config.supplierBlockedHosts || []);
     const timeoutMs = Number(this.config.supplierRequestTimeoutMs) || 10_000;
     const maxResponseBytes = Number(this.config.supplierMaxResponseBytes) || 1_048_576;
     const startedAt = Date.now();
@@ -323,12 +332,28 @@ export class SupplierHttpClient {
           clearTimeout(timeout);
         }
       } else {
-        ({ response, raw } = await pinnedHttpsRequest(
-          endpoint(baseUrl, pathname),
-          { method, headers: requestHeaders, body: serializedBody },
-          target,
-          { timeoutMs, maxResponseBytes },
-        ));
+        let lastError;
+        for (let index = 0; index < targets.length; index += 1) {
+          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          if (remainingMs <= 0) break;
+          const attemptTimeoutMs = index === targets.length - 1
+            ? remainingMs
+            : Math.max(1_000, Math.floor(remainingMs / (targets.length - index)));
+          try {
+            ({ response, raw } = await pinnedHttpsRequest(
+              endpoint(baseUrl, pathname),
+              { method, headers: requestHeaders, body: serializedBody },
+              targets[index],
+              { timeoutMs: attemptTimeoutMs, maxResponseBytes },
+            ));
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (!['timeout', 'request_failed'].includes(error?.code) || index === targets.length - 1) throw error;
+          }
+        }
+        if (!response) throw lastError || new SupplierAdapterError('timeout', 'supplier request timed out');
       }
       let payload = null;
       if (raw.length) {
@@ -350,9 +375,17 @@ export class SupplierHttpClient {
       }
       return { response, payload, latencyMs: Date.now() - startedAt };
     } catch (error) {
-      if (error instanceof SupplierAdapterError) throw error;
-      if (error?.name === 'AbortError') throw new SupplierAdapterError('timeout', 'supplier request timed out');
-      throw new SupplierAdapterError('request_failed', 'could not connect to supplier');
+      if (error instanceof SupplierAdapterError) {
+        if (['timeout', 'request_failed'].includes(error.code)) {
+          throw new SupplierAdapterError(error.code, `${stage}: ${error.message}`, {
+            statusCode: error.statusCode,
+            httpStatus: error.httpStatus,
+          });
+        }
+        throw error;
+      }
+      if (error?.name === 'AbortError') throw new SupplierAdapterError('timeout', `${stage}: supplier request timed out`);
+      throw new SupplierAdapterError('request_failed', `${stage}: could not connect to supplier`);
     }
   }
 }

@@ -98,6 +98,30 @@ test('supplier monitor shares simultaneous syncs for one connection', async () =
   assert.equal(calls, 1);
 });
 
+test('linked supplier keys are always checked even when optional active checks are disabled', async () => {
+  const checked = [];
+  const repository = {
+    listLinkedSupplierKeyExternalIds: async () => ['two'],
+    recordSupplierSyncSuccess: async () => {},
+    recordSupplierSyncFailure: async () => assert.fail('unexpected sync failure'),
+  };
+  const service = new SupplierMonitorService(repository, config);
+  service.adapters = {
+    snapshot: async () => snapshot(),
+    check: async (_connection, _credentials, _snapshot, key) => {
+      checked.push(key.externalId);
+      return { status: 'ok', method: 'billing_metadata', httpStatus: 200, latencyMs: 4 };
+    },
+  };
+  const supplierConnection = connection(12, { activeCheckEnabled: false });
+  supplierConnection.credentialsCiphertext = service.encryptCredentials({ accessToken: 'portal-access-token' });
+
+  const result = await service.syncConnection(12, { connection: supplierConnection });
+
+  assert.deepEqual(checked, ['two']);
+  assert.equal(result.checked, 1);
+});
+
 test('supplier monitor records failures and supports scheduled due connections', async () => {
   const failures = [];
   const successes = [];

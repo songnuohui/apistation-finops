@@ -89,9 +89,17 @@ export class SupplierMonitorService {
       const credentials = this.decryptCredentials(connection.credentialsCiphertext);
       const snapshot = await this.adapters.snapshot(connection, credentials);
       for (const key of snapshot.keys) key.keyFingerprint = this.vault.fingerprint(key.rawKey || `${connection.id}:${key.externalId}`);
-      const candidates = connection.activeCheckEnabled
-        ? snapshot.keys.filter((key) => key.status === 'active').slice(0, connection.activeCheckLimit)
+      const linkedExternalIds = new Set(
+        await this.repository.listLinkedSupplierKeyExternalIds?.(connection.id) || [],
+      );
+      const activeKeys = snapshot.keys.filter((key) => key.status === 'active');
+      const linkedKeys = activeKeys.filter((key) => linkedExternalIds.has(String(key.externalId)));
+      const optionalKeys = connection.activeCheckEnabled
+        ? activeKeys
+          .filter((key) => !linkedExternalIds.has(String(key.externalId)))
+          .slice(0, Math.max(0, connection.activeCheckLimit - linkedKeys.length))
         : [];
+      const candidates = [...linkedKeys, ...optionalKeys];
       const checkResults = await mapConcurrent(candidates, 4, async (key) => {
         try {
           const check = await this.adapters.check(connection, credentials, snapshot, key);

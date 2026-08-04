@@ -754,6 +754,7 @@ export class SyncService {
           ) AS cny_per_reference_unit,
           COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
           rule.id AS account_cost_rule_id,
+          rule.supplier_key_id AS configured_supplier_key_id,
           NULL::bigint AS selling_rate_rule_id,
           fixed_period.id AS fixed_period_id,
           observation.id AS rate_observation_id,
@@ -799,6 +800,7 @@ export class SyncService {
                  o.peak_rate_enabled,o.peak_rate_multiplier,o.timezone,o.snapshot_data,o.fresh_until
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
+            AND (rule.supplier_key_id IS NULL OR o.supplier_key_id=rule.supplier_key_id)
             AND GREATEST(
               COALESCE(o.observed_at,'-infinity'::timestamptz),
               COALESCE(o.received_at,'-infinity'::timestamptz),
@@ -867,7 +869,11 @@ export class SyncService {
             upstreamMultiplier = observedMultiplier;
             upstreamSource = row.observation_source_kind === 'supplier_direct_probe'
               ? 'supplier_direct_probe' : 'probe_observation';
-          } else if (row.source_account_multiplier !== null && row.source_account_multiplier !== undefined) {
+          } else if (
+            !row.configured_supplier_key_id
+            && row.source_account_multiplier !== null
+            && row.source_account_multiplier !== undefined
+          ) {
             upstreamMultiplier = row.source_account_multiplier;
             upstreamSource = 'usage_log_snapshot';
           }

@@ -197,6 +197,7 @@ export function normalizeAccountLedger(input) {
   const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
   return {
     costProfileId: optionalId(input.costProfileId, 'costProfileId'),
+    supplierKeyId: optionalId(input.supplierKeyId, 'supplierKeyId'),
     costMode,
     basisMode,
     upstreamMultiplier,

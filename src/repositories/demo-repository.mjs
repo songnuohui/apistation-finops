@@ -719,12 +719,35 @@ export class DemoRepository {
     this.supplierConnections.forEach((item) => collect(item.supplierName));
     this.accounts.forEach((item) => collect(item.supplier, item.purchaseBatch));
     this.accountCostPeriods.forEach((item) => collect(item.supplier, item.purchaseBatch));
+    const supplierKeys = this.supplierConnections.flatMap((connection) => {
+      const detail = this.supplierConnectionDetails.get(Number(connection.id));
+      if (!detail || (connection.detectedAdapterType || connection.adapterType) !== 'sub2api') return [];
+      return detail.keys
+        .filter((key) => !key.removedAt && key.status === 'active')
+        .flatMap((key) => {
+          const links = key.accountLinks?.length ? key.accountLinks : [null];
+          return links.map((link) => ({
+            id:key.id,
+            supplier:connection.supplierName,
+            connectionId:connection.id,
+            connectionName:connection.name,
+            name:key.name,
+            maskedKey:key.maskedKey,
+            groupName:key.groupName,
+            rateMultiplier:key.rateMultiplier,
+            checkStatus:key.lastCheckStatus,
+            checkedAt:key.lastCheckAt,
+            accountId:link?.accountId || null,
+          }));
+        });
+    });
     return {
       suppliers: [...supplierByKey.values()].sort((left, right) => left.localeCompare(right, 'zh-CN')),
       batches: [...batches.values()].sort((left, right) => (
         left.supplier.localeCompare(right.supplier, 'zh-CN')
         || left.purchaseBatch.localeCompare(right.purchaseBatch, 'zh-CN')
       )),
+      supplierKeys,
     };
   }
 
@@ -961,10 +984,45 @@ export class DemoRepository {
         }
       }
       match.key.accountLinks.push({ accountId: account.id, accountName: account.name });
+      account.costMode = 'probe_multiplier';
+      account.costType = 'probe_multiplier';
+      account.supplier = match.connection.supplierName;
+      account.purchaseBatch = '';
+      account.supplierKeyId = Number(keyId);
+      account.supplierKeyName = match.key.name || '';
+      account.supplierKeyMasked = match.key.maskedKey || '';
+      account.supplierKeyGroupName = match.key.groupName || '';
+      account.supplierConnectionId = Number(match.connection.id);
+      account.supplierConnectionName = match.connection.name;
+      account.linkedSupplierName = match.connection.supplierName;
+      account.probeStatus = match.key.lastCheckStatus || 'pending';
+      account.upstreamMultiplier = match.key.rateMultiplier;
+      account.upstreamMultiplierSource = match.key.rateMultiplier === null ? '' : 'supplier_direct_probe';
     } else {
       match.key.accountLinks = (match.key.accountLinks || []).filter((item) => Number(item.accountId) !== Number(accountId));
+      if (Number(account.supplierKeyId) === Number(keyId)) {
+        account.supplierKeyId = null;
+        account.supplierKeyName = '';
+        account.supplierKeyMasked = '';
+        account.supplierKeyGroupName = '';
+        account.supplierConnectionId = null;
+        account.supplierConnectionName = '';
+        account.linkedSupplierName = '';
+        account.upstreamMultiplier = null;
+        account.upstreamMultiplierSource = '';
+      }
     }
-    return { keyId: Number(keyId), accountId: Number(accountId), linked: Boolean(linked) };
+    return {
+      keyId: Number(keyId),
+      accountId: Number(accountId),
+      linked: Boolean(linked),
+      connectionId: Number(match.connection.id),
+      supplierName: match.connection.supplierName,
+      keyName: match.key.name || match.key.maskedKey || '',
+      costMode: linked ? 'probe_multiplier' : '',
+      probeStatus: match.key.lastCheckStatus || 'pending',
+      probeCheckedAt: match.key.lastCheckAt || null,
+    };
   }
 
   async acknowledgeSupplierAlert(alertId, actor = 'admin') {
