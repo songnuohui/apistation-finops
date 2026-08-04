@@ -37,6 +37,7 @@ const pageMeta = {
   accounts: ['账号台账与成本', '账号采购、成本归属、实际消费与毛利'],
   usage: ['用量与扣费', '按模型汇总或逐请求核查实际扣费、成本快照与计价来源'],
   suppliers: ['供应商与采购', '上游资源、采购批次与经营毛利'],
+  costs: ['成本核算', '成本模板、生效期间和分摊方法'],
   runtime: ['并发与排队', '只读展示 Sub2API 当前并发、工作线程和排队负载'],
 };
 
@@ -891,9 +892,24 @@ function probeStatusLabel(value) {
 }
 
 function accountPricingDetail(account) {
-  if (!account.currentCostPeriodId) return '<span class="secondary-text">待登记采购成本</span>';
-  const total = Number(account.currentOriginalAmount || 0) + Number(account.currentFeeAmount || 0) + Number(account.currentTaxAmount || 0);
-  return `<span class="primary-text">${cny(total)}</span><div class="secondary-text">采购成本期 · ${dateOnly(account.currentEffectiveFrom)} 至 ${dateOnly(account.currentEffectiveTo)}</div>`;
+  const mode = account.costMode || account.costType;
+  if (mode === 'free') return '<span class="primary-text">免费资源</span><div class="secondary-text">不计入上游成本</div>';
+  if (mode === 'fixed_purchase') {
+    if (!account.currentCostPeriodId) return '<span class="secondary-text">待登记固定成本期</span>';
+    const total = Number(account.currentOriginalAmount || 0) + Number(account.currentFeeAmount || 0) + Number(account.currentTaxAmount || 0);
+    return `<span class="primary-text">${cny(total)}</span><div class="secondary-text">固定成本期 · ${dateOnly(account.currentEffectiveFrom)}</div>`;
+  }
+  if (mode === 'manual_multiplier') {
+    return `<span class="primary-text">手动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">按消费记录销售倍率自动计算成本</div>`;
+  }
+  if (mode === 'probe_multiplier') {
+    if (account.upstreamMultiplier) {
+      return `<span class="primary-text">自动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">${escapeHtml(multiplierSourceLabel(account.upstreamMultiplierSource))} · ${escapeHtml(probeStatusLabel(account.probeStatus))}</div>`;
+    }
+    const nextStep = account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '等待有效倍率快照';
+    return `<span class="secondary-text">${escapeHtml(probeStatusLabel(account.probeStatus))}</span><div class="secondary-text">${nextStep}</div>`;
+  }
+  return '<span class="secondary-text">先选择固定成本或倍率模式</span>';
 }
 
 function costStatusLabel(value) {
@@ -1367,8 +1383,9 @@ function openWhitelistManager() {
 
 function accountActionButtons(item) {
   return `<div class="table-actions table-row-actions">
-    <button type="button" class="icon-button table-icon" title="编辑账号归属与标签" data-edit-ledger="${item.id}">${icon('settings-2')}</button>
-    <button type="button" class="icon-button table-icon" title="查看采购成本记录" data-account-cost-history="${item.id}">${icon('receipt-text')}</button>
+    <button type="button" class="icon-button table-icon" title="配置账号成本方式" data-edit-ledger="${item.id}">${icon('settings-2')}</button>
+    <button type="button" class="icon-button table-icon" title="查看计价版本与封存记录" data-account-rule-history="${item.id}">${icon('shield-check')}</button>
+    <button type="button" class="icon-button table-icon" title="查看与编辑成本明细" data-account-cost-history="${item.id}">${icon('receipt-text')}</button>
   </div>`;
 }
 
@@ -1396,7 +1413,10 @@ function accountLifecycle(item) {
 
 async function renderAccounts(search = state.accountSearch) {
   state.accountSearch = search;
-  const data = await api(`/accounts?${queryFor('accountsSearch', search, { scope: state.accountScope })}`);
+  const [data, profiles] = await Promise.all([
+    api(`/accounts?${queryFor('accountsSearch', search, { scope: state.accountScope })}`),
+    api('/cost-profiles', { range: false }),
+  ]);
   state.lastExport = data.items;
   state.accountItems = new Map(data.items.map((item) => [String(item.id), item]));
   const actions = `<div class="account-scope"><span>账号范围</span><div class="account-scope-tabs" role="group" aria-label="账号范围">${accountScopeTabs(state.accountScope)}</div></div>
@@ -1407,20 +1427,22 @@ async function renderAccounts(search = state.accountSearch) {
     <section class="table-panel">${searchTools('搜索账号、平台、供应商', actions, search)}${
       table([
         { label: '<input type="checkbox" id="select-current-accounts" title="选择当前页">' }, { label: '账号' }, { label: '平台/供应商' },
-        { label: '成本状态' }, { label: '采购成本记录' }, { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true },
+        { label: '核算规则' }, { label: '本期计价来源' }, { label: '实际消费 CNY', right: true }, { label: '已登记成本 CNY', right: true },
         { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' }, { label: '编辑' },
       ], data.items.map((item) => [
         `<input type="checkbox" data-account-select="${item.id}" ${state.selectedAccounts.has(Number(item.id)) ? 'checked' : ''}>`,
         `<span class="primary-text">${escapeHtml(item.name)}</span><div class="secondary-text">#${item.id} · ${tags(item.tags)} ${accountLifecycle(item)}</div>`,
         `<span class="primary-text">${escapeHtml(item.platform)}</span><div class="secondary-text">${escapeHtml(item.supplier || '未标记供应商')}</div>`,
-        `<span class="tag neutral">${item.hasCostRecord ? '本期已登记采购成本' : '本期待补采购成本'}</span><div class="secondary-text">销售额自动读取 sub2api 实际扣款</div>`,
+        `<span class="tag neutral">${escapeHtml(costModeLabel(item.costMode || item.costType))}</span><div class="secondary-text">${
+          item.costMode === 'probe_multiplier' ? probeStatusLabel(item.probeStatus) : item.upstreamMultiplier ? `上游 ${multiplier(item.upstreamMultiplier)}` : ''
+        }</div>`,
         accountPricingDetail(item),
         cny(item.userChargeCny), cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item), accountActionButtons(item),
       ]), 1390)
     }${pager(data, 'accountsSearch', '个账号')}</section>`;
   bindSearch(renderAccounts);
-  document.querySelector('#account-cost-button')?.addEventListener('click', () => openSingleCostModal(data.items));
-  document.querySelector('#batch-cost-button')?.addEventListener('click', openBulkCostModal);
+  document.querySelector('#account-cost-button')?.addEventListener('click', () => openSingleCostModal(data.items, profiles));
+  document.querySelector('#batch-cost-button')?.addEventListener('click', () => openBulkCostModal(profiles));
   document.querySelector('#select-current-accounts')?.addEventListener('change', (event) => {
     data.items.forEach((item) => {
       if (event.target.checked) state.selectedAccounts.add(Number(item.id));
@@ -1835,11 +1857,11 @@ function supplierPurchasesTab(detail) {
       <button type="button" class="button primary" data-supplier-detail-cost>${icon('plus')}登记采购成本</button>
     </div>
     ${table([
-      { label: '账号' }, { label: '采购批次' }, { label: '采购成本 CNY', right: true }, { label: '生效期' }, { label: '状态' },
+      { label: '账号' }, { label: '采购批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
     ], purchases.map((item) => [
       `<span class="primary-text">${escapeHtml(item.accountName || `账号 #${item.accountId}`)}</span><div class="secondary-text">#${escapeHtml(item.accountId)}</div>`,
       `<span class="primary-text">${escapeHtml(item.purchaseBatch || '未标注批次')}</span><div class="secondary-text">${escapeHtml(item.supplier || detail.connection.supplierName)}</div>`,
-      cny(item.totalCost),
+      `<span class="tag neutral">${escapeHtml(item.costProfile || '未绑定模板')}</span>`, cny(item.totalCost),
       `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
     ]), 920)}
   </section>`;
@@ -2044,6 +2066,7 @@ function openSupplierConnectionDetails(connectionId) {
 
 async function openSupplierPurchaseCostModal(detail) {
   try {
+    const profiles = await api('/cost-profiles', { range: false });
     const accounts = (detail.accounts || []).filter((item) => item.status === 'active');
     if (!accounts.length) return toast('没有可登记采购成本的本地账号');
     const picker = {
@@ -2051,7 +2074,7 @@ async function openSupplierPurchaseCostModal(detail) {
       value: accounts[0].id,
       supplier: detail.connection.supplierName,
     };
-    openModal(`登记采购成本 · ${detail.connection.supplierName}`, costFields(picker, { includeAccount: true }), (data) => api('/account-cost-periods', {
+    openModal(`登记采购成本 · ${detail.connection.supplierName}`, costFields(profiles, picker, { includeAccount: true }), (data) => api('/account-cost-periods', {
       method: 'POST', range: false, body: JSON.stringify(normalizeCostPayload(data)),
     }));
     document.querySelector('#form-cancel').onclick = () => renderSupplierConnectionDetails(detail);
@@ -2062,9 +2085,10 @@ async function openSupplierPurchaseCostModal(detail) {
 
 async function renderSuppliers(search = state.supplierSearch) {
   state.supplierSearch = search;
-  const [source, connectionSource, accountData] = await Promise.all([
+  const [source, connectionSource, profiles, accountData] = await Promise.all([
     api(`/suppliers?search=${encodeURIComponent(search)}`),
     api(`/supplier-connections?search=${encodeURIComponent(search)}`, { range: false }),
+    api('/cost-profiles', { range: false }),
     api(`/accounts?${queryFor('supplierAccounts', search)}`),
   ]);
   const connections = localPage(connectionSource.items || [], 'supplierConnections');
@@ -2088,7 +2112,7 @@ async function renderSuppliers(search = state.supplierSearch) {
         `<div class="table-actions supplier-row-actions"><button type="button" class="icon-button table-icon" title="查看连接详情" data-supplier-connection-detail="${item.id}">${icon('receipt-text')}</button><button type="button" class="icon-button table-icon" title="编辑连接" data-supplier-connection-edit="${item.id}">${icon('settings-2')}</button><button type="button" class="icon-button table-icon" title="立即同步" data-supplier-connection-sync="${item.id}" ${!item.enabled ? 'disabled' : ''}>${icon('refresh-cw')}</button></div>`,
       ]), 1330)}${pager(connections, 'supplierConnections', '个供应商连接')}
     </section>
-    ${section('采购成本核算', '采购成本独立于供应商连接，按实际人民币采购金额和有效期核算；销售额自动读取 sub2api 实际扣款')}
+    ${section('采购成本核算', '采购批次和成本期独立于供应商连接，按实际人民币采购金额、税费和生效期核算')}
     <div class="metric-grid">
       ${metric('供应商', compact(summary.supplierCount), '按采购成本归集')}
       ${metric('关联账号', compact(summary.accountCount), '已归集到采购口径')}
@@ -2101,17 +2125,17 @@ async function renderSuppliers(search = state.supplierSearch) {
         { label: '供应商' }, { label: '平台' }, { label: '账号', right: true }, { label: '实际消费 CNY', right: true },
         { label: '采购分摊 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
       ], suppliers.items.map((item) => [
-        `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${item.missingRuleCount ? `${item.missingRuleCount} 个账号本期待补采购成本` : '本期成本完整'}</div>`,
+        `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${item.missingRuleCount ? `${item.missingRuleCount} 个账号缺成本规则` : '成本规则完整'}</div>`,
         tags(item.platforms), compact(item.accountCount), cny(item.userChargeCny), cny(item.purchaseAllocatedCostCny), cny(item.bookedCostCny),
         `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
       ]), 1080)
     }${pager(suppliers, 'suppliersList', '个供应商')}</section>
     <section class="table-panel supplier-purchase-panel"><div class="panel-header"><div><h2>采购批次</h2><span>账号采购成本、生效期和供应商归属</span></div></div>${table([
-      { label: '账号' }, { label: '供应商 / 批次' }, { label: '采购成本 CNY', right: true }, { label: '生效期' }, { label: '状态' },
+      { label: '账号' }, { label: '供应商 / 批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
     ], purchases.items.map((item) => [
       `<span class="primary-text">${escapeHtml(item.accountName)}</span><div class="secondary-text">#${item.accountId}</div>`,
       `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${escapeHtml(item.purchaseBatch)}</div>`,
-      cny(item.totalCost),
+      `<span class="tag neutral">${escapeHtml(item.costProfile)}</span>`, cny(item.totalCost),
       `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
     ]), 920)}${pager(purchases, 'purchasesList', '个采购批次')}</section>`;
   bindSearch(renderSuppliers);
@@ -2140,7 +2164,7 @@ async function renderSuppliers(search = state.supplierSearch) {
       }
     });
   });
-  document.querySelector('#supplier-cost-button')?.addEventListener('click', () => openSingleCostModal(accountData.items));
+  document.querySelector('#supplier-cost-button')?.addEventListener('click', () => openSingleCostModal(accountData.items, profiles));
 }
 
 async function renderCosts(search = '') {
@@ -2244,7 +2268,9 @@ function scheduleRuntimeRefresh() {
 }
 
 function modalControl(field) {
-  if (field.type === 'notice') return `<div class="form-notice ${field.tone || ''}">${escapeHtml(field.value || '')}</div>`;
+  if (field.type === 'notice') {
+    return `<div class="form-notice ${field.tone || ''}" ${field.hook ? `data-${escapeHtml(field.hook)}` : ''}>${escapeHtml(field.value || '')}</div>`;
+  }
   const required = field.required === false ? '' : 'required';
   if (field.type === 'select') {
     return `<select name="${escapeHtml(field.name)}" ${required}>${field.options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${String(value) === String(field.value ?? '') ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select>`;
@@ -2311,20 +2337,27 @@ function closeModal() {
   state.supplierDetail = null;
 }
 
-function costFields(account, { includeAccount = false, batch = false, correction = false } = {}) {
+function costFields(profiles, account, { includeAccount = false, batch = false, correction = false } = {}) {
   const now = new Date();
   const end = new Date(now);
   end.setMonth(end.getMonth() + 1);
+  const profileId = account?.currentCostProfileId || account?.costProfileId || '';
+  const fixedProfiles = profiles.filter((item) => !item.costMode || item.costMode === 'fixed_purchase');
   return [
     ...(includeAccount ? [{ name: 'accountId', label: '账号', type: 'select', options: account.options, value: account.value }] : []),
+    { name: 'costProfileId', label: '固定成本模板（可选）', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...fixedProfiles.map((item) => [item.id, item.name])] },
     { name: 'originalAmount', label: batch ? '采购批次总成本 CNY' : '采购总成本 CNY', type: 'number', value: account?.currentOriginalAmount || '' },
+    { name: 'feeAmount', label: '手续费 CNY', type: 'number', required: false, value: account?.currentFeeAmount ?? '0' },
+    { name: 'taxAmount', label: '税费 CNY', type: 'number', required: false, value: account?.currentTaxAmount ?? '0' },
+    ...(batch ? [{ name: 'allocationStrategy', label: '批次分摊方式', type: 'select', options: [['equal', '账号均分'], ['standard_cost_weight', '目录价权重'], ['token_weight', 'Token 权重']] }] : []),
     { name: 'effectiveFrom', label: '生效时间', type: 'datetime-local', value: dateTimeInputValue(account?.currentEffectiveFrom) || dateTimeInputValue(now) },
     { name: 'effectiveTo', label: '结束时间', type: 'datetime-local', value: dateTimeInputValue(account?.currentEffectiveTo) || dateTimeInputValue(end) },
     { name: 'supplier', label: '供应商', required: false, value: account?.supplier || '' },
     { name: 'purchaseBatch', label: '采购批次', required: false, value: account?.purchaseBatch || '' },
+    { name: 'tags', label: '账号标签（逗号分隔）', required: false, value: account?.tags?.join(',') || '' },
     { name: 'notes', label: '备注', type: 'textarea', full: true, required: false, value: account?.currentCostNotes || '' },
     ...(correction ? [
-      { type: 'notice', tone: 'warning', value: '这条采购成本已经开始生效。保存会更正该时间段的历史成本和利润，并留下审计记录。' },
+      { type: 'notice', tone: 'warning', value: '该采购成本已经开始生效。保存会按填写的更正原因更新对应历史成本快照和利润。' },
       { name: 'correctionReason', label: '历史更正原因', type: 'textarea', full: true },
     ] : []),
   ];
@@ -2336,16 +2369,14 @@ function normalizeCostPayload(data) {
     originalCurrency: 'CNY',
     fxRate: '1',
     baseAmount: data.originalAmount,
-    feeAmount: '0',
-    taxAmount: '0',
-    allocationStrategy: data.allocationStrategy || 'equal',
+    tags: data.tags ? data.tags.split(',').map((item) => item.trim()).filter(Boolean) : [],
   };
 }
 
-function openSingleCostModal(accounts) {
+function openSingleCostModal(accounts, profiles) {
   if (!accounts.length) return toast('当前筛选结果没有可登记成本的账号');
   const picker = { options: accounts.map((item) => [item.id, item.name]), value: accounts[0].id };
-  openModal('登记单个账号成本', costFields(picker, { includeAccount: true }), (data) => api('/account-cost-periods', {
+  openModal('登记单个账号成本', costFields(profiles, picker, { includeAccount: true }), (data) => api('/account-cost-periods', {
     method: 'POST', range: false, body: JSON.stringify(normalizeCostPayload(data)),
   }));
 }
@@ -2370,9 +2401,10 @@ function accountCostFormAccount(account, period) {
   return {
     ...account,
     currentCostPeriodId: period?.id || null,
+    currentCostProfileId: period?.costProfileId || null,
     currentOriginalAmount: period?.originalAmount ?? '',
-    currentFeeAmount: '0',
-    currentTaxAmount: '0',
+    currentFeeAmount: period?.feeAmount ?? '0',
+    currentTaxAmount: period?.taxAmount ?? '0',
     currentEffectiveFrom: period?.effectiveFrom || null,
     currentEffectiveTo: period?.effectiveTo || null,
     currentCostNotes: period?.notes || '',
@@ -2381,7 +2413,7 @@ function accountCostFormAccount(account, period) {
   };
 }
 
-async function openAccountCostHistory(account, page = 1, pageSize = 10) {
+async function openAccountCostHistory(account, profiles, page = 1, pageSize = 10) {
   openContentModal('账号成本明细', '<div class="detail-loading"><span></span>正在读取成本记录</div>', 'cost-history-modal');
   try {
     const data = await api(`/accounts/${account.id}/cost-periods?page=${page}&page_size=${pageSize}`, { range: false });
@@ -2392,27 +2424,28 @@ async function openAccountCostHistory(account, page = 1, pageSize = 10) {
         <button type="button" class="button primary" data-cost-history-add>${icon('plus')}新增成本期</button>
       </div>
       ${table([
-        { label: '生效期间' }, { label: '供应商/批次' },
+        { label: '生效期间' }, { label: '供应商/批次' }, { label: '成本模板' },
         { label: '成本 CNY', right: true }, { label: '状态' }, { label: '操作' },
       ], data.items.map((item) => [
         `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`,
         `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${escapeHtml(item.purchaseBatch)}</div>`,
+        `<span class="tag neutral">${escapeHtml(item.costProfile)}</span>`,
         cny(item.totalCost),
         `<span class="status ${item.status === 'active' ? '' : 'warning'}">${item.hasStarted ? '已生效' : '未生效'}</span>`,
         `<button type="button" class="icon-button table-icon" title="${item.hasStarted ? '更正已生效采购成本' : '编辑未生效采购成本'}" data-cost-history-edit="${item.id}">${icon('settings-2')}</button>`,
       ]), 780)}
       ${accountCostHistoryPager(data)}`;
     form.className = 'modal-content';
-    form.querySelector('[data-cost-history-add]')?.addEventListener('click', () => openAccountCostModal(account, { forceCreate: true }));
+    form.querySelector('[data-cost-history-add]')?.addEventListener('click', () => openAccountCostModal(account, profiles, { forceCreate: true }));
     form.querySelectorAll('[data-cost-history-edit]').forEach((button) => {
       const period = data.items.find((item) => String(item.id) === button.dataset.costHistoryEdit);
-      button.addEventListener('click', () => openAccountCostModal(account, { period }));
+      button.addEventListener('click', () => openAccountCostModal(account, profiles, { period }));
     });
     form.querySelectorAll('[data-cost-history-page]').forEach((button) => {
-      button.addEventListener('click', () => openAccountCostHistory(account, Number(button.dataset.costHistoryPage), pageSize));
+      button.addEventListener('click', () => openAccountCostHistory(account, profiles, Number(button.dataset.costHistoryPage), pageSize));
     });
     form.querySelector('[data-cost-history-page-size]')?.addEventListener('change', (event) => {
-      openAccountCostHistory(account, 1, Number(event.target.value));
+      openAccountCostHistory(account, profiles, 1, Number(event.target.value));
     });
   } catch (error) {
     const form = document.querySelector('#modal-form');
@@ -2420,12 +2453,60 @@ async function openAccountCostHistory(account, page = 1, pageSize = 10) {
   }
 }
 
-function ledgerFields(account) {
+function ledgerFields(profiles, account) {
+  const profileId = account.costProfileId || '';
   return [
+    { name: 'costProfileId', label: '成本模板（可选）', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...profiles.map((item) => [item.id, item.name])] },
+    { name: 'costMode', label: '账号成本方式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['fixed_purchase', '固定采购成本（自有账号）'], ['probe_multiplier', '自动探测上游倍率'], ['manual_multiplier', '手动填写上游倍率'], ['free', '免费资源']] },
+    { type: 'notice', hook: 'account-cost-mode-hint' },
+    { name: 'basisMode', label: '倍率计价基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '按实际消费记录回推（推荐）'], ['reference_cny', '目录价乘 CNY 基准']] },
+    { name: 'upstreamMultiplier', label: '上游进货倍率', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
+    { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
+    { name: 'changeStrategy', label: '本次规则生效', type: 'select', value: 'future_only', options: [['future_only', '后续用量生效'], ['current_day', '从今天 0 点重算']] },
     { name: 'supplier', label: '供应商', required: false, value: account.supplier || '' },
     { name: 'purchaseBatch', label: '采购批次', required: false, value: account.purchaseBatch || '' },
     { name: 'tags', label: '账号标签（逗号分隔）', required: false, full: true, value: account.tags?.join(',') || '' },
   ];
+}
+
+function accountCostModeHint(mode) {
+  return ({
+    fixed_purchase: '固定采购成本按已登记的采购金额和生效期分摊；金额不填在倍率字段里。',
+    probe_multiplier: 'FinOps 读取供应商或 sub2api 已确认的上游倍率，并按每笔实际消费记录自动计算成本。',
+    manual_multiplier: '填写实际进货倍率；销售倍率由 sub2api 每笔消费记录读取，无需在这里配置。',
+    free: '该账号不计入上游成本。存在未结束固定成本期时不能切换为免费资源。',
+  })[mode] || '请选择该账号实际采用的成本方式。';
+}
+
+function setLedgerFieldVisible(form, name, visible) {
+  const control = form.elements[name];
+  const field = control?.closest('.field');
+  if (!control || !field) return;
+  field.hidden = !visible;
+  control.disabled = !visible;
+}
+
+function syncAccountLedgerForm(form, profiles, { applyProfile = false } = {}) {
+  const profile = profiles.find((item) => String(item.id) === String(form.elements.costProfileId?.value || ''));
+  if (profile && applyProfile) {
+    form.elements.costMode.value = profile.costMode || 'fixed_purchase';
+    form.elements.basisMode.value = profile.basisMode || 'revenue_backsolve';
+    if (profile.variableMultiplier !== null && profile.variableMultiplier !== undefined) {
+      form.elements.upstreamMultiplier.value = profile.variableMultiplier;
+    }
+    if (profile.cnyPerReferenceUnit !== null && profile.cnyPerReferenceUnit !== undefined) {
+      form.elements.cnyPerReferenceUnit.value = profile.cnyPerReferenceUnit;
+    }
+  }
+  const mode = form.elements.costMode.value;
+  const multiplierMode = ['probe_multiplier', 'manual_multiplier'].includes(mode);
+  const referenceBasis = multiplierMode && form.elements.basisMode.value === 'reference_cny';
+  setLedgerFieldVisible(form, 'basisMode', multiplierMode);
+  setLedgerFieldVisible(form, 'upstreamMultiplier', mode === 'manual_multiplier');
+  setLedgerFieldVisible(form, 'cnyPerReferenceUnit', referenceBasis);
+  setLedgerFieldVisible(form, 'changeStrategy', multiplierMode);
+  const hint = form.querySelector('[data-account-cost-mode-hint]');
+  if (hint) hint.textContent = accountCostModeHint(mode);
 }
 
 function changeStrategyLabel(value) {
@@ -2457,8 +2538,8 @@ function accountRuleContext(account) {
   </div>`;
 }
 
-function openAccountLedgerModal(account) {
-  openModal('编辑账号归属与标签', ledgerFields(account), (data) => api(`/accounts/${account.id}`, {
+function openAccountLedgerModal(account, profiles) {
+  openModal('配置账号成本', ledgerFields(profiles, account), (data) => api(`/accounts/${account.id}`, {
     method: 'PATCH',
     range: false,
     body: JSON.stringify({
@@ -2471,6 +2552,18 @@ function openAccountLedgerModal(account) {
       await renderAccounts(state.accountSearch);
     },
   });
+  const form = document.querySelector('#modal-form');
+  form.insertAdjacentHTML('afterbegin', accountRuleContext(account));
+  const actions = form.querySelector('.form-actions');
+  actions.insertAdjacentHTML('afterbegin', `
+    <button type="button" class="button" data-account-rule-history>${icon('receipt-text')}版本记录</button>
+    <button type="button" class="button" data-account-cost-archive>${icon('shield-check')}封存计价</button>`);
+  syncAccountLedgerForm(form, profiles);
+  form.elements.costMode?.addEventListener('change', () => syncAccountLedgerForm(form, profiles));
+  form.elements.basisMode?.addEventListener('change', () => syncAccountLedgerForm(form, profiles));
+  form.elements.costProfileId?.addEventListener('change', () => syncAccountLedgerForm(form, profiles, { applyProfile: true }));
+  actions.querySelector('[data-account-rule-history]')?.addEventListener('click', () => openAccountCostRuleHistory(account, profiles));
+  actions.querySelector('[data-account-cost-archive]')?.addEventListener('click', () => openAccountCostArchiveModal(account, profiles));
 }
 
 function accountCostRuleHistoryPager(data) {
@@ -2573,11 +2666,11 @@ function openAccountCostRepriceModal(account) {
   }));
 }
 
-function openAccountCostModal(account, { period = null, forceCreate = false } = {}) {
+function openAccountCostModal(account, profiles, { period = null, forceCreate = false } = {}) {
   const editing = Boolean(period);
   const formAccount = editing ? accountCostFormAccount(account, period) : forceCreate ? accountCostFormAccount(account, null) : account;
   openModal(editing ? (period.hasStarted ? '更正已生效采购成本' : '编辑未生效采购成本') : '登记账号成本',
-    costFields(formAccount, { correction: Boolean(period?.hasStarted) }), async (data) => {
+    costFields(profiles, formAccount, { correction: Boolean(period?.hasStarted) }), async (data) => {
     const payload = normalizeCostPayload(data);
     if (editing) {
       await api(`/account-cost-periods/${period.id}`, {
@@ -2590,16 +2683,16 @@ function openAccountCostModal(account, { period = null, forceCreate = false } = 
     }
   }, {
     onSaved: async () => {
-      await openAccountCostHistory(account);
+      await openAccountCostHistory(account, profiles);
       void renderAccounts(state.accountSearch);
     },
   });
 }
 
-function openBulkCostModal() {
+function openBulkCostModal(profiles) {
   const accountIds = [...state.selectedAccounts];
   if (!accountIds.length) return toast('请先选择账号');
-  openModal(`批量登记成本（${accountIds.length} 个账号）`, costFields(null, { batch: true }), (data) => api('/account-cost-periods/bulk', {
+  openModal(`批量登记成本（${accountIds.length} 个账号）`, costFields(profiles, null, { batch: true }), (data) => api('/account-cost-periods/bulk', {
     method: 'POST', range: false, body: JSON.stringify({ ...normalizeCostPayload(data), accountIds }),
   }).then(() => { state.selectedAccounts.clear(); }));
 }
@@ -2713,13 +2806,17 @@ content.addEventListener('click', (event) => {
     render();
     return;
   }
-  if (ledgerEdit || accountCostHistory) {
+  if (ledgerEdit || accountRuleHistory || accountCostHistory) {
     const accountId = ledgerEdit?.dataset.editLedger
+      || accountRuleHistory?.dataset.accountRuleHistory
       || accountCostHistory?.dataset.accountCostHistory;
     const account = state.accountItems.get(accountId);
     if (!account) return;
-    if (ledgerEdit) openAccountLedgerModal(account);
-    else openAccountCostHistory(account);
+    api('/cost-profiles', { range: false }).then((profiles) => {
+      if (ledgerEdit) openAccountLedgerModal(account, profiles);
+      else if (accountRuleHistory) openAccountCostRuleHistory(account, profiles);
+      else openAccountCostHistory(account, profiles);
+    }).catch((error) => toast(error.message));
   }
 });
 

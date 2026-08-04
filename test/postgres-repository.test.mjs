@@ -79,19 +79,14 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
   const usageByUser = queries.find((query) => query.text.includes('usage_by_user_account')).text;
   const accounts = queries.find((query) => query.text.includes('WITH usage AS') && query.text.includes('LIMIT $6 OFFSET $7')).text;
   const suppliers = queries.find((query) => query.text.includes('FROM account_economics GROUP BY supplier')).text;
-  assert.match(usageByModel, /SUM\(user_charge_cny\) AS revenue_weight/);
-  assert.match(usageByUser, /SUM\(user_charge_cny\) AS revenue_weight/);
-  assert.match(usageByModel, /WHEN aw\.revenue_weight > 0 THEN COALESCE\(ac\.purchase_cost_cny,0\)\*u\.revenue_weight\/aw\.revenue_weight/);
+  assert.match(usageByModel, /COALESCE\('standard_cost_weight', 'standard_cost_weight'\)/);
+  assert.match(usageByUser, /COALESCE\('token_weight', 'standard_cost_weight'\)/);
   assert.match(accounts, /LEAST\(p\.effective_to,\$4\)/);
   assert.match(accounts, /a\.source_deleted_at IS NULL AND a\.status='active'/);
-  assert.match(accounts, /CASE WHEN COALESCE\(c\.cost_record_count,0\)>0 THEN 'fixed_purchase' ELSE 'unconfigured' END AS cost_type/);
-  assert.match(accounts, /FROM "finops"\.account_cost_periods p\s+WHERE p\.source_account_id=a\.source_account_id AND p\.status='active'/);
-  assert.doesNotMatch(accounts, /usage_cost_facts/);
+  assert.match(accounts, /NULLIF\(m\.cost_mode,'unconfigured'\)/);
+  assert.match(accounts, /WHEN probe\.status='ok' AND probe\.effective_rate_multiplier>0 AND probe\.fresh_until>NOW\(\) THEN 'probe_multiplier'/);
   assert.match(suppliers, /WHERE p\.status='active' AND p\.effective_from < \$4 AND p\.effective_to > \$3/);
-  const purchases = queries.find((query) => query.text.includes('SELECT p.id,p.source_account_id'));
-  assert.match(purchases.text, /FROM "finops"\.account_cost_periods p/);
-  assert.doesNotMatch(purchases.text, /account_fixed_cost_periods/);
-  assert.deepEqual(purchases.params, [
+  assert.deepEqual(queries.find((query) => query.text.includes('SELECT p.id,p.source_account_id')).params, [
     start, end, 'OpenAI',
   ]);
 });
@@ -149,10 +144,11 @@ test('overview omits duplicate consumption rankings and model breakdown exposes 
   assert.equal(queries.filter((query) => query.text.includes('AS consumption_cny')).length, 0);
   const usageBreakdown = queries.find((query) => query.text.includes('WITH usage_by_model_account')).text;
   assert.match(usageBreakdown, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
-  assert.match(usageBreakdown, /SUM\(user_charge_cny\) AS revenue_weight/);
-  assert.match(usageBreakdown, /FROM "finops"\.account_fixed_cost_periods p/);
-  assert.doesNotMatch(usageBreakdown, /usage_cost_facts snapshot/);
-  assert.match(usageBreakdown, /COUNT\(DISTINCT source_account_id\) FILTER \(WHERE NOT has_cost_record\)/);
+  assert.match(usageBreakdown, /JOIN "finops"\.fact_usage_events f ON f\.source_usage_id=snapshot\.source_usage_id/);
+  assert.match(usageBreakdown, /NULLIF\(BTRIM\(f\.requested_model\),''\)/);
+  assert.match(usageBreakdown, /SUM\(snapshot\.calculated_cost_cny\) FILTER \(WHERE snapshot\.cost_status='priced'\)/);
+  assert.match(usageBreakdown, /SUM\(snapshot\.user_charge_cny\) FILTER \(\s*WHERE snapshot\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
+  assert.match(usageBreakdown, /MAX\(snapshot\.cost_mode\) AS cost_mode/);
 });
 
 test('runtime dashboard enriches Redis-only concurrency snapshots with FinOps user identities', async () => {
@@ -429,13 +425,13 @@ test('overview summary excludes subscription refunds from recharge net amount', 
   assert.match(cashQuery.text, /transaction_type='refund' AND status <> 'void'\s+AND COALESCE\(order_type,''\) <> 'subscription'/);
 });
 
-test('account purchase periods do not inherit legacy cost profiles', async () => {
+test('account cost periods inherit the selected account profile when no explicit profile is supplied', async () => {
   const queries = [];
   const client = {
     async query(text, params = []) {
       queries.push({ text, params });
-      if (text.includes('SELECT a.source_account_id')) {
-        return { rows: [{ source_account_id: 8 }], rowCount: 1 };
+      if (text.includes('SELECT a.source_account_id,a.cost_profile_id')) {
+        return { rows: [{ source_account_id: 8, cost_profile_id: 42, cost_type: 'metered' }], rowCount: 1 };
       }
       if (text.includes('INSERT INTO "finops".account_cost_periods')) return { rows: [{ id: 9 }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -450,7 +446,7 @@ test('account purchase periods do not inherit legacy cost profiles', async () =>
     effectiveTo: '2026-08-01T00:00:00Z', notes: '', tags: null,
   });
   const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_periods'));
-  assert.equal(insert.params[1], null);
+  assert.equal(insert.params[1], 42);
 });
 
 test('started purchase cost edits require an explicit historical correction reason', async () => {
@@ -458,7 +454,7 @@ test('started purchase cost edits require an explicit historical correction reas
   const client = {
     async query(text, params = []) {
       queries.push({ text, params });
-      if (text.includes('SELECT p.*,') && text.includes('FOR UPDATE OF p')) {
+      if (text.includes('SELECT p.*,') && text.includes('FOR UPDATE OF p,a')) {
         return {
           rows: [{
             id: 9, source_account_id: 8, effective_from: '2026-07-01T00:00:00.000Z',
@@ -477,6 +473,7 @@ test('started purchase cost edits require an explicit historical correction reas
       originalAmount: '12', originalCurrency: 'CNY', fxRate: '1', baseAmount: '12',
       feeAmount: '0', taxAmount: '0', supplier: '', purchaseBatch: '',
       effectiveFrom: '2026-07-01T00:00:00.000Z', effectiveTo: '2026-08-01T00:00:00.000Z', notes: '',
+      correctionReason: '',
     }),
     (error) => error.statusCode === 409 && /correctionReason/.test(error.message),
   );

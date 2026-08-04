@@ -191,7 +191,17 @@ export function normalizeBulkAccountCostPeriods(input) {
 }
 
 export function normalizeAccountLedger(input) {
+  const costMode = optionalEnum(input.costMode, 'costMode', COST_MODES);
+  const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES);
+  const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
+  const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
   return {
+    costProfileId: optionalId(input.costProfileId, 'costProfileId'),
+    costMode,
+    basisMode,
+    upstreamMultiplier,
+    cnyPerReferenceUnit,
+    changeStrategy: optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only',
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags) || [],
