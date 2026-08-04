@@ -87,11 +87,10 @@ test('write payloads are normalized and invalid financial data is rejected', () 
     defaultSellingMultiplier: '8',
   });
   assert.equal('defaultSellingMultiplier' in legacyProfile, false);
-  const legacyLedger = normalizeAccountLedger({ costMode: 'manual_multiplier', sellingMultiplier: '8' });
-  assert.equal(legacyLedger.upstreamMultiplier, null);
-  assert.equal('sellingMultiplier' in legacyLedger, false);
-  assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier', changeStrategy: 'current_day' }).changeStrategy, 'current_day');
-  assert.throws(() => normalizeAccountLedger({ changeStrategy: 'rewrite_everything' }), /invalid changeStrategy/);
+  const ledger = normalizeAccountLedger({ supplier: 'Supplier A', purchaseBatch: 'B-001', tags: '主力,主力' });
+  assert.deepEqual(ledger.tags, ['主力']);
+  assert.equal('costMode' in ledger, false);
+  assert.equal('sellingMultiplier' in ledger, false);
   assert.equal(normalizeAccountCostArchive({ cutoffAt: '2026-08-01T12:00:00+08:00', notes: '日结' }).notes, '日结');
   const reprice = normalizeAccountCostReprice({
     effectiveFrom: '2026-07-01T00:00:00+08:00', effectiveTo: '2026-08-01T00:00:00+08:00',
@@ -127,6 +126,7 @@ test('write payloads are normalized and invalid financial data is rejected', () 
   assert.throws(() => normalizeAccountCostPeriod({ ...period, fxRate: '7.2' }), /fxRate must be 1/);
   assert.throws(() => normalizeAccountCostPeriod({ ...period, baseAmount: '36' }), /baseAmount must equal originalAmount/);
   assert.equal(normalizeAccountCostPeriodUpdate({ ...period }).accountId, undefined);
+  assert.equal(normalizeAccountCostPeriodUpdate({ ...period, correctionReason: '采购单金额录入错误' }).correctionReason, '采购单金额录入错误');
   assert.deepEqual(normalizeBulkAccountCostPeriods({ ...period, accountIds: [2745, '2745', 2742] }).accountIds, [2745, 2742]);
 });
 

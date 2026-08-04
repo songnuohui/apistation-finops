@@ -151,7 +151,7 @@ export function normalizeCostProfile(input) {
   };
 }
 
-function normalizeAccountCostPeriodFields(input, accountId) {
+function normalizeAccountCostPeriodFields(input, accountId, { updating = false } = {}) {
   const effectiveFrom = dateValue(input.effectiveFrom, 'effectiveFrom');
   const effectiveTo = dateValue(input.effectiveTo, 'effectiveTo');
   if (new Date(effectiveTo) <= new Date(effectiveFrom)) throw badRequest('effectiveTo must be after effectiveFrom');
@@ -168,6 +168,9 @@ function normalizeAccountCostPeriodFields(input, accountId) {
     tags: tagValues(input.tags),
     allocationStrategy: optionalEnum(input.allocationStrategy, 'allocationStrategy', FIXED_ALLOCATION_STRATEGIES) || 'equal',
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
+    correctionReason: updating
+      ? textValue(input.correctionReason, 'correctionReason', { required: false, max: 1000 })
+      : '',
   };
 }
 
@@ -177,7 +180,7 @@ export function normalizeAccountCostPeriod(input) {
 }
 
 export function normalizeAccountCostPeriodUpdate(input) {
-  return normalizeAccountCostPeriodFields(input, null);
+  return normalizeAccountCostPeriodFields(input, null, { updating: true });
 }
 
 export function normalizeBulkAccountCostPeriods(input) {
@@ -188,17 +191,7 @@ export function normalizeBulkAccountCostPeriods(input) {
 }
 
 export function normalizeAccountLedger(input) {
-  const costMode = optionalEnum(input.costMode, 'costMode', COST_MODES);
-  const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES);
-  const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
-  const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
   return {
-    costProfileId: optionalId(input.costProfileId, 'costProfileId'),
-    costMode,
-    basisMode,
-    upstreamMultiplier,
-    cnyPerReferenceUnit,
-    changeStrategy: optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only',
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags) || [],

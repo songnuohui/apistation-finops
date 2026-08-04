@@ -198,19 +198,17 @@ test('sync details expose source-level health without errors', async () => {
   assert.ok(details.rowsSynced > 0);
 });
 
-test('demo accounting is CNY-only and rejects cost periods on free accounts', async () => {
+test('demo accounting is CNY-only and lets purchase records stand on their own', async () => {
   const repository = new DemoRepository(config);
   const bootstrap = await repository.getBootstrap();
   assert.equal(bootstrap.billingUnit, 'CNY');
   assert.equal(bootstrap.balanceCurrency, 'CNY');
   assert.equal(bootstrap.referenceCurrency, 'USD');
 
-  const profile = await repository.createCostProfile({
-    name: '免费资源', costType: 'free', currency: 'CNY', allocationMethod: 'none',
+  const created = await repository.createAccountCostPeriod({
+    accountId: 2745, originalAmount: '1', baseAmount: '1',
   });
-  await assert.rejects(repository.createAccountCostPeriod({
-    accountId: 2745, costProfileId: profile.id, originalAmount: '1', baseAmount: '1',
-  }), /free accounts cannot have a CNY cost period/);
+  assert.equal(created.originalAmount, '1');
 });
 
 test('demo account cost history is paginated and editable by period', async () => {
@@ -222,7 +220,7 @@ test('demo account cost history is paginated and editable by period', async () =
   await repository.updateAccountCostPeriod(first.items[0].id, {
     originalAmount: '41', baseAmount: '41', feeAmount: '0', taxAmount: '0',
     effectiveFrom: first.items[0].effectiveFrom, effectiveTo: first.items[0].effectiveTo,
-    supplier: 'new supplier', purchaseBatch: 'NEW-BATCH', notes: 'revised',
+    supplier: 'new supplier', purchaseBatch: 'NEW-BATCH', notes: 'revised', correctionReason: '采购单金额录入错误',
   });
   const updated = (await repository.listAccountCostPeriods({ accountId: 2745 })).items[0];
   assert.equal(updated.originalAmount, '41');

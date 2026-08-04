@@ -994,32 +994,11 @@ export class SyncService {
       WITH eligible_periods AS (
         SELECT
           p.id,p.source_account_id,p.cost_profile_id,p.effective_from,p.effective_to,p.status,
-          COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount) AS period_total_cost_cny,
-          COALESCE(profile.cost_type,'prepaid') AS cost_type,
-          COALESCE(profile.allocation_method,'standard_cost_weight') AS allocation_method,
-          COALESCE(
-            rule.cost_mode,
-            profile.cost_mode,
-            CASE WHEN profile.cost_type='free' THEN 'free' ELSE 'fixed_purchase' END
-          ) AS resolved_cost_mode
+           COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount) AS period_total_cost_cny,
+           'purchase'::varchar AS cost_type,
+           'revenue_weight'::varchar AS allocation_method
         FROM ${this.schema}.account_cost_periods p
-        LEFT JOIN ${this.schema}.cost_profiles profile ON profile.id=p.cost_profile_id
-        LEFT JOIN LATERAL (
-          SELECT r.cost_mode
-          FROM ${this.schema}.account_cost_rules r
-          WHERE r.source_account_id=p.source_account_id
-            AND r.status IN ('active','superseded')
-            AND r.effective_from <= p.effective_from
-            AND (r.effective_to IS NULL OR r.effective_to > p.effective_from)
-          ORDER BY r.effective_from DESC,r.id DESC
-          LIMIT 1
-        ) rule ON TRUE
         WHERE p.status='active'
-          AND COALESCE(
-            rule.cost_mode,
-            profile.cost_mode,
-            CASE WHEN profile.cost_type='free' THEN 'free' ELSE 'fixed_purchase' END
-          )='fixed_purchase'
       ), daily AS (
         SELECT
           p.*,

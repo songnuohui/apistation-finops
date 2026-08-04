@@ -616,7 +616,8 @@ export class DemoRepository {
         ...item,
         totalCost: Number(item.baseAmount || item.originalAmount || 0)
           + Number(item.feeAmount || 0) + Number(item.taxAmount || 0),
-        costProfile: this.costProfiles.find((profile) => Number(profile.id) === Number(item.costProfileId))?.name || '未绑定模板',
+        costProfile: '采购成本',
+        hasStarted: new Date(item.effectiveFrom).getTime() <= Date.now(),
       }));
     return pageResult(periods, page, pageSize);
   }
@@ -1068,24 +1069,10 @@ export class DemoRepository {
 
   async createAccountCostPeriod(input) {
     const account = this.accounts.find((item) => Number(item.id) === Number(input.accountId));
-    const selectedProfile = input.costProfileId
-      ? this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId))
-      : null;
-    if ((selectedProfile?.costMode || account?.costMode) === 'free') {
-      throw Object.assign(new Error('free accounts cannot have a CNY cost period'), { statusCode: 409 });
-    }
-    if ((selectedProfile?.costMode || account?.costMode) && (selectedProfile?.costMode || account?.costMode) !== 'fixed_purchase') {
-      throw Object.assign(new Error('multiplier accounts use the account ledger rule instead of a fixed cost period'), { statusCode: 409 });
-    }
     const id = Math.max(0, ...this.accountCostPeriods.map((period) => period.id)) + 1;
     const period = { id, ...input, status: 'active' };
     this.accountCostPeriods.push(period);
     if (account) {
-      if (selectedProfile) {
-        account.costType = selectedProfile.costType;
-        account.costMode = selectedProfile.costMode;
-        selectedProfile.accountCount += 1;
-      }
       if (input.supplier) account.supplier = input.supplier;
       if (input.purchaseBatch) account.purchaseBatch = input.purchaseBatch;
       if (Array.isArray(input.tags)) account.tags = input.tags;
@@ -1160,24 +1147,6 @@ export class DemoRepository {
   async updateAccountLedger(accountId, input) {
     const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
     if (!account) throw Object.assign(new Error('account not found; run synchronization first'), { statusCode: 404 });
-    const profile = input.costProfileId ? this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId)) : null;
-    if (input.costProfileId && !profile) throw Object.assign(new Error('cost profile not found'), { statusCode: 404 });
-    const costMode = input.costMode || profile?.costMode || account.costMode || 'fixed_purchase';
-    if (costMode === 'free' && account.hasCostRecord) {
-      throw Object.assign(new Error('free accounts cannot retain active CNY cost periods'), { statusCode: 409 });
-    }
-    if (costMode === 'manual_multiplier' && !(input.upstreamMultiplier || profile?.variableMultiplier)) {
-      throw Object.assign(new Error('manual_multiplier requires an account or template upstreamMultiplier'), { statusCode: 400 });
-    }
-    if (input.basisMode === 'reference_cny' && !(input.cnyPerReferenceUnit || profile?.cnyPerReferenceUnit)) {
-      throw Object.assign(new Error('reference_cny requires an account or template cnyPerReferenceUnit'), { statusCode: 400 });
-    }
-    account.costProfileId = input.costProfileId;
-    account.costType = profile?.costType || (costMode === 'free' ? 'free' : account.costType);
-    account.costMode = costMode;
-    account.basisMode = input.basisMode || account.basisMode || 'revenue_backsolve';
-    account.upstreamMultiplier = input.upstreamMultiplier || profile?.variableMultiplier || null;
-    account.cnyPerReferenceUnit = input.cnyPerReferenceUnit || profile?.cnyPerReferenceUnit || null;
     account.supplier = input.supplier;
     account.purchaseBatch = input.purchaseBatch;
     account.tags = input.tags;
@@ -1187,17 +1156,26 @@ export class DemoRepository {
   async updateAccountCostPeriod(periodId, input) {
     const period = this.accountCostPeriods.find((item) => Number(item.id) === Number(periodId));
     if (!period) throw Object.assign(new Error('account cost period not found'), { statusCode: 404 });
+    if (new Date(period.effectiveFrom).getTime() <= Date.now() && !input.correctionReason) {
+      throw Object.assign(new Error('started purchase costs require a correctionReason so historical profit changes are explicit'), { statusCode: 409 });
+    }
+    const beforeTotal = Number(period.baseAmount || period.originalAmount || 0)
+      + Number(period.feeAmount || 0) + Number(period.taxAmount || 0);
     Object.assign(period, input);
     const account = this.accounts.find((item) => Number(item.id) === Number(period.accountId));
     if (account) {
-      if (input.costProfileId) {
-        const profile = this.costProfiles.find((item) => Number(item.id) === Number(input.costProfileId));
-        if (!profile) throw Object.assign(new Error('cost profile not found'), { statusCode: 404 });
-        if (profile.costMode !== 'fixed_purchase') throw Object.assign(new Error('only fixed_purchase profiles can have a CNY cost period'), { statusCode: 409 });
-        account.costType = profile.costType;
-        account.costMode = profile.costMode;
-        account.costProfileId = profile.id;
-      }
+      const afterTotal = Number(period.baseAmount || period.originalAmount || 0)
+        + Number(period.feeAmount || 0) + Number(period.taxAmount || 0);
+      account.periodCost = +(Number(account.periodCost || 0) - beforeTotal + afterTotal).toFixed(2);
+      account.purchaseAllocatedCostCny = account.periodCost;
+      account.effectiveCostCny = account.periodCost;
+      account.fullyLoadedCost = account.periodCost;
+      account.fullyLoadedCostCny = account.periodCost;
+      account.bookedCostCny = account.periodCost;
+      account.grossProfit = +(Number(account.revenue || 0) - account.periodCost).toFixed(2);
+      account.grossProfitCny = account.grossProfit;
+      account.bookedProfitCny = account.grossProfit;
+      account.grossMargin = account.revenue ? +(account.grossProfit / account.revenue).toFixed(4) : null;
       account.supplier = input.supplier;
       account.purchaseBatch = input.purchaseBatch;
       if (Array.isArray(input.tags)) account.tags = input.tags;
