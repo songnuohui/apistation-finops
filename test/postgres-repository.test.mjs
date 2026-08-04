@@ -67,7 +67,7 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
     '2026-07-02', '2026-07-30', start, end, 20, 0,
   ]);
   assert.deepEqual(queries.find((query) => query.text.includes('usage_by_user_account')).params, [
-    '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0, 'all',
+    '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0, 'all', false,
   ]);
   assert.deepEqual(queries.find((query) => query.text.includes('WITH usage AS') && query.text.includes('LIMIT $6 OFFSET $7')).params, [
     '2026-07-02', '2026-07-30', start, end, 'OpenAI', 20, 0,
@@ -91,7 +91,7 @@ test('daily usage rollups bind timezone-safe date keys separately from exact cos
   ]);
 });
 
-test('overview consumption rankings and model breakdown expose displayable model names', async () => {
+test('overview omits duplicate consumption rankings and model breakdown exposes displayable model names', async () => {
   const queries = [];
   const pool = {
     async query(text, params = []) {
@@ -137,13 +137,11 @@ test('overview consumption rankings and model breakdown expose displayable model
     repository.getUsageBreakdown(range),
   ]);
 
-  assert.deepEqual(dashboard.rankings.userConsumption, [{
-    id: 7, email: 'customer@example.com', username: 'customer', userChargeCny: 18.25, requests: 3, tokens: 2400,
-  }]);
-  assert.deepEqual(dashboard.rankings.modelConsumption, [{
-    name: 'gpt-5.6-sol', userChargeCny: 26.5, requests: 4, tokens: 3200,
-  }]);
+  assert.equal('userConsumption' in dashboard.rankings, false);
+  assert.equal('modelConsumption' in dashboard.rankings, false);
   assert.equal(models.items[0].name, 'gpt-5.6-sol');
+  assert.equal(models.items[0].grossMargin, 1);
+  assert.equal(queries.filter((query) => query.text.includes('AS consumption_cny')).length, 0);
   const usageBreakdown = queries.find((query) => query.text.includes('WITH usage_by_model_account')).text;
   assert.match(usageBreakdown, /COALESCE\(NULLIF\(BTRIM\(model\),''\),'未标注模型'\) AS model/);
   assert.match(usageBreakdown, /JOIN "finops"\.fact_usage_events f ON f\.source_usage_id=snapshot\.source_usage_id/);
@@ -239,15 +237,15 @@ test('user detail usage rows use the same model fallback as model aggregates', a
   assert.doesNotMatch(usageQuery.text, /sub2api/);
 });
 
-test('overview and non-cash-credit details exclude affiliate quota records and balance-whitelisted users', async () => {
+test('overview and gift-credit details exclude affiliate quota records and balance-whitelisted users', async () => {
   const overviewQueries = [];
   const overviewPool = {
     async query(text, params = []) {
       overviewQueries.push({ text, params });
-      if (text.includes('non_cash_balance_credit_cny')) {
+      if (text.includes('gift_balance_credit_cny')) {
         return {
           rows: [{
-            non_cash_balance_credit_cny: '12.5', non_cash_balance_credit_count: '2',
+            gift_balance_credit_cny: '12.5', gift_balance_credit_count: '2',
             balance_cny: '36', balance_user_count: '3',
           }],
           rowCount: 1,
@@ -264,10 +262,10 @@ test('overview and non-cash-credit details exclude affiliate quota records and b
     start, end, dailyStart: '2026-08-03', dailyEnd: '2026-08-03',
   });
   assert.deepEqual(dashboard.totals, {
-    nonCashBalanceCreditCny: 12.5, nonCashBalanceCreditCount: 2,
+    giftBalanceCreditCny: 12.5, giftBalanceCreditCount: 2,
     balanceCny: 36, balanceUserCount: 3,
   });
-  const overviewTotals = overviewQueries.find((query) => query.text.includes('non_cash_balance_credit_cny'));
+  const overviewTotals = overviewQueries.find((query) => query.text.includes('gift_balance_credit_cny'));
   assert.equal((overviewTotals.text.match(/accounting_scope',''\) <> 'affiliate_quota'/g) || []).length, 2);
   assert.match(overviewTotals.text, /LEFT JOIN "finops"\.dim_users credit_user ON credit_user\.source_user_id=e\.source_user_id/);
   assert.match(overviewTotals.text, /NOT COALESCE\(credit_user\.exclude_from_balance_stats,FALSE\)/);
@@ -317,13 +315,17 @@ test('reported balance scope excludes self-use accounts only from the balance li
   await repository.listUsers({ ...range, balanceScope: 'all' });
   await repository.listUsers({ ...range, balanceScope: 'reported' });
   await repository.listUsers({ ...range, balanceScope: 'whitelist' });
+  await repository.listUsers({ ...range, balanceScope: 'all', consumptionOnly: true });
   const userQueries = queries.filter((query) => query.text.includes('usage_by_user_account'));
-  assert.equal(userQueries.length, 3);
-  assert.equal(userQueries[0].params.at(-1), 'all');
-  assert.equal(userQueries[1].params.at(-1), 'reported');
-  assert.equal(userQueries[2].params.at(-1), 'whitelist');
+  assert.equal(userQueries.length, 4);
+  assert.equal(userQueries[0].params.at(-2), 'all');
+  assert.equal(userQueries[1].params.at(-2), 'reported');
+  assert.equal(userQueries[2].params.at(-2), 'whitelist');
+  assert.equal(userQueries[3].params.at(-2), 'all');
+  assert.equal(userQueries[3].params.at(-1), true);
   assert.match(userQueries[0].text, /\$8='reported' AND u\.current_balance > 0 AND NOT u\.exclude_from_balance_stats/);
   assert.match(userQueries[0].text, /\$8='whitelist' AND u\.exclude_from_balance_stats/);
+  assert.match(userQueries[0].text, /NOT \$9::boolean OR COALESCE\(us\.charge_cny,0\)>0/);
   assert.match(userQueries[0].text, /FROM usage_by_user_account u/);
 });
 

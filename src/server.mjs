@@ -133,6 +133,14 @@ function userSort(searchParams){
   if(!['asc','desc'].includes(direction))throw Object.assign(new Error('invalid sort direction'),{statusCode:400});
   return {sort,direction};
 }
+function usageSort(searchParams){
+  const sort=searchParams.get('sort')||'userChargeCny';
+  const direction=searchParams.get('direction')||'desc';
+  const allowed=new Set(['userChargeCny','requests','tokens','bookedCostCny','bookedProfitCny']);
+  if(!allowed.has(sort))throw Object.assign(new Error('invalid usage sort'),{statusCode:400});
+  if(!['asc','desc'].includes(direction))throw Object.assign(new Error('invalid usage sort direction'),{statusCode:400});
+  return {sort,direction};
+}
 async function login(request,res){
   const credentials=loginPayload(await body(request));
   if(!credentials)return json(res,400,{error:'email and password are required'});
@@ -181,7 +189,10 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>repository.getSummary(range())));
   if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>repository.getOverviewDashboard(range())));
   if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>repository.getTrend(range())));
-  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>repository.getUsageBreakdown({...range(),...page()})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>repository.getUsageBreakdown({...range(),...page(),...usageSort(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/users')return json(res,200,await cached('usage-users',config.listCacheTtlSeconds,()=>repository.listUsers({
+    ...range(),...page(),...userSort(url.searchParams),consumptionOnly:true,
+  })));
   if(request.method==='GET'&&url.pathname==='/api/usage/events')return json(res,200,await cached('usage-events',config.listCacheTtlSeconds,()=>repository.listUsageEvents({...range(),...page(),search:searchTerm(url.searchParams)})));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&userDetails){

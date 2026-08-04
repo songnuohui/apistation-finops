@@ -20,7 +20,6 @@ const state = {
   overviewTrend: null,
   overviewMetrics: null,
   overviewAccountMasked: window.localStorage.getItem('finops.overview-account-masked') === 'true',
-  overviewConsumptionRanking: window.localStorage.getItem('finops.overview-consumption-ranking') === 'models' ? 'models' : 'users',
   userDetail: null,
   overviewDetail: null,
   whitelistManager: null,
@@ -479,71 +478,104 @@ function applyCustomRange() {
   render();
 }
 
+function runtimeQueueUsagePercent(queue) {
+  const value = Number(queue?.queueUsagePercent || 0);
+  return value <= 1 ? value * 100 : value;
+}
+
+function overviewRuntimePanel(data) {
+  const queue = data?.queue || { available: false };
+  const activeUsers = (data?.users || []).filter((item) => Number(item.currentConcurrency || 0) > 0);
+  const users = activeUsers.slice(0, 5);
+  const queueUsage = runtimeQueueUsagePercent(queue);
+  const workerCount = Number(queue.workerCount || 0);
+  const activeWorkers = Number(queue.activeWorkers || 0);
+  const observedAt = queue.observedAt || users[0]?.observedAt;
+  return `<section class="panel dashboard-runtime-panel" id="overview-runtime-panel">
+    <div class="panel-header">
+      <div><h2>实时并发与排队</h2><span>${queue.available ? `采样于 ${dateTime(observedAt)}` : '等待运行快照'}</span></div>
+      <label class="visibility-toggle"><input type="checkbox" data-overview-mask ${state.overviewAccountMasked ? 'checked' : ''}><span>隐藏账号</span></label>
+    </div>
+    <div class="dashboard-runtime-metrics">
+      <div><span>排队长度</span><strong>${queue.available ? compact(queue.queueLength) : '--'}</strong><small>${queue.available ? `容量 ${compact(queue.queueSize)} · ${queueUsage.toFixed(1)}%` : '暂无上游快照'}</small></div>
+      <div><span>工作线程</span><strong>${queue.available ? `${activeWorkers} / ${workerCount}` : '--'}</strong><small>${queue.available ? `空闲 ${compact(queue.idleWorkers || 0)}` : '暂无上游快照'}</small></div>
+      <div><span>当前并发用户</span><strong>${compact(activeUsers.length)}</strong><small>${queue.available ? (queue.enabled ? '队列已启用' : '队列未启用') : '等待同步'}</small></div>
+    </div>
+    <div class="dashboard-runtime-users">${
+      users.length ? users.map((item) => {
+        const maxConcurrency = Number(item.maxConcurrency || 0);
+        const currentConcurrency = Number(item.currentConcurrency || 0);
+        const usage = item.usagePercent === null || item.usagePercent === undefined
+          ? '--'
+          : `${Number(item.usagePercent).toFixed(1)}%`;
+        return `<div class="dashboard-runtime-user">
+          <div><strong>${escapeHtml(overviewIdentity(item))}</strong><small>ID ${item.id}${item.username && item.username !== item.email ? ` · ${escapeHtml(state.overviewAccountMasked ? maskedIdentity(item.username) : item.username)}` : ''}</small></div>
+          <div><strong>${compact(currentConcurrency)} / ${compact(maxConcurrency)}</strong><small>并发 · ${usage}</small></div>
+        </div>`;
+      }).join('') : '<div class="dashboard-runtime-empty">暂无正在执行的用户请求</div>'
+    }</div>
+  </section>`;
+}
+
+async function refreshOverviewRuntimePanel() {
+  if (state.page !== 'overview') return;
+  const current = document.querySelector('#overview-runtime-panel');
+  if (!current) return;
+  const data = await api('/runtime', { range: false });
+  if (state.page === 'overview' && current.isConnected) current.outerHTML = overviewRuntimePanel(data);
+}
+
 async function renderOverview() {
-  const [dashboard, trendData, modelData] = await Promise.all([
-    api('/overview-dashboard'), api('/trend'), api(`/usage/models?${queryFor('overviewModels')}`),
+  const [dashboard, trendData, modelData, runtimeData] = await Promise.all([
+    api('/overview-dashboard'),
+    api('/trend'),
+    api(`/usage/models?${queryFor('overviewModels', '', { sort: 'userChargeCny', direction: 'desc' })}`),
+    api('/runtime', { range: false }),
   ]);
-  const summary = dashboard.summary;
-  const operations = summary.operations;
-  const cash = summary.cash;
+  const summary = dashboard.summary || {};
+  const operations = summary.operations || {};
+  const cash = summary.cash || {};
+  const usage = summary.usage || {};
+  const alerts = summary.alerts || [];
   const netRecharge = Number(cash.rechargeReceived || 0) - Number(cash.refunds || 0);
-  const totalTokens = Number(summary.usage.inputTokens || 0)
-    + Number(summary.usage.outputTokens || 0)
-    + Number(summary.usage.cacheTokens || 0);
-  const consumptionRankingScope = state.overviewConsumptionRanking === 'models' ? 'models' : 'users';
-  const consumptionRankingItems = consumptionRankingScope === 'models'
-    ? (dashboard.rankings.modelConsumption || [])
-    : (dashboard.rankings.userConsumption || []);
-  const consumptionRankingOptions = consumptionRankingScope === 'models'
-    ? {
-      identity: (item) => modelName(item),
-      secondary: () => '',
-      value: (item) => cny(item.userChargeCny),
-      detail: (item) => `${compact(item.requests)} 次请求 · ${compact(item.tokens)} Token`,
-    }
-    : {
-      value: (item) => cny(item.userChargeCny),
-      detail: (item) => `${compact(item.requests)} 次请求 · ${compact(item.tokens)} Token`,
-    };
+  const consumptionCny = Number(operations.consumptionCny ?? operations.userChargeCny ?? 0);
+  const totalCostCny = Number(operations.effectiveCostCny ?? operations.bookedCostCny ?? 0);
+  const grossProfitCny = Number(operations.grossProfitCny ?? operations.bookedProfitCny ?? consumptionCny - totalCostCny);
+  const grossMargin = operations.grossMargin ?? (consumptionCny ? grossProfitCny / consumptionCny : null);
+  const totalTokens = Number(usage.inputTokens || 0)
+    + Number(usage.outputTokens || 0)
+    + Number(usage.cacheTokens || 0);
   state.overviewMetrics = {
-    consumptionCny: Number(operations.consumptionCny ?? operations.userChargeCny ?? 0),
-    requests: Number(summary.usage.requests || 0),
+    consumptionCny,
+    totalCostCny,
+    grossProfitCny,
+    grossMargin,
+    requests: Number(usage.requests || 0),
     totalTokens,
     balanceCny: Number(dashboard.totals.balanceCny || 0),
     balanceUserCount: Number(dashboard.totals.balanceUserCount || 0),
   };
   state.lastExport = [
-    ...(dashboard.rankings.userConsumption || []).map((item) => ({ ranking: '用户消费排行', ...item })),
-    ...(dashboard.rankings.modelConsumption || []).map((item) => ({ ranking: '模型消费排行', ...item })),
     ...dashboard.rankings.tokenUsage.map((item) => ({ ranking: 'Token 使用排行', ...item })),
     ...dashboard.rankings.cashRecharge.map((item) => ({ ranking: '用户充值排行', ...item })),
+    ...(runtimeData.users || []).map((item) => ({ ranking: '实时用户并发', ...item })),
   ];
   content.innerHTML = `<div class="dashboard-meta"><span>运营看板</span><small>更新于 ${dateTime(dashboard.generatedAt)}</small></div>
     <div class="dashboard-metric-grid">
       ${metricAction('充值净额', cny(netRecharge), `充值实收 ${cny(cash.rechargeReceived)} · 已退款 ${cny(cash.refunds)} · 查看明细`, netRecharge >= 0 ? 'good' : 'bad', 'data-open-overview-detail="recharge"')}
-      ${metricAction('非现金余额入账', cny(dashboard.totals.nonCashBalanceCreditCny), `${compact(dashboard.totals.nonCashBalanceCreditCount)} 笔管理员加款、兑换等入账 · 查看明细`, '', 'data-open-overview-detail="non-cash"')}
-      ${metricAction('总消耗', cny(operations.consumptionCny ?? operations.userChargeCny), `${compact(summary.usage.requests)} 次请求 · 查看明细`, 'good', 'data-open-overview-detail="consumption"')}
+      ${metricAction('赠送金额', cny(dashboard.totals.giftBalanceCreditCny), `${compact(dashboard.totals.giftBalanceCreditCount)} 笔赠送、兑换或返利入账 · 查看明细`, 'good', 'data-open-overview-detail="gift"')}
+      ${metricAction('退款金额', cny(cash.refunds), '已从充值净额扣除 · 查看退款明细', Number(cash.refunds || 0) ? 'warn' : '', 'data-open-overview-detail="recharge"')}
+      ${metricAction('总消耗', cny(consumptionCny), `${compact(usage.requests)} 次请求 · 查看明细`, '', 'data-open-overview-detail="consumption"')}
+      ${metricAction('总成本', cny(totalCostCny), '已登记的固定与计价成本 · 查看明细', '', 'data-open-overview-detail="consumption"')}
+      ${metricAction('经营毛利', cny(grossProfitCny), '总消耗减已登记成本 · 查看明细', grossProfitCny >= 0 ? 'good' : 'bad', 'data-open-overview-detail="consumption"')}
+      ${metricAction('毛利率', percent(grossMargin), '经营毛利 / 总消耗 · 查看明细', Number(grossMargin || 0) >= 0 ? 'good' : 'bad', 'data-open-overview-detail="consumption"')}
       ${metricAction('剩余余额', cny(dashboard.totals.balanceCny), `${compact(dashboard.totals.balanceUserCount)} 位余额用户 · 查看明细`, '', 'data-open-overview-detail="balance"')}
       ${metricAction('总 Token', compact(totalTokens), '输入、输出与缓存合计 · 查看明细', '', 'data-open-overview-detail="tokens"')}
     </div>
     <div class="overview-ranking-grid">
+      ${overviewRuntimePanel(runtimeData)}
       <section class="panel dashboard-rank-panel">
-        <div class="panel-header">
-          <div><h2>消费排行</h2><span>${consumptionRankingScope === 'models' ? `${compact(consumptionRankingItems.length)} 个模型` : `${compact(summary.usage.activeUsers)} 位活跃用户`}</span></div>
-          <div class="dashboard-rank-switch" role="group" aria-label="消费排行维度">
-            <button type="button" data-overview-consumption-rank="users" class="${consumptionRankingScope === 'users' ? 'active' : ''}" aria-pressed="${consumptionRankingScope === 'users'}">用户</button>
-            <button type="button" data-overview-consumption-rank="models" class="${consumptionRankingScope === 'models' ? 'active' : ''}" aria-pressed="${consumptionRankingScope === 'models'}">模型</button>
-          </div>
-        </div>
-        <div class="dashboard-rank-list">${
-          dashboardRankList(consumptionRankingItems, consumptionRankingOptions)
-        }</div>
-      </section>
-      <section class="panel dashboard-rank-panel">
-        <div class="panel-header">
-          <h2>Token 使用排行</h2>
-          <label class="visibility-toggle"><input type="checkbox" data-overview-mask ${state.overviewAccountMasked ? 'checked' : ''}><span>隐藏账号</span></label>
-        </div>
+        <div class="panel-header"><h2>Token 使用排行</h2><span>${compact(dashboard.rankings.tokenUsage.length)} 位用户</span></div>
         <div class="dashboard-rank-list">${
           dashboardRankList(dashboard.rankings.tokenUsage, {
             value: (item) => compact(item.tokens),
@@ -564,8 +596,8 @@ async function renderOverview() {
     ${section('经营趋势', '实际消费、已登记成本和经营毛利按日汇总')}
     <div class="split">
       <section class="panel"><div class="panel-header"><h2>实际消费、成本与毛利趋势</h2><span>按日</span></div><div class="chart-wrap"><canvas id="trend-chart"></canvas></div></section>
-      <section class="panel"><div class="panel-header"><h2>待处理事项</h2><span>${summary.alerts.length} 项</span></div><div class="alert-list">${
-        summary.alerts.length ? summary.alerts.map((alert) => `<div class="alert ${alert.severity}"><span class="alert-dot"></span><div><strong>${escapeHtml(alert.title)}</strong><p>${escapeHtml(alert.detail)}</p></div></div>`).join('') : '<div class="empty">没有待处理事项</div>'
+      <section class="panel"><div class="panel-header"><h2>待处理事项</h2><span>${alerts.length} 项</span></div><div class="alert-list">${
+        alerts.length ? alerts.map((alert) => `<div class="alert ${alert.severity}"><span class="alert-dot"></span><div><strong>${escapeHtml(alert.title)}</strong><p>${escapeHtml(alert.detail)}</p></div></div>`).join('') : '<div class="empty">没有待处理事项</div>'
       }</div></section>
     </div>
     <section class="table-panel"><div class="panel-header"><h2>模型单位经济性</h2><span>实际消费与已登记成本</span></div>${
@@ -811,8 +843,8 @@ function openUserDetails(userId) {
 
 const overviewDetailMeta = {
   recharge: { title: '充值净额明细', loading: '正在读取充值明细', error: '充值明细读取失败', label: '笔充值或退款' },
-  'non-cash': { title: '非现金余额入账明细', loading: '正在读取非现金余额入账', error: '非现金余额入账读取失败', label: '笔余额入账' },
-  consumption: { title: '总消耗明细', loading: '正在读取模型消耗明细', error: '模型消耗明细读取失败', label: '个模型' },
+  gift: { title: '赠送金额明细', loading: '正在读取赠送入账', error: '赠送入账读取失败', label: '笔赠送入账' },
+  consumption: { title: '总消耗明细', loading: '正在读取消费汇总', error: '消费汇总读取失败', label: '条汇总' },
   balance: { title: '剩余余额明细', loading: '正在读取余额用户', error: '余额用户读取失败', label: '位余额用户' },
   tokens: { title: '总 Token 明细', loading: '正在读取模型 Token 明细', error: '模型 Token 明细读取失败', label: '个模型' },
 };
@@ -917,9 +949,32 @@ function durationText(value) {
 function bindOverviewDetailControls() {
   const form = document.querySelector('#modal-form');
   form.onclick = async (event) => {
+    const detail = state.overviewDetail;
+    if (!detail) return;
+    const viewButton = event.target.closest('[data-overview-detail-view]');
+    if (viewButton) {
+      const view = viewButton.dataset.overviewDetailView === 'models' ? 'models' : 'users';
+      if (detail.view !== view) {
+        detail.view = view;
+        detail.page = 1;
+        detail.sort = 'userChargeCny';
+        detail.direction = 'desc';
+        await loadOverviewDetails();
+      }
+      return;
+    }
+    const sortButton = event.target.closest('[data-overview-detail-sort]');
+    if (sortButton) {
+      const sort = sortButton.dataset.overviewDetailSort;
+      detail.direction = detail.sort === sort && detail.direction === 'desc' ? 'asc' : 'desc';
+      detail.sort = sort;
+      detail.page = 1;
+      await loadOverviewDetails();
+      return;
+    }
     const button = event.target.closest('[data-overview-detail-page]');
-    if (!button || button.disabled || !state.overviewDetail) return;
-    state.overviewDetail.page = Number(button.dataset.overviewDetailPage);
+    if (!button || button.disabled) return;
+    detail.page = Number(button.dataset.overviewDetailPage);
     await loadOverviewDetails();
   };
   document.querySelector('#overview-detail-page-size')?.addEventListener('change', async (event) => {
@@ -970,17 +1025,17 @@ function nonCashBalanceCreditLabel(item) {
   })[item.type] || item.type || '--';
 }
 
-function renderNonCashBalanceCreditDetailModal(data) {
+function renderGiftBalanceCreditDetailModal(data) {
   const summary = data.summary || {};
-  openContentModal('非现金余额入账明细', `
+  openContentModal('赠送金额明细', `
     <div class="detail-filter">
-      <span class="detail-range-note">包含管理员加款、兑换等实际余额入账；不包含邀请返利额度等不进入用户余额的额度记录。</span>
+      <span class="detail-range-note">包含赠送、兑换和返利等零现金基础的余额入账；不包含邀请返利额度等未进入用户余额的额度记录。</span>
     </div>
     <div class="detail-metrics">
-      ${metric('非现金余额入账', cny(summary.amountCny), `${compact(summary.events)} 笔实际余额入账`, 'good')}
+      ${metric('赠送金额', cny(summary.amountCny), `${compact(summary.events)} 笔实际余额入账`, 'good')}
     </div>
     <section class="detail-section">
-      <div class="detail-section-header"><h3>非现金余额入账记录</h3><span>按发生时间倒序</span></div>
+      <div class="detail-section-header"><h3>赠送入账记录</h3><span>按发生时间倒序</span></div>
       ${table([
         { label: '时间' }, { label: '用户' }, { label: '入账类型' }, { label: '来源' }, { label: '入账金额 CNY', right: true },
       ], data.items.map((item) => {
@@ -994,35 +1049,56 @@ function renderNonCashBalanceCreditDetailModal(data) {
           escapeHtml(source), cny(item.amountCny),
         ];
       }), 850)}
-      ${overviewDetailPager(data, overviewDetailMeta['non-cash'].label)}
+      ${overviewDetailPager(data, overviewDetailMeta.gift.label)}
     </section>
   `, 'cash-detail-modal overview-detail-modal');
   bindOverviewDetailControls();
+}
+
+function overviewDetailSortHeader(label, detail) {
+  const active = detail.sort === 'userChargeCny';
+  const indicator = active ? (detail.direction === 'asc' ? '↑' : '↓') : '↕';
+  return `<button type="button" class="sort-button ${active ? 'active' : ''}" data-overview-detail-sort="userChargeCny" aria-label="按${label}排序">${label}<span>${indicator}</span></button>`;
+}
+
+function overviewConsumptionViewTabs(active) {
+  return `<div class="usage-view-tabs" role="group" aria-label="总消耗汇总维度">
+    <button type="button" data-overview-detail-view="users" class="${active === 'users' ? 'active' : ''}" aria-pressed="${active === 'users'}">用户消费汇总</button>
+    <button type="button" data-overview-detail-view="models" class="${active === 'models' ? 'active' : ''}" aria-pressed="${active === 'models'}">模型消费汇总</button>
+  </div>`;
 }
 
 function renderUsageOverviewDetailModal(data) {
   const detail = state.overviewDetail;
   const metrics = detail?.metrics || {};
   const isTokenDetail = detail?.type === 'tokens';
+  const view = detail?.view === 'models' ? 'models' : 'users';
+  const isUserView = !isTokenDetail && view === 'users';
   const titleText = isTokenDetail ? '总 Token 明细' : '总消耗明细';
   openContentModal(titleText, `
     <div class="detail-filter">
-      <span class="detail-range-note">按模型汇总 sub2api 实际扣费记录；Token 包含输入、输出与缓存 Token。</span>
+      ${isTokenDetail ? '<span class="detail-range-note">Token 包含输入、输出与缓存 Token，按模型汇总。</span>' : overviewConsumptionViewTabs(view)}
     </div>
     <div class="detail-metrics">
       ${metric('总消耗', cny(metrics.consumptionCny), `${compact(metrics.requests)} 次请求`, 'good')}
-      ${metric('总 Token', compact(metrics.totalTokens), '输入、输出与缓存合计')}
-      ${metric('模型数', compact(data.total), '当前统计周期内有调用的模型')}
+      ${metric('总成本', cny(metrics.totalCostCny), '已登记的固定与计价成本')}
+      ${metric('经营毛利', cny(metrics.grossProfitCny), '总消耗减已登记成本', Number(metrics.grossProfitCny || 0) >= 0 ? 'good' : 'bad')}
+      ${metric('毛利率', percent(metrics.grossMargin), '经营毛利 / 总消耗', Number(metrics.grossMargin || 0) >= 0 ? 'good' : 'bad')}
+      ${metric('总 Token', compact(metrics.totalTokens), `当前显示 ${compact(data.total)} ${isUserView ? '位用户' : '个模型'}`)}
     </div>
     <section class="detail-section">
-      <div class="detail-section-header"><h3>${isTokenDetail ? '模型 Token 汇总' : '模型消耗汇总'}</h3><span>按实际消费金额倒序</span></div>
+      <div class="detail-section-header"><h3>${isTokenDetail ? '模型 Token 汇总' : isUserView ? '用户消费汇总' : '模型消费汇总'}</h3><span>${isTokenDetail ? '按 Token 数量倒序' : '可按实际消费排序'}</span></div>
       ${table([
-        { label: '模型' }, { label: '请求', right: true }, { label: 'Token', right: true }, { label: '实际消费 CNY', right: true },
-        { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
+        { label: isUserView ? '用户' : '模型' }, { label: '请求', right: true }, { label: 'Token', right: true },
+        { label: isTokenDetail ? '实际消费 CNY' : overviewDetailSortHeader('实际消费 CNY', detail), right: true },
+        { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '毛利率', right: true }, { label: '成本覆盖' },
       ], data.items.map((item) => [
-        `<span class="primary-text">${escapeHtml(modelName(item))}</span>`, compact(item.requests), compact(item.tokens), cny(item.userChargeCny),
-        cny(item.bookedCostCny), `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
-      ]), 1080)}
+        isUserView
+          ? `<span class="primary-text">${escapeHtml(item.email || item.username || '--')}</span><div class="secondary-text">ID ${item.id}${item.username && item.username !== item.email ? ` · ${escapeHtml(item.username)}` : ''}</div>`
+          : `<span class="primary-text">${escapeHtml(modelName(item))}</span>`,
+        compact(item.requests), compact(item.tokens), cny(item.userChargeCny), cny(item.bookedCostCny),
+        `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, percent(item.grossMargin), costCoverage(item),
+      ]), 1180)}
       ${overviewDetailPager(data, overviewDetailMeta[detail.type].label)}
     </section>
   `, 'cash-detail-modal overview-detail-modal');
@@ -1057,7 +1133,7 @@ function renderBalanceDetailModal(data) {
 function renderOverviewDetailModal(data) {
   const type = state.overviewDetail?.type;
   if (type === 'recharge') renderRechargeDetailModal(data);
-  else if (type === 'non-cash') renderNonCashBalanceCreditDetailModal(data);
+  else if (type === 'gift') renderGiftBalanceCreditDetailModal(data);
   else if (type === 'consumption' || type === 'tokens') renderUsageOverviewDetailModal(data);
   else if (type === 'balance') renderBalanceDetailModal(data);
 }
@@ -1065,8 +1141,12 @@ function renderOverviewDetailModal(data) {
 function overviewDetailPath(detail) {
   const paging = `page=${detail.page}&page_size=${detail.pageSize}`;
   if (detail.type === 'recharge') return `/funds?scope=recharge&${paging}`;
-  if (detail.type === 'non-cash') return `/non-cash-balance-credits?${paging}`;
-  if (detail.type === 'consumption' || detail.type === 'tokens') return `/usage/models?${paging}`;
+  if (detail.type === 'gift') return `/non-cash-balance-credits?${paging}`;
+  if (detail.type === 'consumption') {
+    const view = detail.view === 'models' ? 'models' : 'users';
+    return `/usage/${view}?sort=${detail.sort || 'userChargeCny'}&direction=${detail.direction || 'desc'}&${paging}`;
+  }
+  if (detail.type === 'tokens') return `/usage/models?sort=tokens&direction=desc&${paging}`;
   if (detail.type === 'balance') return `/users?sort=balanceCny&direction=desc&balance_scope=reported&${paging}`;
   return '';
 }
@@ -1094,6 +1174,9 @@ function openOverviewDetails(type) {
     type,
     page: 1,
     pageSize: 20,
+    view: type === 'consumption' ? 'users' : 'models',
+    sort: type === 'tokens' ? 'tokens' : 'userChargeCny',
+    direction: 'desc',
     metrics: { ...(state.overviewMetrics || {}) },
   };
   openContentModal(meta.title, `<div class="detail-loading"><span></span>${meta.loading}</div>`, 'cash-detail-modal overview-detail-modal');
@@ -2161,15 +2244,27 @@ async function render() {
   });
   try {
     await renderers[state.page]();
-    if (state.page === 'runtime') {
-      state.runtimeRefreshTimer = setTimeout(() => {
-        if (state.page === 'runtime') render();
-      }, 10_000);
-    }
+    scheduleRuntimeRefresh();
   } catch (error) {
     content.innerHTML = `<div class="empty"><strong>数据读取失败</strong><p>${escapeHtml(error.message)}</p><button class="button" id="retry">重新加载</button></div>`;
     document.querySelector('#retry')?.addEventListener('click', render);
   }
+}
+
+function scheduleRuntimeRefresh() {
+  if (!['overview', 'runtime'].includes(state.page)) return;
+  state.runtimeRefreshTimer = setTimeout(async () => {
+    if (state.page === 'runtime') {
+      render();
+      return;
+    }
+    try {
+      await refreshOverviewRuntimePanel();
+    } catch (error) {
+      console.warn('Unable to refresh overview runtime snapshot', error);
+    }
+    if (state.page === 'overview') scheduleRuntimeRefresh();
+  }, 10_000);
 }
 
 function modalControl(field) {
@@ -2585,7 +2680,6 @@ content.addEventListener('click', (event) => {
   const next = event.target.closest('[data-page-next]');
   const pageTarget = event.target.closest('[data-page-to]');
   const overviewDetails = event.target.closest('[data-open-overview-detail]');
-  const overviewConsumptionRank = event.target.closest('[data-overview-consumption-rank]');
   const usageView = event.target.closest('[data-usage-view]');
   const userDetails = event.target.closest('[data-user-details]');
   const userSort = event.target.closest('[data-user-sort]');
@@ -2595,15 +2689,6 @@ content.addEventListener('click', (event) => {
   const accountCostHistory = event.target.closest('[data-account-cost-history]');
   if (overviewDetails) {
     openOverviewDetails(overviewDetails.dataset.openOverviewDetail);
-    return;
-  }
-  if (overviewConsumptionRank) {
-    const scope = overviewConsumptionRank.dataset.overviewConsumptionRank;
-    if (scope !== state.overviewConsumptionRanking) {
-      state.overviewConsumptionRanking = scope === 'models' ? 'models' : 'users';
-      window.localStorage.setItem('finops.overview-consumption-ranking', state.overviewConsumptionRanking);
-      renderOverview();
-    }
     return;
   }
   if (usageView) {

@@ -51,17 +51,29 @@ test('recharge-scoped cash totals exclude operational cash entries but retain re
   assert.equal(rechargeOnly.summary.transactions, 3);
 });
 
-test('overview dashboard returns complete identities and real ranking metrics', async () => {
+test('overview dashboard returns rankings without duplicate consumption aggregates', async () => {
   const repository = new DemoRepository(config);
   const dashboard = await repository.getOverviewDashboard();
   assert.ok(dashboard.totals.balanceCny > 0);
+  assert.ok(dashboard.totals.giftBalanceCreditCny > 0);
   assert.equal(dashboard.rankings.tokenUsage[0].email, 'nuohuisong@gmail.com');
   assert.ok(dashboard.rankings.tokenUsage[0].tokens > 0);
   assert.ok(dashboard.rankings.requestActivity[0].requests > 0);
   assert.ok(dashboard.rankings.cashRecharge[0].cashPaidCny > 0);
-  assert.ok(dashboard.rankings.userConsumption[0].userChargeCny > 0);
-  assert.equal(dashboard.rankings.modelConsumption[0].name, 'gpt-5.6-sol');
-  assert.ok(dashboard.rankings.modelConsumption[0].userChargeCny > 0);
+  assert.equal('userConsumption' in dashboard.rankings, false);
+  assert.equal('modelConsumption' in dashboard.rankings, false);
+});
+
+test('demo usage summaries support consumption sorting and user-only consumption filters', async () => {
+  const repository = new DemoRepository(config);
+  const descending = await repository.getUsageBreakdown({ page: 1, pageSize: 100, sort: 'userChargeCny', direction: 'desc' });
+  const ascending = await repository.getUsageBreakdown({ page: 1, pageSize: 100, sort: 'userChargeCny', direction: 'asc' });
+  const users = await repository.listUsers({ page: 1, pageSize: 100, consumptionOnly: true });
+
+  assert.ok(descending.items[0].userChargeCny >= descending.items.at(-1).userChargeCny);
+  assert.ok(ascending.items[0].userChargeCny <= ascending.items.at(-1).userChargeCny);
+  assert.ok(descending.items.every((item) => item.grossMargin !== undefined));
+  assert.ok(users.items.every((item) => item.userChargeCny > 0));
 });
 
 test('demo usage event details support global search and request-level cost fields', async () => {
@@ -100,7 +112,7 @@ test('self-use balance whitelist excludes only reported balances, not usage rank
   assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });
 
-test('self-use balance whitelist excludes non-cash credits from overview and details', async () => {
+test('self-use balance whitelist excludes gift credits from overview and details', async () => {
   const repository = new DemoRepository(config);
   const selfUseAccount = repository.users[0];
   const regularAccount = repository.users[1];
@@ -114,11 +126,11 @@ test('self-use balance whitelist excludes non-cash credits from overview and det
   const dashboard = await repository.getOverviewDashboard();
   const credits = await repository.listNonCashBalanceCredits({ page: 1, pageSize: 20 });
 
-  assert.equal(dashboard.totals.nonCashBalanceCreditCny, 3);
-  assert.equal(dashboard.totals.nonCashBalanceCreditCount, 1);
+  assert.equal(dashboard.totals.giftBalanceCreditCny, 3);
+  assert.equal(dashboard.totals.giftBalanceCreditCount, 1);
   assert.deepEqual(credits.summary, { amountCny: 3, events: 1 });
   assert.deepEqual(credits.items.map((item) => item.sourceId), ['DEMO-002']);
-  assert.ok(dashboard.rankings.userConsumption.some((item) => item.id === selfUseAccount.id));
+  assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });
 
 test('supplier overview groups account economics and exposes purchase rows', async () => {

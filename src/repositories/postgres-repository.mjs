@@ -302,7 +302,7 @@ export class PostgresRepository {
   }
 
   async getOverviewDashboard({ start, end, dailyStart = start, dailyEnd = end }) {
-    const [summary, totals, tokenUsage, cashRecharge, requestActivity, userConsumption, modelConsumption] = await Promise.all([
+    const [summary, totals, tokenUsage, cashRecharge, requestActivity] = await Promise.all([
       this.getSummary({ start, end }),
       this.pool.query(`
         SELECT
@@ -311,13 +311,13 @@ export class PostgresRepository {
               AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
               AND COALESCE(cash_basis_cny,0)=0
               AND COALESCE(metadata->>'accounting_scope','') <> 'affiliate_quota'
-          ),0) AS non_cash_balance_credit_cny,
+          ),0) AS gift_balance_credit_cny,
           COUNT(*) FILTER (
             WHERE direction='in'
               AND event_type IN ('admin_adjustment','redeem','affiliate_rebate')
               AND COALESCE(cash_basis_cny,0)=0
               AND COALESCE(metadata->>'accounting_scope','') <> 'affiliate_quota'
-          ) AS non_cash_balance_credit_count,
+          ) AS gift_balance_credit_count,
           (SELECT COALESCE(SUM(current_balance) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats),0) FROM ${this.schema}.dim_users) AS balance_cny,
           (SELECT COUNT(*) FILTER (WHERE current_balance > 0 AND NOT exclude_from_balance_stats) FROM ${this.schema}.dim_users) AS balance_user_count
         FROM ${this.schema}.credit_events e
@@ -361,31 +361,6 @@ export class PostgresRepository {
         ORDER BY requests DESC,u.source_user_id ASC
         LIMIT 8`,
       [dailyStart, dailyEnd]),
-      this.pool.query(`
-        SELECT u.source_user_id AS id,u.email,u.username,
-               COALESCE(SUM(d.user_charge_cny),0)::float8 AS consumption_cny,
-               COALESCE(SUM(d.requests),0)::float8 AS requests,
-               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens
-        FROM ${this.schema}.fact_usage_daily d
-        JOIN ${this.schema}.dim_users u ON u.source_user_id=d.source_user_id
-        WHERE d.day >= $1::date AND d.day <= $2::date AND d.source_user_id <> 0
-        GROUP BY u.source_user_id,u.email,u.username
-        HAVING COALESCE(SUM(d.user_charge_cny),0) > 0
-        ORDER BY consumption_cny DESC,u.source_user_id ASC
-        LIMIT 8`,
-      [dailyStart, dailyEnd]),
-      this.pool.query(`
-        SELECT COALESCE(NULLIF(BTRIM(d.model),''),'未标注模型') AS name,
-               COALESCE(SUM(d.user_charge_cny),0)::float8 AS consumption_cny,
-               COALESCE(SUM(d.requests),0)::float8 AS requests,
-               COALESCE(SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens),0)::float8 AS tokens
-        FROM ${this.schema}.fact_usage_daily d
-        WHERE d.day >= $1::date AND d.day <= $2::date
-        GROUP BY COALESCE(NULLIF(BTRIM(d.model),''),'未标注模型')
-        HAVING COALESCE(SUM(d.user_charge_cny),0) > 0
-        ORDER BY consumption_cny DESC,name ASC
-        LIMIT 8`,
-      [dailyStart, dailyEnd]),
     ]);
     const total = totals.rows[0] || {};
     const rank = (rows, fields) => rows.map((row) => ({
@@ -394,27 +369,12 @@ export class PostgresRepository {
       username: row.username || '',
       ...Object.fromEntries(fields.map((field) => [field, number(row[field])])),
     }));
-    const consumptionRank = (rows) => rows.map((row) => ({
-      id: number(row.id),
-      email: row.email || '',
-      username: row.username || '',
-      userChargeCny: number(row.consumption_cny),
-      requests: number(row.requests),
-      tokens: number(row.tokens),
-    }));
-    const modelConsumptionRank = modelConsumption.rows.map((row) => ({
-      name: String(row.name || '').trim() || '未标注模型',
-      userChargeCny: number(row.consumption_cny),
-      requests: number(row.requests),
-      tokens: number(row.tokens),
-    }));
-
     return {
       generatedAt: new Date().toISOString(),
       summary,
       totals: {
-        nonCashBalanceCreditCny: number(total.non_cash_balance_credit_cny),
-        nonCashBalanceCreditCount: number(total.non_cash_balance_credit_count),
+        giftBalanceCreditCny: number(total.gift_balance_credit_cny),
+        giftBalanceCreditCount: number(total.gift_balance_credit_count),
         balanceCny: number(total.balance_cny),
         balanceUserCount: number(total.balance_user_count),
       },
@@ -427,8 +387,6 @@ export class PostgresRepository {
           cashPaidCny: item.cash_paid_cny,
         })),
         requestActivity: rank(requestActivity.rows, ['requests', 'tokens']),
-        userConsumption: consumptionRank(userConsumption.rows),
-        modelConsumption: modelConsumptionRank,
       },
     };
   }
@@ -535,7 +493,19 @@ export class PostgresRepository {
     };
   }
 
-  async getUsageBreakdown({ start, end, dailyStart = start, dailyEnd = end, page = 1, pageSize = 20, offset = 0 }) {
+  async getUsageBreakdown({
+    start, end, dailyStart = start, dailyEnd = end, page = 1, pageSize = 20, offset = 0,
+    sort = 'userChargeCny', direction = 'desc',
+  }) {
+    const sortColumns = {
+      userChargeCny: 'revenue_cny',
+      requests: 'requests',
+      tokens: 'tokens',
+      bookedCostCny: 'effective_cost_cny',
+      bookedProfitCny: 'profit_cny',
+    };
+    const orderColumn = sortColumns[sort] || sortColumns.userChargeCny;
+    const orderDirection = direction === 'asc' ? 'ASC' : 'DESC';
     const result = await this.pool.query(`
       WITH usage_by_model_account AS (
         SELECT COALESCE(NULLIF(BTRIM(model),''),'未标注模型') AS model,source_account_id,
@@ -639,7 +609,7 @@ export class PostgresRepository {
       SELECT model AS name,requests,tokens,token_list_value_usd,charge_cny,revenue_cny,
              purchase_allocated_cost_cny,multiplier_cost_cny,effective_cost_cny,unbooked_account_count,
              revenue_cny-effective_cost_cny AS profit_cny,COUNT(*) OVER() AS total_count
-      FROM model_economics ORDER BY revenue_cny DESC LIMIT $5 OFFSET $6`, [dailyStart, dailyEnd, start, end, pageSize, offset]);
+      FROM model_economics ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,model ASC LIMIT $5 OFFSET $6`, [dailyStart, dailyEnd, start, end, pageSize, offset]);
     return pageResult(result.rows.map((row) => ({
       total_count: row.total_count,
       name: String(row.name || '').trim() || '未标注模型',
@@ -664,6 +634,7 @@ export class PostgresRepository {
       unbookedAccountCount: number(row.unbooked_account_count),
       costCoverageStatus: number(row.unbooked_account_count) ? 'partial' : 'complete',
       margin: number(row.revenue_cny) ? number(row.profit_cny) / number(row.revenue_cny) : null,
+      grossMargin: number(row.revenue_cny) ? number(row.profit_cny) / number(row.revenue_cny) : null,
     })), page, pageSize);
   }
 
@@ -746,7 +717,10 @@ export class PostgresRepository {
     })), page, pageSize);
   }
 
-  async listUsers({ start, end, dailyStart = start, dailyEnd = end, search = '', page = 1, pageSize = 20, offset = 0, sort = 'userChargeCny', direction = 'desc', balanceScope = 'all' }) {
+  async listUsers({
+    start, end, dailyStart = start, dailyEnd = end, search = '', page = 1, pageSize = 20, offset = 0,
+    sort = 'userChargeCny', direction = 'desc', balanceScope = 'all', consumptionOnly = false,
+  }) {
     const sortColumns = {
       cashPaidCny: 'cash_paid_cny',
       adminCreditCny: 'admin_credit_cny',
@@ -888,17 +862,18 @@ export class PostgresRepository {
              COALESCE(ad.redeemed_credit_cny,0) AS redeemed_credit_cny,COALESCE(ad.affiliate_credit_cny,0) AS affiliate_credit_cny,
              COALESCE(us.revenue_cny,0)-COALESCE(us.effective_cost_cny,0) AS profit_cny,
              COUNT(*) OVER() AS total_count
-      FROM ${this.schema}.dim_users u
-      LEFT JOIN user_economics us ON us.source_user_id=u.source_user_id
-      LEFT JOIN cash c ON c.source_user_id=u.source_user_id
-      LEFT JOIN adjustments ad ON ad.source_user_id=u.source_user_id
-        WHERE ($5='' OR u.email ILIKE '%'||$5||'%' OR u.username ILIKE '%'||$5||'%')
-          AND (
-            $8='all'
+       FROM ${this.schema}.dim_users u
+       LEFT JOIN user_economics us ON us.source_user_id=u.source_user_id
+       LEFT JOIN cash c ON c.source_user_id=u.source_user_id
+       LEFT JOIN adjustments ad ON ad.source_user_id=u.source_user_id
+         WHERE ($5='' OR u.email ILIKE '%'||$5||'%' OR u.username ILIKE '%'||$5||'%')
+           AND (NOT $9::boolean OR COALESCE(us.charge_cny,0)>0)
+           AND (
+             $8='all'
             OR ($8='reported' AND u.current_balance > 0 AND NOT u.exclude_from_balance_stats)
             OR ($8='whitelist' AND u.exclude_from_balance_stats)
           )
-      ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset, balanceScope]);
+      ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset, balanceScope, consumptionOnly]);
     return pageResult(result.rows.map((row) => {
       const recognizedRevenueCny = number(row.revenue_cny);
       const purchaseAllocatedCostCny = number(row.purchase_allocated_cost_cny);

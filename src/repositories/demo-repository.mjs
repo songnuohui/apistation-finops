@@ -102,7 +102,7 @@ const models = [
   userChargeCny: revenue, recognizedRevenueCny: revenue, revenue, revenueCny: revenue,
   purchaseAllocatedCostCny: cost, effectiveCostCny: cost, fullyLoadedCostCny: cost, bookedCostCny: cost,
   cost, costCny: cost, profit, profitCny: profit, grossProfitCny: profit, bookedProfitCny: profit,
-  unbookedAccountCount: 0, costCoverageStatus: 'complete', margin: profit / revenue,
+  unbookedAccountCount: 0, costCoverageStatus: 'complete', margin: profit / revenue, grossMargin: profit / revenue,
 }));
 
 const trend = Array.from({ length: 14 }, (_, index) => {
@@ -397,18 +397,8 @@ export class DemoRepository {
         cashPaidCny: Number(item.cashPaidCny || 0),
         userChargeCny: Number(item.userChargeCny || 0),
       }));
-    const modelConsumption = models
-      .filter((item) => Number(item.userChargeCny || 0) > 0)
-      .sort((left, right) => Number(right.userChargeCny || 0) - Number(left.userChargeCny || 0) || String(left.name).localeCompare(String(right.name)))
-      .slice(0, 8)
-      .map((item) => ({
-        name: String(item.name || '').trim() || '未标注模型',
-        userChargeCny: Number(item.userChargeCny || 0),
-        requests: Number(item.requests || 0),
-        tokens: Number(item.tokens || 0),
-      }));
     const reportableNonCashBalanceCredits = this.reportableNonCashBalanceCredits();
-    const nonCashBalanceCreditCny = reportableNonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
+    const giftBalanceCreditCny = reportableNonCashBalanceCredits.reduce((total, item) => total + Number(item.amountCny || 0), 0);
     const reportedBalanceUsers = this.users.filter((item) => (
       Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats
     ));
@@ -417,8 +407,8 @@ export class DemoRepository {
       generatedAt: new Date().toISOString(),
       summary,
       totals: {
-        nonCashBalanceCreditCny,
-        nonCashBalanceCreditCount: reportableNonCashBalanceCredits.length,
+        giftBalanceCreditCny,
+        giftBalanceCreditCount: reportableNonCashBalanceCredits.length,
         balanceCny: reportedBalanceUsers.reduce((total, item) => total + Number(item.balanceCny || 0), 0),
         balanceUserCount: reportedBalanceUsers.length,
       },
@@ -426,8 +416,6 @@ export class DemoRepository {
         tokenUsage: rank('tokens'),
         cashRecharge: rank('cashPaidCny'),
         requestActivity: rank('requests'),
-        userConsumption: rank('userChargeCny'),
-        modelConsumption,
       },
     };
   }
@@ -457,8 +445,15 @@ export class DemoRepository {
       rechargeEvents: preset === 'today' ? rechargeEvents : [],
     };
   }
-  async getUsageBreakdown({ page = 1, pageSize = 20 } = {}) {
-    return { items: models.slice((page - 1) * pageSize, page * pageSize), total: models.length, page, pageSize };
+  async getUsageBreakdown({ page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc' } = {}) {
+    const sortable = new Set(['userChargeCny', 'requests', 'tokens', 'bookedCostCny', 'bookedProfitCny']);
+    const key = sortable.has(sort) ? sort : 'userChargeCny';
+    const order = direction === 'asc' ? 1 : -1;
+    const sorted = [...models].sort((left, right) => (
+      order * (Number(left[key] || 0) - Number(right[key] || 0))
+      || String(left.name || '').localeCompare(String(right.name || ''))
+    ));
+    return pageResult(sorted, page, pageSize);
   }
 
   async listUsageEvents({ search = '', page = 1, pageSize = 20 } = {}) {
@@ -520,7 +515,10 @@ export class DemoRepository {
     return pageResult(filtered, page, pageSize);
   }
 
-  async listUsers({ search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc', balanceScope = 'all' } = {}) {
+  async listUsers({
+    search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc',
+    balanceScope = 'all', consumptionOnly = false,
+  } = {}) {
     const sortable = new Set([
       'cashPaidCny','adminCreditCny','adminDeductionCny','balanceCny',
       'userChargeCny','requests','tokens','bookedCostCny','bookedProfitCny',
@@ -529,12 +527,16 @@ export class DemoRepository {
     const order = direction === 'asc' ? 1 : -1;
     const filtered = this.users
       .filter((item) => `${item.email} ${item.username}`.toLowerCase().includes(search.toLowerCase()))
+      .filter((item) => !consumptionOnly || Number(item.userChargeCny || 0) > 0)
       .filter((item) => (
         balanceScope === 'all'
         || (balanceScope === 'reported' && Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats)
         || (balanceScope === 'whitelist' && item.excludeFromBalanceStats)
       ))
-      .sort((left, right) => order * (Number(left[key] || 0) - Number(right[key] || 0)));
+      .sort((left, right) => (
+        order * (Number(left[key] || 0) - Number(right[key] || 0))
+        || Number(left.id) - Number(right.id)
+      ));
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
   }
 
