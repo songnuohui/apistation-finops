@@ -222,6 +222,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await cached('accounts',config.listCacheTtlSeconds,()=>repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
   })));
+  if(request.method==='GET'&&url.pathname==='/api/purchase-catalog')return json(res,200,await cached('purchase-catalog',config.listCacheTtlSeconds,()=>repository.listPurchaseCatalog()));
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-connections')return json(res,200,await cached('supplier-connections',config.listCacheTtlSeconds,()=>repository.listSupplierConnections({search:searchTerm(url.searchParams)})));
   const supplierConnectionDetails=/^\/api\/supplier-connections\/(\d+)\/details$/.exec(url.pathname);

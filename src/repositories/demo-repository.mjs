@@ -702,6 +702,32 @@ export class DemoRepository {
     return { summary, items, purchases };
   }
 
+  async listPurchaseCatalog() {
+    const supplierByKey = new Map();
+    const batches = new Map();
+    const collect = (supplier, purchaseBatch = '') => {
+      const supplierName = String(supplier || '').trim();
+      const batchName = String(purchaseBatch || '').trim();
+      if (!supplierName) return;
+      const key = supplierName.toLowerCase();
+      if (!supplierByKey.has(key)) supplierByKey.set(key, supplierName);
+      if (batchName) batches.set(`${key}\u0000${batchName}`, {
+        supplier: supplierByKey.get(key),
+        purchaseBatch: batchName,
+      });
+    };
+    this.supplierConnections.forEach((item) => collect(item.supplierName));
+    this.accounts.forEach((item) => collect(item.supplier, item.purchaseBatch));
+    this.accountCostPeriods.forEach((item) => collect(item.supplier, item.purchaseBatch));
+    return {
+      suppliers: [...supplierByKey.values()].sort((left, right) => left.localeCompare(right, 'zh-CN')),
+      batches: [...batches.values()].sort((left, right) => (
+        left.supplier.localeCompare(right.supplier, 'zh-CN')
+        || left.purchaseBatch.localeCompare(right.purchaseBatch, 'zh-CN')
+      )),
+    };
+  }
+
   async listSupplierConnections({ search = '' } = {}) {
     const term = String(search || '').trim().toLowerCase();
     return {

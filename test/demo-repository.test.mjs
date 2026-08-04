@@ -144,6 +144,26 @@ test('supplier overview groups account economics and exposes purchase rows', asy
   assert.equal(overview.summary.supplierCount, 1);
 });
 
+test('purchase catalog returns FinOps suppliers and supplier-scoped batches', async () => {
+  const repository = new DemoRepository(config);
+  const catalog = await repository.listPurchaseCatalog();
+  assert.ok(catalog.suppliers.includes('Cloud Seats'));
+  assert.ok(catalog.batches.some((item) => (
+    item.supplier === 'Cloud Seats' && item.purchaseBatch === '2026-07-B1'
+  )));
+
+  await repository.createAccountCostPeriod({
+    accountId: 2745, originalAmount: '20', baseAmount: '20', feeAmount: '0', taxAmount: '0',
+    supplier: '新供应商', purchaseBatch: 'NEW-BATCH',
+    effectiveFrom: '2026-08-01T00:00:00+08:00', effectiveTo: '2026-09-01T00:00:00+08:00',
+  });
+  const refreshed = await repository.listPurchaseCatalog();
+  assert.ok(refreshed.suppliers.includes('新供应商'));
+  assert.ok(refreshed.batches.some((item) => (
+    item.supplier === '新供应商' && item.purchaseBatch === 'NEW-BATCH'
+  )));
+});
+
 test('demo supplier connections support create, edit, sync, account links, and alert acknowledgement', async () => {
   const repository = new DemoRepository(config);
   const input = {

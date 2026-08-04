@@ -1521,6 +1521,42 @@ export class PostgresRepository {
     return { summary, items, purchases };
   }
 
+  async listPurchaseCatalog() {
+    const [suppliers, batches] = await Promise.all([
+      this.pool.query(`
+        SELECT DISTINCT ON (LOWER(name)) name
+        FROM (
+          SELECT name FROM ${this.schema}.suppliers
+          UNION ALL
+          SELECT NULLIF(BTRIM(supplier),'') AS name FROM ${this.schema}.dim_accounts
+          UNION ALL
+          SELECT NULLIF(BTRIM(supplier),'') AS name FROM ${this.schema}.account_cost_periods
+        ) source
+        WHERE name IS NOT NULL AND name <> ''
+        ORDER BY LOWER(name),name`),
+      this.pool.query(`
+        SELECT DISTINCT ON (LOWER(supplier),purchase_batch) supplier,purchase_batch
+        FROM (
+          SELECT s.name AS supplier,pb.batch_number AS purchase_batch
+          FROM ${this.schema}.purchase_batches pb
+          JOIN ${this.schema}.suppliers s ON s.id=pb.supplier_id
+          UNION ALL
+          SELECT NULLIF(BTRIM(supplier),''),NULLIF(BTRIM(purchase_batch),'')
+          FROM ${this.schema}.account_cost_periods
+          UNION ALL
+          SELECT NULLIF(BTRIM(supplier),''),NULLIF(BTRIM(purchase_batch),'')
+          FROM ${this.schema}.dim_accounts
+        ) source
+        WHERE supplier IS NOT NULL AND supplier <> ''
+          AND purchase_batch IS NOT NULL AND purchase_batch <> ''
+        ORDER BY LOWER(supplier),purchase_batch`),
+    ]);
+    return {
+      suppliers: suppliers.rows.map((row) => row.name),
+      batches: batches.rows.map((row) => ({ supplier: row.supplier, purchaseBatch: row.purchase_batch })),
+    };
+  }
+
   async listCashTransactions({ start, end, page = 1, pageSize = 20, offset = 0, search = '', scope = 'all' }) {
     const scopeClause = scope === 'recharge'
       ? "AND (t.transaction_type='recharge' OR (t.transaction_type='refund' AND COALESCE(t.order_type,'') <> 'subscription'))"
