@@ -114,7 +114,7 @@ function httpError(message, statusCode) {
   return Object.assign(new Error(message), { statusCode });
 }
 
-function assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, sellingMultiplier, cnyPerReferenceUnit }) {
+function assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, cnyPerReferenceUnit }) {
   if (costMode === 'manual_multiplier' && !upstreamMultiplier) {
     throw httpError('manual_multiplier requires an account or template upstreamMultiplier', 400);
   }
@@ -654,7 +654,7 @@ export class PostgresRepository {
              f.duration_ms,f.first_token_ms,f.standard_cost_usd_reference,
              f.user_charge_cny,f.recognized_revenue_cny,
              snapshot.cost_mode,snapshot.basis_mode,snapshot.cost_status,
-             snapshot.calculated_cost_cny,snapshot.selling_multiplier,snapshot.upstream_multiplier,
+             snapshot.calculated_cost_cny,snapshot.selling_multiplier AS source_selling_multiplier,snapshot.upstream_multiplier,
              snapshot.cny_per_reference_unit,snapshot.upstream_multiplier_source,
              snapshot.rate_observation_id,snapshot.snapshot_origin,
              COALESCE(snapshot.finalized,FALSE) AS cost_snapshot_finalized,
@@ -707,7 +707,7 @@ export class PostgresRepository {
       basisMode: row.basis_mode || '',
       costStatus: row.cost_status || 'not_snapshotted',
       calculatedCostCny: nullableNumber(row.calculated_cost_cny),
-      sellingMultiplier: nullableNumber(row.selling_multiplier),
+      sourceSellingMultiplier: nullableNumber(row.source_selling_multiplier),
       upstreamMultiplier: nullableNumber(row.upstream_multiplier),
       cnyPerReferenceUnit: nullableNumber(row.cny_per_reference_unit),
       upstreamMultiplierSource: row.upstream_multiplier_source || '',
@@ -1067,7 +1067,6 @@ export class PostgresRepository {
                ),0) AS unpriced_user_charge_cny,
                MAX(cost_mode) AS cost_mode,
                MAX(upstream_multiplier) AS upstream_multiplier,
-               MAX(selling_multiplier) AS selling_multiplier,
                MAX(upstream_multiplier_source) AS upstream_multiplier_source
         FROM ${this.schema}.usage_cost_facts
         WHERE occurred_at >= $3 AND occurred_at < $4
@@ -1090,7 +1089,6 @@ export class PostgresRepository {
               COALESCE(m.upstream_multiplier,rule.upstream_multiplier,
                 CASE WHEN probe.status='ok' AND probe.fresh_until>NOW() THEN probe.effective_rate_multiplier END
               ) AS upstream_multiplier,
-              COALESCE(m.selling_multiplier,rule.selling_multiplier) AS selling_multiplier,
               COALESCE(rule.basis_mode,cp.basis_mode,'revenue_backsolve') AS basis_mode,
               COALESCE(rule.cny_per_reference_unit,cp.cny_per_reference_unit) AS cny_per_reference_unit,
               COALESCE(NULLIF(m.upstream_multiplier_source,''),
@@ -1201,7 +1199,6 @@ export class PostgresRepository {
         sourceDeletedAt: row.source_deleted_at || null,
         lifecycle: row.source_deleted_at ? 'deleted' : row.status === 'active' ? 'current' : 'inactive',
         upstreamMultiplier: number(row.upstream_multiplier) || null,
-        sellingMultiplier: number(row.selling_multiplier) || null,
         basisMode: row.basis_mode || 'revenue_backsolve',
         cnyPerReferenceUnit: number(row.cny_per_reference_unit) || null,
         upstreamMultiplierSource: row.upstream_multiplier_source || '',
@@ -1611,7 +1608,7 @@ export class PostgresRepository {
   async listCostProfiles() {
     const result = await this.pool.query(`
       SELECT cp.id,cp.name,cp.cost_type,cp.cost_mode,cp.basis_mode,cp.variable_multiplier,
-             cp.cny_per_reference_unit,cp.default_selling_multiplier,
+             cp.cny_per_reference_unit,
              cp.currency,cp.allocation_method,cp.version,
              COUNT(a.source_account_id)::int AS account_count
       FROM ${this.schema}.cost_profiles cp
@@ -1623,7 +1620,6 @@ export class PostgresRepository {
       basisMode: row.basis_mode,
       variableMultiplier: row.variable_multiplier === null ? null : number(row.variable_multiplier),
       cnyPerReferenceUnit: row.cny_per_reference_unit === null ? null : number(row.cny_per_reference_unit),
-      defaultSellingMultiplier: row.default_selling_multiplier === null ? null : number(row.default_selling_multiplier),
       id: row.id,
       name: row.name,
       allocationMethod: row.allocation_method,
@@ -1638,11 +1634,11 @@ export class PostgresRepository {
       const result = await client.query(`
         INSERT INTO ${this.schema}.cost_profiles(
           name,cost_type,cost_mode,basis_mode,variable_multiplier,cny_per_reference_unit,
-          default_selling_multiplier,currency,allocation_method,notes,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+          currency,allocation_method,notes,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [
         input.name,input.costType,input.costMode,input.basisMode,input.variableMultiplier,
-        input.cnyPerReferenceUnit,input.defaultSellingMultiplier,input.currency,input.allocationMethod,
+        input.cnyPerReferenceUnit,input.currency,input.allocationMethod,
         input.notes||'',actor,
       ]);
       const created = result.rows[0];
@@ -2064,9 +2060,9 @@ export class PostgresRepository {
     const upstreamMultiplier = input.upstreamMultiplier ?? (
       costMode === 'manual_multiplier' ? profile?.variable_multiplier : null
     );
-    const sellingMultiplier = input.sellingMultiplier ?? profile?.default_selling_multiplier ?? null;
+    const sourceSellingMultiplier = null;
     const cnyPerReferenceUnit = input.cnyPerReferenceUnit ?? profile?.cny_per_reference_unit ?? null;
-    assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, sellingMultiplier, cnyPerReferenceUnit });
+    assertResolvedCostRule({ costMode, basisMode, upstreamMultiplier, cnyPerReferenceUnit });
     const timing = await client.query(`
       WITH clock AS (
         SELECT NOW() AS now_at,
@@ -2109,7 +2105,7 @@ export class PostgresRepository {
       && String(currentRule.cost_mode || '') === String(costMode)
       && String(currentRule.basis_mode || '') === String(basisMode)
       && String(currentRule.upstream_multiplier ?? '') === String(upstreamMultiplier ?? '')
-      && String(currentRule.selling_multiplier ?? '') === String(sellingMultiplier ?? '')
+      && String(currentRule.selling_multiplier ?? '') === String(sourceSellingMultiplier ?? '')
       && String(currentRule.cny_per_reference_unit ?? '') === String(cnyPerReferenceUnit ?? '')
       && String(currentRule.notes || '') === String(input.notes || '');
     const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(costMode);
@@ -2169,7 +2165,7 @@ export class PostgresRepository {
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11) RETURNING *`,
     [
       accountId,costProfileId,costMode,basisMode,
-      upstreamMultiplier,sellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,changeStrategy,
+      upstreamMultiplier,sourceSellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,changeStrategy,
     ]);
     return result.rows[0];
   }
@@ -2237,7 +2233,7 @@ export class PostgresRepository {
         FOR UPDATE`, [accountId]);
       if (!account.rowCount) throw httpError('account not found; run synchronization first', 404);
       const snapshots = await client.query(`
-        SELECT source_usage_id,user_charge_cny,standard_cost_usd_reference,calculated_cost_cny
+        SELECT source_usage_id,user_charge_cny,standard_cost_usd_reference,source_selling_multiplier,calculated_cost_cny
         FROM ${this.schema}.fact_usage_cost_snapshots
         WHERE source_account_id=$1 AND occurred_at >= $2 AND occurred_at < $3
         ORDER BY occurred_at,source_usage_id
@@ -2249,7 +2245,7 @@ export class PostgresRepository {
           basisMode: input.basisMode,
           userChargeCny: row.user_charge_cny,
           standardCostReference: row.standard_cost_usd_reference,
-          sellingMultiplier: input.sellingMultiplier,
+          sourceSellingMultiplier: row.source_selling_multiplier,
           upstreamMultiplier: input.upstreamMultiplier,
           cnyPerReferenceUnit: input.cnyPerReferenceUnit,
         });
@@ -2258,7 +2254,7 @@ export class PostgresRepository {
           costMode: input.costMode,
           basisMode: input.basisMode,
           upstreamMultiplier: input.upstreamMultiplier,
-          sellingMultiplier: input.sellingMultiplier,
+          sourceSellingMultiplier: row.source_selling_multiplier,
           cnyPerReferenceUnit: input.cnyPerReferenceUnit,
           costStatus: calculation.status,
           calculatedCostCny: calculation.costCny,
@@ -2274,7 +2270,7 @@ export class PostgresRepository {
         RETURNING *`,
       [
         accountId,input.effectiveFrom,input.effectiveTo,input.costMode,input.basisMode,
-        input.upstreamMultiplier,input.sellingMultiplier,input.cnyPerReferenceUnit,
+        input.upstreamMultiplier,null,input.cnyPerReferenceUnit,
         repriced.length,beforeCostCny,afterCostCny,input.notes || '',actor,
       ]);
       const jobId = Number(job.rows[0].id);
@@ -2285,7 +2281,7 @@ export class PostgresRepository {
         const values = batch.map((row, index) => {
           const base = 2 + index * 8;
           params.push(
-            row.sourceUsageId,row.costMode,row.basisMode,row.upstreamMultiplier,row.sellingMultiplier,
+            row.sourceUsageId,row.costMode,row.basisMode,row.upstreamMultiplier,row.sourceSellingMultiplier,
             row.cnyPerReferenceUnit,row.costStatus,row.calculatedCostCny,
           );
           return `($${base}::bigint,$${base + 1}::varchar,$${base + 2}::varchar,$${base + 3}::numeric,` +

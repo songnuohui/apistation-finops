@@ -498,7 +498,7 @@ export class DemoRepository {
         basisMode: 'revenue_backsolve',
         costStatus: fixedCost ? 'fixed_cost' : 'priced',
         calculatedCostCny: fixedCost ? null : Number((userChargeCny * 0.72).toFixed(6)),
-        sellingMultiplier: fixedCost ? null : 1,
+        sourceSellingMultiplier: fixedCost ? null : 1,
         upstreamMultiplier: fixedCost ? null : 0.72,
         cnyPerReferenceUnit: null,
         upstreamMultiplierSource: fixedCost ? '' : 'manual_rule',
@@ -1177,7 +1177,6 @@ export class DemoRepository {
     account.costMode = costMode;
     account.basisMode = input.basisMode || account.basisMode || 'revenue_backsolve';
     account.upstreamMultiplier = input.upstreamMultiplier || profile?.variableMultiplier || null;
-    account.sellingMultiplier = input.sellingMultiplier || profile?.defaultSellingMultiplier || null;
     account.cnyPerReferenceUnit = input.cnyPerReferenceUnit || profile?.cnyPerReferenceUnit || null;
     account.supplier = input.supplier;
     account.purchaseBatch = input.purchaseBatch;

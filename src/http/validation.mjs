@@ -145,7 +145,6 @@ export function normalizeCostProfile(input) {
     basisMode,
     cnyPerReferenceUnit,
     variableMultiplier,
-    defaultSellingMultiplier: optionalDecimal(input.defaultSellingMultiplier, 'defaultSellingMultiplier', { min: 0, allowZero: false }),
     currency: cnyCurrency(input.currency, 'currency'),
     allocationMethod: enumValue(input.allocationMethod, 'allocationMethod', ALLOCATION_METHODS),
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
@@ -192,14 +191,12 @@ export function normalizeAccountLedger(input) {
   const costMode = optionalEnum(input.costMode, 'costMode', COST_MODES);
   const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES);
   const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
-  const sellingMultiplier = optionalDecimal(input.sellingMultiplier, 'sellingMultiplier', { min: 0, allowZero: false });
   const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
   return {
     costProfileId: optionalId(input.costProfileId, 'costProfileId'),
     costMode,
     basisMode,
     upstreamMultiplier,
-    sellingMultiplier,
     cnyPerReferenceUnit,
     changeStrategy: optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only',
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
@@ -300,13 +297,9 @@ export function normalizeAccountCostReprice(input) {
   }
   const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES) || 'revenue_backsolve';
   const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
-  const sellingMultiplier = optionalDecimal(input.sellingMultiplier, 'sellingMultiplier', { min: 0, allowZero: false });
   const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
   if (['manual_multiplier', 'probe_multiplier'].includes(costMode) && !upstreamMultiplier) {
     throw badRequest('historical multiplier reprice requires upstreamMultiplier');
-  }
-  if (costMode !== 'free' && basisMode === 'revenue_backsolve' && !sellingMultiplier) {
-    throw badRequest('revenue_backsolve requires sellingMultiplier');
   }
   if (costMode !== 'free' && basisMode === 'reference_cny' && !cnyPerReferenceUnit) {
     throw badRequest('reference_cny requires cnyPerReferenceUnit');
@@ -317,7 +310,6 @@ export function normalizeAccountCostReprice(input) {
     costMode,
     basisMode,
     upstreamMultiplier,
-    sellingMultiplier,
     cnyPerReferenceUnit,
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
   };

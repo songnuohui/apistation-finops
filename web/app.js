@@ -900,7 +900,7 @@ function accountPricingDetail(account) {
     return `<span class="primary-text">${cny(total)}</span><div class="secondary-text">固定成本期 · ${dateOnly(account.currentEffectiveFrom)}</div>`;
   }
   if (mode === 'manual_multiplier') {
-    return `<span class="primary-text">手动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">销售 ${multiplier(account.sellingMultiplier)} · 人工可随时调整</div>`;
+    return `<span class="primary-text">手动 ${multiplier(account.upstreamMultiplier)}</span><div class="secondary-text">采购成本倍率 · 人工可随时调整</div>`;
   }
   if (mode === 'probe_multiplier') {
     if (account.upstreamMultiplier) {
@@ -919,7 +919,8 @@ function costStatusLabel(value) {
     free: '免费资源',
     unconfigured: '未配置成本规则',
     missing_upstream_multiplier: '缺少上游倍率',
-    missing_selling_multiplier: '缺少销售倍率',
+    missing_source_selling_multiplier: '缺少消费记录倍率',
+    missing_selling_multiplier: '缺少消费记录倍率',
     missing_cny_basis: '缺少 CNY 基准',
     not_snapshotted: '等待成本快照',
   })[value] || value || '等待成本快照';
@@ -2180,8 +2181,8 @@ async function renderCosts(search = '') {
         `<span class="primary-text">${escapeHtml(item.name)}</span><div class="secondary-text">v${item.version}</div>`,
         `<span class="tag neutral">${escapeHtml(costModeLabel(item.costMode))}</span>`,
         escapeHtml(item.basisMode === 'reference_cny' ? '目录价 CNY 基准' : '实际扣款回推'),
-        item.costMode === 'manual_multiplier' ? `${item.variableMultiplier || '--'}x`
-          : item.basisMode === 'reference_cny' ? cny(item.cnyPerReferenceUnit) : item.defaultSellingMultiplier ? `销售 ${item.defaultSellingMultiplier}x` : '--',
+        item.costMode === 'manual_multiplier' ? `上游 ${multiplier(item.variableMultiplier)}`
+          : item.basisMode === 'reference_cny' ? cny(item.cnyPerReferenceUnit) : '消费记录倍率',
         escapeHtml(item.allocationMethod), compact(item.accountCount),
       ]), 960)
     }${pager(data, 'costProfiles', '个模板')}</section>`;
@@ -2436,9 +2437,8 @@ function ledgerFields(profiles, account) {
   return [
     { name: 'costProfileId', label: '成本模板', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...profiles.map((item) => [item.id, item.name])] },
     { name: 'costMode', label: '核算模式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['probe_multiplier', '自动读取上游探测倍率'], ['manual_multiplier', '手动输入上游倍率'], ['fixed_purchase', '固定采购成本'], ['free', '免费资源']] },
-    { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
+    { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按消费记录倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'upstreamMultiplier', label: '手动上游倍率（仅手动模式）', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
-    { name: 'sellingMultiplier', label: '销售倍率覆盖', type: 'number', required: false, value: account.sellingMultiplier || '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
     { name: 'changeStrategy', label: '本次计价变更', type: 'select', value: 'future_only', options: [['future_only', '后续用量生效'], ['current_day', '从今天 0 点重算']] },
     { name: 'supplier', label: '供应商', required: false, value: account.supplier || '' },
@@ -2454,8 +2454,7 @@ function changeStrategyLabel(value) {
 function accountRuleText(account) {
   if (account.costMode === 'manual_multiplier' || account.costMode === 'probe_multiplier') {
     const upstream = account.upstreamMultiplier ? `上游 ${multiplier(account.upstreamMultiplier)}` : '上游待补';
-    const selling = account.sellingMultiplier ? `销售 ${multiplier(account.sellingMultiplier)}` : '销售待补';
-    return `${costModeLabel(account.costMode)} · ${upstream} / ${selling}`;
+    return `${costModeLabel(account.costMode)} · ${upstream}`;
   }
   return costModeLabel(account.costMode || account.costType);
 }
@@ -2520,8 +2519,7 @@ function ruleHistoryValue(item) {
     return `<span class="primary-text">历史更正</span><div class="secondary-text">${dateTime(item.rangeStart)} - ${dateTime(item.rangeEnd)} · ${cny(item.beforeCostCny)} -> ${cny(item.afterCostCny)}</div>`;
   }
   const upstream = item.upstreamMultiplier ? `上游 ${item.upstreamMultiplier}x` : '上游 --';
-  const selling = item.sellingMultiplier ? `销售 ${item.sellingMultiplier}x` : '销售 --';
-  return `<span class="primary-text">${escapeHtml(costModeLabel(item.costMode))}</span><div class="secondary-text">${upstream} · ${selling}</div>`;
+  return `<span class="primary-text">${escapeHtml(costModeLabel(item.costMode))}</span><div class="secondary-text">${upstream}</div>`;
 }
 
 async function openAccountCostRuleHistory(account, profiles, page = 1, pageSize = 10) {
@@ -2586,9 +2584,8 @@ function openAccountCostRepriceModal(account) {
     { name: 'effectiveFrom', label: '更正开始时间', type: 'datetime-local', value: dateTimeInputValue(start) },
     { name: 'effectiveTo', label: '更正结束时间', type: 'datetime-local', value: dateTimeInputValue(new Date()) },
     { name: 'costMode', label: '核算模式', type: 'select', value: costMode, options: [['manual_multiplier', '手动上游倍率'], ['probe_multiplier', '使用已确认探测倍率'], ['free', '免费资源']] },
-    { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
+    { name: 'basisMode', label: '倍率成本基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '实际扣款按消费记录倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'upstreamMultiplier', label: '确认上游倍率', type: 'number', required: false, value: account.upstreamMultiplier || '' },
-    { name: 'sellingMultiplier', label: '确认销售倍率', type: 'number', required: false, value: account.sellingMultiplier || '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
     { name: 'notes', label: '更正原因', type: 'textarea', full: true, required: true },
   ], (data) => api(`/accounts/${account.id}/cost-reprice`, {
@@ -2628,9 +2625,8 @@ function openCostProfileModal() {
     { name: 'name', label: '模板名称' },
     { name: 'costType', label: '成本类型', type: 'select', options: [['subscription', '固定订阅'], ['metered', '按量后付费'], ['prepaid', '预付余额'], ['one_time', '一次性购买'], ['free', '免费资源'], ['hybrid', '混合成本']] },
     { name: 'costMode', label: '核算模式', type: 'select', options: [['fixed_purchase', '固定采购成本'], ['probe_multiplier', '自动读取上游探测倍率'], ['manual_multiplier', '手动上游倍率'], ['free', '免费资源']] },
-    { name: 'basisMode', label: '倍率成本基础', type: 'select', options: [['revenue_backsolve', '实际扣款按销售倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
+    { name: 'basisMode', label: '倍率成本基础', type: 'select', options: [['revenue_backsolve', '实际扣款按消费记录倍率回推'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'variableMultiplier', label: '默认手动上游倍率', type: 'number', required: false },
-    { name: 'defaultSellingMultiplier', label: '默认销售倍率覆盖', type: 'number', required: false },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false },
     { name: 'allocationMethod', label: '分摊方法', type: 'select', options: [['standard_cost_weight', '标准目录价权重'], ['token_weight', 'Token 权重'], ['none', '不分摊']] },
     { name: 'notes', label: '备注', type: 'textarea', full: true, required: false },

@@ -546,6 +546,7 @@ test('first account multiplier of the day starts at local midnight', async () =>
   assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
   const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
   assert.equal(insert.params[7], '2026-07-31T16:00:00.000Z');
+  assert.equal(insert.params[5], null);
   assert.match(queries[0].text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$2\)/);
 });
 
@@ -677,8 +678,14 @@ test('audited reprice updates selected FinOps snapshots and records the before/a
       if (text.includes('SELECT source_account_id') && text.includes('FOR UPDATE')) return { rows: [{ source_account_id: 8 }], rowCount: 1 };
       if (text.includes('SELECT source_usage_id,user_charge_cny')) return {
         rows: [
-          { source_usage_id: 101, user_charge_cny: '10', standard_cost_usd_reference: '0', calculated_cost_cny: '2' },
-          { source_usage_id: 102, user_charge_cny: '20', standard_cost_usd_reference: '0', calculated_cost_cny: '4' },
+          {
+            source_usage_id: 101, user_charge_cny: '10', standard_cost_usd_reference: '0',
+            source_selling_multiplier: '0.1', calculated_cost_cny: '2',
+          },
+          {
+            source_usage_id: 102, user_charge_cny: '20', standard_cost_usd_reference: '0',
+            source_selling_multiplier: '0.1', calculated_cost_cny: '4',
+          },
         ],
         rowCount: 2,
       };
@@ -694,7 +701,7 @@ test('audited reprice updates selected FinOps snapshots and records the before/a
   const result = await repository.repriceAccountCost(8, {
     effectiveFrom: '2026-07-01T00:00:00.000Z', effectiveTo: '2026-08-01T00:00:00.000Z',
     costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
-    upstreamMultiplier: '0.05', sellingMultiplier: '0.1', cnyPerReferenceUnit: null, notes: '更正',
+    upstreamMultiplier: '0.05', sellingMultiplier: '8', cnyPerReferenceUnit: null, notes: '更正',
   }, 'finance@example.com');
   assert.deepEqual(result, {
     id: 12, accountId: 8, effectiveFrom: '2026-07-01T00:00:00.000Z',
@@ -703,6 +710,8 @@ test('audited reprice updates selected FinOps snapshots and records the before/a
   const snapshotUpdate = queries.find((query) => query.text.includes("upstream_multiplier_source='audited_reprice'"));
   assert.ok(snapshotUpdate);
   assert.equal(snapshotUpdate.params[0], 12);
+  const repriceJob = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_reprice_jobs'));
+  assert.equal(repriceJob.params[6], null);
   assert.ok(queries.some((query) => query.text.includes("'historical_reprice'")));
 });
 

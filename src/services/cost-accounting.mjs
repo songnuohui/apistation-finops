@@ -149,7 +149,7 @@ export function calculateMultiplierCostCny({
   basisMode,
   userChargeCny,
   standardCostReference,
-  sellingMultiplier,
+  sourceSellingMultiplier,
   upstreamMultiplier,
   cnyPerReferenceUnit,
 }) {
@@ -174,8 +174,8 @@ export function calculateMultiplierCostCny({
   }
 
   const charge = finiteDecimal(userChargeCny);
-  const selling = positiveNumber(sellingMultiplier);
-  if (!selling) return { status: 'missing_selling_multiplier', costCny: null };
+  const selling = positiveNumber(sourceSellingMultiplier);
+  if (!selling) return { status: 'missing_source_selling_multiplier', costCny: null };
   if (!charge || charge.lt(0)) return { status: 'invalid_user_charge', costCny: null };
   return {
     status: 'priced',

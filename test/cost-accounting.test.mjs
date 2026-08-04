@@ -7,16 +7,27 @@ import {
   splitFixedCostCny,
 } from '../src/services/cost-accounting.mjs';
 
-test('revenue-backsolve uses CNY user charge, selling multiplier, and upstream multiplier', () => {
+test('revenue-backsolve uses CNY user charge, source usage multiplier, and upstream multiplier', () => {
   const result = calculateMultiplierCostCny({
     mode: 'probe_multiplier',
     basisMode: 'revenue_backsolve',
     userChargeCny: '100',
-    sellingMultiplier: '2',
+    sourceSellingMultiplier: '2',
     upstreamMultiplier: '0.8',
   });
   assert.equal(result.status, 'priced');
   assert.equal(result.costCny, '40');
+});
+
+test('revenue-backsolve remains unpriced when the source usage has no billing multiplier', () => {
+  const result = calculateMultiplierCostCny({
+    mode: 'manual_multiplier',
+    basisMode: 'revenue_backsolve',
+    userChargeCny: '100',
+    upstreamMultiplier: '0.8',
+  });
+  assert.equal(result.status, 'missing_source_selling_multiplier');
+  assert.equal(result.costCny, null);
 });
 
 test('reference CNY basis never performs implicit USD conversion', () => {

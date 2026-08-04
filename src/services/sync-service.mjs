@@ -744,13 +744,7 @@ export class SyncService {
               ELSE 'unconfigured'
             END) AS configured_cost_mode,
           COALESCE(rule.basis_mode,rule_profile.basis_mode,account_profile.basis_mode,'revenue_backsolve') AS basis_mode,
-          COALESCE(
-            rule.selling_multiplier,
-            group_rate.selling_multiplier,
-            rule_profile.default_selling_multiplier,
-            account_profile.default_selling_multiplier,
-            NULLIF(f.user_rate_multiplier,0)
-          ) AS selling_multiplier,
+          NULLIF(f.user_rate_multiplier,0) AS selling_multiplier,
           COALESCE(rule.upstream_multiplier,rule_profile.variable_multiplier,account_profile.variable_multiplier)
             AS manual_upstream_multiplier,
           COALESCE(
@@ -760,7 +754,7 @@ export class SyncService {
           ) AS cny_per_reference_unit,
           COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
           rule.id AS account_cost_rule_id,
-          group_rate.id AS selling_rate_rule_id,
+          NULL::bigint AS selling_rate_rule_id,
           fixed_period.id AS fixed_period_id,
           observation.id AS rate_observation_id,
           observation.status AS observation_status,
@@ -790,16 +784,6 @@ export class SyncService {
         ) rule ON TRUE
         LEFT JOIN ${this.schema}.cost_profiles rule_profile
           ON rule_profile.id=rule.cost_profile_id
-        LEFT JOIN LATERAL (
-          SELECT r.id,r.selling_multiplier
-          FROM ${this.schema}.group_selling_rate_rules r
-          WHERE r.source_group_id=f.source_group_id
-            AND r.status IN ('active','superseded')
-            AND r.effective_from <= f.occurred_at
-            AND (r.effective_to IS NULL OR r.effective_to > f.occurred_at)
-          ORDER BY r.effective_from DESC,r.id DESC
-          LIMIT 1
-        ) group_rate ON TRUE
         LEFT JOIN LATERAL (
           SELECT p.id,p.cost_profile_id
           FROM ${this.schema}.account_cost_periods p
@@ -896,7 +880,7 @@ export class SyncService {
           basisMode: row.basis_mode,
           userChargeCny: row.user_charge_cny,
           standardCostReference: row.standard_cost_usd_reference,
-          sellingMultiplier: row.selling_multiplier,
+          sourceSellingMultiplier: row.selling_multiplier,
           upstreamMultiplier,
           cnyPerReferenceUnit: row.cny_per_reference_unit,
         });
@@ -925,7 +909,7 @@ export class SyncService {
           cost_status: calculation.status,
           calculated_cost_cny: calculation.costCny,
           snapshot_origin: origin,
-          pricing_version: 2,
+          pricing_version: 3,
         };
       });
       for (let offset = 0; offset < rows.length; offset += MAX_COST_SNAPSHOT_ROWS_PER_INSERT) {

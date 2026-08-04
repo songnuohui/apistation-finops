@@ -82,16 +82,24 @@ test('write payloads are normalized and invalid financial data is rejected', () 
   assert.throws(() => normalizeCostProfile({
     name: 'free mismatch', costType: 'free', costMode: 'fixed_purchase', currency: 'CNY', allocationMethod: 'none',
   }), /free costType requires free costMode/);
-  assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier' }).upstreamMultiplier, null);
+  const legacyProfile = normalizeCostProfile({
+    name: 'legacy multiplier', costType: 'metered', currency: 'CNY', allocationMethod: 'token_weight',
+    defaultSellingMultiplier: '8',
+  });
+  assert.equal('defaultSellingMultiplier' in legacyProfile, false);
+  const legacyLedger = normalizeAccountLedger({ costMode: 'manual_multiplier', sellingMultiplier: '8' });
+  assert.equal(legacyLedger.upstreamMultiplier, null);
+  assert.equal('sellingMultiplier' in legacyLedger, false);
   assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier', changeStrategy: 'current_day' }).changeStrategy, 'current_day');
   assert.throws(() => normalizeAccountLedger({ changeStrategy: 'rewrite_everything' }), /invalid changeStrategy/);
   assert.equal(normalizeAccountCostArchive({ cutoffAt: '2026-08-01T12:00:00+08:00', notes: '日结' }).notes, '日结');
   const reprice = normalizeAccountCostReprice({
     effectiveFrom: '2026-07-01T00:00:00+08:00', effectiveTo: '2026-08-01T00:00:00+08:00',
     costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
-    upstreamMultiplier: '0.05', sellingMultiplier: '0.1', notes: '修正手工录入',
+    upstreamMultiplier: '0.05', notes: '修正手工录入',
   });
   assert.equal(reprice.upstreamMultiplier, '0.05');
+  assert.equal('sellingMultiplier' in reprice, false);
   assert.throws(() => normalizeAccountCostReprice({
     ...reprice, effectiveFrom: reprice.effectiveTo,
   }), /effectiveTo/);

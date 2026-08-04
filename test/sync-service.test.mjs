@@ -419,7 +419,7 @@ test('open usage cost snapshots refresh while finalized history remains immutabl
             source_selling_multiplier: '2', source_account_multiplier: null,
             configured_cost_mode: 'manual_multiplier', basis_mode: 'revenue_backsolve',
             selling_multiplier: '2', manual_upstream_multiplier: '0.08', cny_per_reference_unit: null,
-            cost_profile_id: 7, account_cost_rule_id: 51, selling_rate_rule_id: 71,
+            cost_profile_id: 7, account_cost_rule_id: 51, selling_rate_rule_id: null,
             fixed_period_id: null, rate_observation_id: null, observed_upstream_multiplier: null,
           }],
           rowCount: 1,
@@ -436,12 +436,15 @@ test('open usage cost snapshots refresh while finalized history remains immutabl
   const refresh = queries.find((query) => query.text.includes('INSERT INTO "finops".fact_usage_cost_snapshots'));
   const finalize = queries.find((query) => query.text.includes('SET finalized=TRUE'));
   const select = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
-  assert.match(select.text, /group_selling_rate_rules/);
+  assert.match(select.text, /NULLIF\(f\.user_rate_multiplier,0\) AS selling_multiplier/);
+  assert.doesNotMatch(select.text, /group_selling_rate_rules|default_selling_multiplier|rule\.selling_multiplier/);
   assert.match(select.text, /snapshot\.finalized=FALSE/);
   assert.match(refresh.text, /ON CONFLICT\(source_usage_id\) DO UPDATE SET/);
   assert.match(refresh.text, /WHERE NOT fact_usage_cost_snapshots\.finalized/);
   assert.equal(refresh.params.length, COST_SNAPSHOT_COLUMN_COUNT);
-  assert.equal(refresh.params[14], 71);
+  assert.equal(refresh.params[14], null);
+  assert.equal(refresh.params[16], '2');
+  assert.equal(refresh.params[23], 3);
   assert.match(finalize.text, /finalized=TRUE/);
   assert.match(finalize.text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$1\)/);
 });
