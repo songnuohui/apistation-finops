@@ -235,8 +235,14 @@ export function normalizeSupplierConnection(input) {
     authMode,
     credentialLabel: textValue(input.credentialLabel, 'credentialLabel', { required: false, max: 255 }),
     enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
-    inventoryIntervalMinutes: input.inventoryIntervalMinutes === undefined
-      ? 10 : integerValue(input.inventoryIntervalMinutes, 'inventoryIntervalMinutes', { min: 5, max: 1440 }),
+    // Seconds are intentionally bounded to keep a bad configuration from
+    // creating a tight polling loop. Keep accepting the old minutes field so
+    // existing clients can be upgraded without losing their setting.
+    inventoryIntervalSeconds: input.inventoryIntervalSeconds !== undefined
+      ? integerValue(input.inventoryIntervalSeconds, 'inventoryIntervalSeconds', { min: 3, max: 86400 })
+      : input.inventoryIntervalMinutes !== undefined
+        ? integerValue(input.inventoryIntervalMinutes, 'inventoryIntervalMinutes', { min: 1, max: 1440 }) * 60
+        : 600,
     activeCheckEnabled: input.activeCheckEnabled === undefined ? true : booleanValue(input.activeCheckEnabled, 'activeCheckEnabled'),
     activeCheckLimit: input.activeCheckLimit === undefined
       ? 20 : integerValue(input.activeCheckLimit, 'activeCheckLimit', { min: 1, max: 100 }),

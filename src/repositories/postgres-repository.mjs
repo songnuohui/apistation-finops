@@ -33,7 +33,8 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     credentialLabel: row.credential_label || '',
     credentialsConfigured: Boolean(row.credentials_ciphertext),
     enabled: Boolean(row.enabled),
-    inventoryIntervalMinutes: Number(row.inventory_interval_minutes || 10),
+    inventoryIntervalSeconds: Number(row.inventory_interval_seconds || (Number(row.inventory_interval_minutes || 10) * 60)),
+    inventoryIntervalMinutes: Number(row.inventory_interval_minutes || Math.ceil(Number(row.inventory_interval_seconds || 600) / 60)),
     activeCheckEnabled: Boolean(row.active_check_enabled),
     activeCheckLimit: Number(row.active_check_limit || 20),
     lowBalanceThreshold: nullableNumber(row.low_balance_threshold),
@@ -2964,13 +2965,13 @@ export class PostgresRepository {
         result = await client.query(`
           INSERT INTO ${this.schema}.supplier_connections(
             supplier_id,name,adapter_type,base_url,auth_mode,credential_label,credentials_ciphertext,
-            enabled,inventory_interval_minutes,active_check_enabled,active_check_limit,
+            enabled,inventory_interval_seconds,inventory_interval_minutes,active_check_enabled,active_check_limit,
             low_balance_threshold,balance_currency,created_by,updated_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
           RETURNING *`, [
           supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalMinutes,input.activeCheckEnabled,
-          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(1, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
+          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,actor,
         ]);
       } catch (error) {
         if (error?.code === '23505') throw httpError('该供应商下已存在同名连接', 409);
@@ -2997,13 +2998,13 @@ export class PostgresRepository {
         result = await client.query(`
           UPDATE ${this.schema}.supplier_connections SET
             supplier_id=$2,name=$3,adapter_type=$4,base_url=$5,auth_mode=$6,credential_label=$7,
-            credentials_ciphertext=$8,enabled=$9,inventory_interval_minutes=$10,
-            active_check_enabled=$11,active_check_limit=$12,low_balance_threshold=$13,
-            balance_currency=$14,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
-            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$15,updated_at=NOW()
+            credentials_ciphertext=$8,enabled=$9,inventory_interval_seconds=$10,inventory_interval_minutes=$11,
+            active_check_enabled=$12,active_check_limit=$13,low_balance_threshold=$14,
+            balance_currency=$15,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
+            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$16,updated_at=NOW()
           WHERE id=$1 RETURNING *`, [
           connectionId,supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalMinutes,input.activeCheckEnabled,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(1, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
           input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
         ]);
       } catch (error) {
@@ -3016,6 +3017,13 @@ export class PostgresRepository {
       [actor,String(connectionId),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl, enabled: input.enabled })]);
       return supplierConnection(row);
     });
+  }
+
+  async updateSupplierConnectionAccessToken(connectionId, credentialsCiphertext) {
+    await this.pool.query(`
+      UPDATE ${this.schema}.supplier_connections
+      SET credentials_ciphertext=$2,updated_at=NOW()
+      WHERE id=$1 AND auth_mode='password'`, [connectionId, credentialsCiphertext]);
   }
 
   async listDueSupplierConnections(limit = 5) {
@@ -3043,7 +3051,7 @@ export class PostgresRepository {
           connection_status=CASE WHEN $2='unsupported_site' OR $2='adapter_required' THEN 'unsupported' ELSE 'failed' END,
           last_sync_at=NOW(),consecutive_failures=consecutive_failures+1,last_error=$3,
           next_sync_at=NOW()+LEAST(INTERVAL '24 hours',
-            inventory_interval_minutes*INTERVAL '1 minute' * POWER(2,LEAST(consecutive_failures+1,6))),updated_at=NOW()
+            inventory_interval_seconds*INTERVAL '1 second' * POWER(2,LEAST(consecutive_failures+1,6))),updated_at=NOW()
         WHERE id=$1 RETURNING *`, [connectionId,error.code || 'sync_failed',String(error.message || '供应商同步失败').slice(0,1000)]);
       if (!result.rowCount) return;
       await client.query(`
@@ -3159,10 +3167,10 @@ export class PostgresRepository {
                 group_rate_multiplier,user_rate_multiplier,resolved_rate_multiplier,effective_rate_multiplier,
                 peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data,supplier_key_id)
               VALUES($1,$2,'supplier_direct_probe','ok','token',$3,NOW(),
-                NOW()+($4*2)*INTERVAL '1 minute',NOW(),NOW()+$4*INTERVAL '1 minute',0,$5,'',
+                NOW()+($4*2)*INTERVAL '1 second',NOW(),NOW()+$4*INTERVAL '1 second',0,$5,'',
                 $6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15)
               ON CONFLICT(source_account_id,observation_key) DO NOTHING`, [
-              link.source_account_id,`supplier:${key.id}:${observedAt}`,observedAt,connection.inventory_interval_minutes,
+              link.source_account_id,`supplier:${key.id}:${observedAt}`,observedAt,connection.inventory_interval_seconds,
               check.httpStatus || 200,check.billing.group_rate_multiplier,check.billing.user_rate_multiplier,
               check.billing.resolved_rate_multiplier,check.billing.effective_rate_multiplier,
               check.billing.peak_rate_enabled,check.billing.peak_rate_multiplier,check.billing.applied_peak_multiplier,
@@ -3197,7 +3205,7 @@ export class PostgresRepository {
       const failedChecks = checks.filter((check) => check.status === 'failed').length;
       await client.query(`UPDATE ${this.schema}.supplier_connections SET
         connection_status=$2,detected_adapter_type=$3,credential_label=COALESCE(NULLIF($4,''),credential_label),
-        balance_currency=$5,last_sync_at=NOW(),last_success_at=NOW(),next_sync_at=NOW()+inventory_interval_minutes*INTERVAL '1 minute',
+        balance_currency=$5,last_sync_at=NOW(),last_success_at=NOW(),next_sync_at=NOW()+inventory_interval_seconds*INTERVAL '1 second',
         consecutive_failures=0,last_error='',updated_at=NOW() WHERE id=$1`,
       [connectionId,failedChecks ? 'warning' : 'ok',snapshot.adapterType,snapshot.identity || '',snapshot.balanceCurrency || connection.balance_currency]);
     });

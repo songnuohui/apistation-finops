@@ -88,6 +88,20 @@ export class SupplierMonitorService {
     try {
       const credentials = this.decryptCredentials(connection.credentialsCiphertext);
       const snapshot = await this.adapters.snapshot(connection, credentials);
+      // Portal access tokens are short lived. Keep the latest token encrypted
+      // in the FinOps connection so the next cycle can reuse it. Passwords
+      // remain the recovery path after expiry or a 401/403 response.
+      if (connection.authMode === 'password' && snapshot.accessToken && this.repository.updateSupplierConnectionAccessToken) {
+        const nextCredentials = {
+          ...credentials,
+          accessToken: snapshot.accessToken,
+          accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
+        };
+        await this.repository.updateSupplierConnectionAccessToken(
+          connectionId,
+          this.encryptCredentials(nextCredentials),
+        );
+      }
       for (const key of snapshot.keys) key.keyFingerprint = this.vault.fingerprint(key.rawKey || `${connection.id}:${key.externalId}`);
       const linkedExternalIds = new Set(
         await this.repository.listLinkedSupplierKeyExternalIds?.(connection.id) || [],

@@ -198,7 +198,7 @@ export class DemoRepository {
       id: 1, supplierId: 1, supplierName: 'Cloud Seats', name: '主账号', adapterType: 'sub2api',
       detectedAdapterType: 'sub2api', baseUrl: 'https://supplier.example.com', authMode: 'access_token',
       credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true,
-      inventoryIntervalMinutes: 10, activeCheckEnabled: true, activeCheckLimit: 20,
+      inventoryIntervalSeconds: 600, inventoryIntervalMinutes: 10, activeCheckEnabled: true, activeCheckLimit: 20,
       lowBalanceThreshold: 5, balanceCurrency: 'USD', balance: 10.84, connectionStatus: 'ok',
       keyCount: 4, activeKeyCount: 4, failedKeyCount: 0, openAlertCount: 1,
       lastSyncAt: new Date(Date.now() - 3 * 60_000).toISOString(), lastSuccessAt: new Date(Date.now() - 3 * 60_000).toISOString(),
@@ -842,7 +842,8 @@ export class DemoRepository {
       credentialsConfigured: Boolean(credentialsCiphertext),
       credentialsCiphertext: credentialsCiphertext || '',
       enabled: input.enabled,
-      inventoryIntervalMinutes: input.inventoryIntervalMinutes,
+      inventoryIntervalSeconds: input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60,
+      inventoryIntervalMinutes: Math.ceil((input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60) / 60),
       activeCheckEnabled: input.activeCheckEnabled,
       activeCheckLimit: input.activeCheckLimit,
       lowBalanceThreshold: input.lowBalanceThreshold,
@@ -883,7 +884,8 @@ export class DemoRepository {
       authMode: input.authMode,
       credentialLabel: input.credentialLabel || '',
       enabled: input.enabled,
-      inventoryIntervalMinutes: input.inventoryIntervalMinutes,
+      inventoryIntervalSeconds: input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60,
+      inventoryIntervalMinutes: Math.ceil((input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60) / 60),
       activeCheckEnabled: input.activeCheckEnabled,
       activeCheckLimit: input.activeCheckLimit,
       lowBalanceThreshold: input.lowBalanceThreshold,
@@ -909,6 +911,11 @@ export class DemoRepository {
     }
     this.refreshSupplierConnectionStats(connection);
     return copySupplierConnection(connection);
+  }
+
+  async updateSupplierConnectionAccessToken(connectionId, credentialsCiphertext) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (connection) connection.credentialsCiphertext = credentialsCiphertext;
   }
 
   async syncSupplierConnection(connectionId) {
@@ -947,7 +954,7 @@ export class DemoRepository {
     connection.detectedAdapterType = connection.adapterType === 'auto' ? 'sub2api' : connection.adapterType;
     connection.lastSyncAt = checkedAt;
     connection.lastSuccessAt = checkedAt;
-    connection.nextSyncAt = new Date(Date.now() + Number(connection.inventoryIntervalMinutes || 10) * 60_000).toISOString();
+    connection.nextSyncAt = new Date(Date.now() + Number(connection.inventoryIntervalSeconds || Number(connection.inventoryIntervalMinutes || 10) * 60) * 1000).toISOString();
     connection.consecutiveFailures = 0;
     connection.lastError = '';
     this.refreshSupplierConnectionStats(connection);

@@ -198,7 +198,7 @@ export function loadConfig(env = process.env) {
     runtimeLiveRefreshSeconds: intValue(env.RUNTIME_LIVE_REFRESH_SECONDS, 2, { min: 1, max: 30 }),
     supplierCredentialsKey,
     supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
-    supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 60, { min: 30, max: 3600 }),
+    supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 3, { min: 3, max: 3600 }),
     supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 10_000, { min: 2_000, max: 30_000 }),
     supplierMaxResponseBytes: intValue(env.SUPPLIER_MAX_RESPONSE_BYTES, 1_048_576, { min: 65_536, max: 5_242_880 }),
     sessionSecret,

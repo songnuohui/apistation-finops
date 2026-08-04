@@ -409,6 +409,11 @@ async function sub2ApiToken(connection, credentials, client) {
   if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
     throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
   }
+  // Password connections may have an encrypted, previously issued token.
+  // Reuse it until the portal rejects it; the caller retries with a fresh login.
+  if (credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now())) {
+    return credentials.accessToken;
+  }
   const login = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/login', {
     method: 'POST', body: { email: credentials.username, password: credentials.password },
   })).payload) || {};
@@ -420,8 +425,19 @@ async function sub2ApiToken(connection, credentials, client) {
   return verified.access_token;
 }
 
-async function sub2ApiSnapshot(connection, credentials, client) {
-  const accessToken = await sub2ApiToken(connection, credentials, client);
+function tokenExpiry(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const exp = Number(payload.exp);
+    return Number.isFinite(exp) && exp > 0 ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sub2ApiSnapshotWithToken(connection, credentials, client, accessToken) {
   if (!accessToken) throw new SupplierAdapterError('authentication_failed', 'supplier login did not return an access token');
   const [profileResult, groupsResult, ratesResult] = await Promise.all([
     client.request(connection.baseUrl, '/api/v1/auth/me', { token: accessToken }),
@@ -473,7 +489,22 @@ async function sub2ApiSnapshot(connection, credentials, client) {
     balance: number(profile.balance),
     balanceCurrency: 'USD',
     keys,
+    accessToken,
+    accessTokenExpiresAt: tokenExpiry(accessToken),
   };
+}
+
+async function sub2ApiSnapshot(connection, credentials, client) {
+  let accessToken = await sub2ApiToken(connection, credentials, client);
+  try {
+    return await sub2ApiSnapshotWithToken(connection, credentials, client, accessToken);
+  } catch (error) {
+    if (connection.authMode === 'password' && credentials.accessToken && error?.code === 'authentication_failed') {
+      accessToken = await sub2ApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0 }, client);
+      return sub2ApiSnapshotWithToken(connection, credentials, client, accessToken);
+    }
+    throw error;
+  }
 }
 
 async function newApiToken(connection, credentials, client) {
@@ -483,6 +514,9 @@ async function newApiToken(connection, credentials, client) {
   }
   if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
     throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
+  }
+  if (credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now())) {
+    return credentials.accessToken;
   }
   const login = unwrap((await client.request(connection.baseUrl, '/api/user/login', {
     method: 'POST', body: { username: credentials.username, password: credentials.password },
@@ -523,8 +557,7 @@ function newApiQuotaConverter(site) {
   return { currency: 'QUOTA', convert: number };
 }
 
-async function newApiSnapshot(connection, credentials, client) {
-  const accessToken = await newApiToken(connection, credentials, client);
+async function newApiSnapshotWithToken(connection, credentials, client, accessToken) {
   if (!accessToken) throw new SupplierAdapterError('authentication_failed', 'supplier login did not return an access token');
   const [statusResult, profileResult, groupsResult] = await Promise.all([
     client.request(connection.baseUrl, '/api/status'),
@@ -577,7 +610,22 @@ async function newApiSnapshot(connection, credentials, client) {
     balance: quota.convert(profile.quota),
     balanceCurrency: quota.currency,
     keys,
+    accessToken,
+    accessTokenExpiresAt: tokenExpiry(accessToken),
   };
+}
+
+async function newApiSnapshot(connection, credentials, client) {
+  let accessToken = await newApiToken(connection, credentials, client);
+  try {
+    return await newApiSnapshotWithToken(connection, credentials, client, accessToken);
+  } catch (error) {
+    if (connection.authMode === 'password' && credentials.accessToken && error?.code === 'authentication_failed') {
+      accessToken = await newApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0 }, client);
+      return newApiSnapshotWithToken(connection, credentials, client, accessToken);
+    }
+    throw error;
+  }
 }
 
 async function openAiCompatibleSnapshot(connection, credentials) {

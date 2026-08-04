@@ -1665,7 +1665,7 @@ function supplierConnectionFormMarkup(connection = null) {
         <div class="supplier-connection-form compact">
           <label class="supplier-form-toggle"><input name="enabled" type="checkbox" ${checked('enabled', true)}><span>启用连接</span><small>纳入定时读取</small></label>
           <label class="supplier-form-toggle"><input name="activeCheckEnabled" type="checkbox" ${checked('activeCheckEnabled', true)}><span>巡检可用密钥</span><small>只检测，不写入上游</small></label>
-          <label class="field"><span>库存同步间隔（分钟）</span><input name="inventoryIntervalMinutes" type="number" min="5" max="1440" required value="${value('inventoryIntervalMinutes', 10)}"></label>
+          <label class="field"><span>库存同步间隔（秒）</span><input name="inventoryIntervalSeconds" type="number" min="3" max="86400" required value="${value('inventoryIntervalSeconds', 600)}"></label>
           <label class="field"><span>单次巡检上限</span><input name="activeCheckLimit" type="number" min="1" max="100" required value="${value('activeCheckLimit', 20)}"></label>
           <label class="field full"><span>低余额告警阈值（可选）</span><input name="lowBalanceThreshold" type="number" min="0" step="any" placeholder="不设置则不触发余额告警" value="${value('lowBalanceThreshold')}"></label>
         </div>
@@ -1696,7 +1696,7 @@ function supplierConnectionPayload(form) {
     authMode: values.authMode,
     credentialLabel: values.credentialLabel || '',
     enabled: form.querySelector('[name="enabled"]').checked,
-    inventoryIntervalMinutes: values.inventoryIntervalMinutes,
+    inventoryIntervalSeconds: values.inventoryIntervalSeconds,
     activeCheckEnabled: form.querySelector('[name="activeCheckEnabled"]').checked,
     activeCheckLimit: values.activeCheckLimit,
     lowBalanceThreshold: values.lowBalanceThreshold || null,
@@ -1910,7 +1910,7 @@ function renderSupplierConnectionDetails(detail) {
       ${metric('当前余额', supplierAmount(connection.balance, connection.balanceCurrency), connection.lowBalanceThreshold === null || connection.lowBalanceThreshold === undefined ? `币种 ${connection.balanceCurrency || '--'} · 未设阈值` : `告警阈值 ${supplierAmount(connection.lowBalanceThreshold, connection.balanceCurrency)}`, connection.connectionStatus === 'failed' ? 'bad' : 'good')}
       ${metric('可用密钥', `${compact(activeKeys)} / ${compact(keys.length)}`, failedChecks ? `${compact(failedChecks)} 个巡检失败` : '未发现巡检异常', failedChecks ? 'warn' : 'good')}
       ${metric('待处理告警', compact(openAlerts), openAlerts ? '请在告警页确认或排查' : '当前没有开放告警', openAlerts ? 'warn' : 'good')}
-      ${metric('下次同步', connection.enabled ? dateTime(connection.nextSyncAt) : '已停用', connection.enabled ? `每 ${compact(connection.inventoryIntervalMinutes)} 分钟读取一次` : '启用后恢复定时读取')}
+      ${metric('下次同步', connection.enabled ? dateTime(connection.nextSyncAt) : '已停用', connection.enabled ? `每 ${compact(connection.inventoryIntervalSeconds || (connection.inventoryIntervalMinutes || 10) * 60)} 秒读取一次` : '启用后恢复定时读取')}
     </div>
     ${supplierDetailTabs(detail)}
     ${supplierDetailContent(detail)}
