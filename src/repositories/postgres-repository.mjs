@@ -2970,7 +2970,7 @@ export class PostgresRepository {
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
           RETURNING *`, [
           supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(1, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
           input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,actor,
         ]);
       } catch (error) {
@@ -3004,7 +3004,7 @@ export class PostgresRepository {
             next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$16,updated_at=NOW()
           WHERE id=$1 RETURNING *`, [
           connectionId,supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(1, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
+          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
           input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
         ]);
       } catch (error) {
