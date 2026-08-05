@@ -1461,6 +1461,36 @@ textarea:focus-visible {
 .supplier-detail-section .detail-section-header > div { min-width: 0; }
 .supplier-detail-section .detail-section-header span { display: block; margin-top: 3px; line-height: 15px; }
 
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.supplier-quality-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 14px;
+}
+
+.supplier-quality-block {
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.supplier-quality-block + .supplier-quality-block { margin-top: 14px; }
+.supplier-quality-block .panel-header { padding: 0 0 10px; }
+.supplier-quality-block .panel-header h3 { font-size: 14px; }
+
+.supplier-quality-target-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.supplier-quality-target-form .full { grid-column: 1 / -1; }
+
 .supplier-key-link-cell { min-width: 164px; display: grid; gap: 6px; justify-items: start; }
 .supplier-key-links { display: flex; flex-wrap: wrap; gap: 4px; }
 .supplier-account-link {
@@ -1814,7 +1844,8 @@ textarea:focus-visible {
   .modal.supplier-detail-modal form.modal-content,
   .modal.supplier-link-modal form.modal-content { padding: 0 11px 14px; }
   .supplier-connection-form,
-  .supplier-credential-grid { grid-template-columns: 1fr; }
+  .supplier-credential-grid,
+  .supplier-quality-target-form { grid-template-columns: 1fr; }
   .supplier-form-section-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
   .supplier-form-section-heading span { text-align: left; }
   .supplier-detail-header { align-items: flex-start; flex-wrap: wrap; padding: 10px 0; }
@@ -1834,6 +1865,7 @@ textarea:focus-visible {
   .detail-filter input { width: 100%; min-width: 0; }
   .detail-range-note { flex: 1 1 100%; margin-left: 0; }
   .detail-metrics { grid-template-columns: 1fr 1fr; }
+  .supplier-quality-metrics { grid-template-columns: 1fr 1fr; }
   .cost-rule-context { grid-template-columns: 1fr; }
   .whitelist-toolbar { min-height: auto; padding: 9px 0; align-items: stretch; flex-wrap: wrap; }
   .whitelist-search { flex: 1 1 100%; width: 100%; }
@@ -1869,6 +1901,7 @@ textarea:focus-visible {
   .custom-range input { max-width: none; }
   .table-tools .button { width: 100%; }
   .detail-metrics { grid-template-columns: 1fr; }
+  .supplier-quality-metrics { grid-template-columns: 1fr; }
   .supplier-connection-form.compact { grid-template-columns: 1fr; }
   .supplier-connection-note,
   .supplier-form-note { padding-left: 0; padding-right: 0; }

@@ -188,3 +188,12 @@ test('supplier key link backfill updates only FinOps dimensions and cost rules',
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(migration, /credentials|raw_key|api_key\s+(?:TEXT|VARCHAR)/i);
 });
+
+test('supplier quality monitoring remains FinOps-owned and never stores plaintext keys', () => {
+  const migration = read('migrations/020_supplier_quality_monitoring.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_quality_targets/s);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_quality_observations/s);
+  assert.match(migration, /source_kind IN \('passive_usage','passive_monitor','active_probe'\)/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\braw_key\b|\bapi_key\s+(?:TEXT|VARCHAR)|credentials_ciphertext/i);
+});

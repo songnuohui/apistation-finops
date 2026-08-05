@@ -1,6 +1,7 @@
 import { inTransaction } from '../db.mjs';
 import Decimal from 'decimal.js/decimal.mjs';
 import { calculateMultiplierCostCny, splitFixedCostCny } from '../services/cost-accounting.mjs';
+import { normalizeQualityStatus, supplierQualityScore } from '../services/supplier-quality.mjs';
 
 function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
@@ -37,6 +38,7 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     inventoryIntervalMinutes: Number(row.inventory_interval_minutes || Math.ceil(Number(row.inventory_interval_seconds || 600) / 60)),
     activeCheckEnabled: Boolean(row.active_check_enabled),
     activeCheckLimit: Number(row.active_check_limit || 20),
+    qualityMonitorMode: row.quality_monitor_mode || 'passive',
     lowBalanceThreshold: nullableNumber(row.low_balance_threshold),
     balanceCurrency: row.balance_currency || 'USD',
     connectionStatus: row.connection_status || 'pending',
@@ -2966,12 +2968,12 @@ export class PostgresRepository {
           INSERT INTO ${this.schema}.supplier_connections(
             supplier_id,name,adapter_type,base_url,auth_mode,credential_label,credentials_ciphertext,
             enabled,inventory_interval_seconds,inventory_interval_minutes,active_check_enabled,active_check_limit,
-            low_balance_threshold,balance_currency,created_by,updated_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            quality_monitor_mode,low_balance_threshold,balance_currency,created_by,updated_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
           RETURNING *`, [
           supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
           credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
-          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,actor,
+          input.activeCheckLimit,input.qualityMonitorMode,input.lowBalanceThreshold,input.balanceCurrency,actor,actor,
         ]);
       } catch (error) {
         if (error?.code === '23505') throw httpError('该供应商下已存在同名连接', 409);
@@ -2999,13 +3001,14 @@ export class PostgresRepository {
           UPDATE ${this.schema}.supplier_connections SET
             supplier_id=$2,name=$3,adapter_type=$4,base_url=$5,auth_mode=$6,credential_label=$7,
             credentials_ciphertext=$8,enabled=$9,inventory_interval_seconds=$10,inventory_interval_minutes=$11,
-            active_check_enabled=$12,active_check_limit=$13,low_balance_threshold=$14,
-            balance_currency=$15,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
-            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$16,updated_at=NOW()
+            active_check_enabled=$12,active_check_limit=$13,quality_monitor_mode=$14,
+            low_balance_threshold=$15,
+            balance_currency=$16,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
+            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$17,updated_at=NOW()
           WHERE id=$1 RETURNING *`, [
           connectionId,supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
           credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
-          input.activeCheckLimit,input.lowBalanceThreshold,input.balanceCurrency,actor,
+          input.activeCheckLimit,input.qualityMonitorMode,input.lowBalanceThreshold,input.balanceCurrency,actor,
         ]);
       } catch (error) {
         if (error?.code === '23505') throw httpError('该供应商下已存在同名连接', 409);
@@ -3042,6 +3045,337 @@ export class PostgresRepository {
       JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
       WHERE k.connection_id=$1`, [connectionId]);
     return result.rows.map((row) => String(row.external_key_id));
+  }
+
+  qualityTarget(row, { includeCiphertext = false } = {}) {
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      connectionId: Number(row.connection_id),
+      keyId: Number(row.supplier_key_id),
+      externalKeyId: String(row.external_key_id || ''),
+      keyName: row.key_name || '',
+      maskedKey: row.masked_key || '',
+      keyStatus: row.key_status || 'unknown',
+      groupName: row.group_name || '',
+      rateMultiplier: nullableNumber(row.rate_multiplier),
+      model: row.model || '',
+      enabled: Boolean(row.enabled),
+      intervalSeconds: Number(row.interval_seconds || 1800),
+      maxOutputTokens: Number(row.max_output_tokens || 1),
+      nextProbeAt: row.next_probe_at || null,
+      lastProbeAt: row.last_probe_at || null,
+      lastStatus: row.last_status || 'pending',
+      lastError: row.last_error || '',
+      connection: row.base_url ? supplierConnection({
+        ...row,
+        id: row.connection_id,
+        name: row.connection_name,
+        enabled: row.connection_enabled,
+        last_error: row.connection_last_error,
+      }, { includeCiphertext }) : undefined,
+    };
+  }
+
+  qualityObservation(row) {
+    return {
+      id: Number(row.id),
+      sourceKind: row.source_kind,
+      targetId: row.target_id ? Number(row.target_id) : null,
+      keyId: row.supplier_key_id ? Number(row.supplier_key_id) : null,
+      model: row.model || '',
+      groupName: row.group_name || '',
+      status: row.status,
+      availabilitySample: Boolean(row.availability_sample),
+      httpStatus: Number(row.http_status || 0),
+      ttftMs: nullableNumber(row.ttft_ms),
+      durationMs: nullableNumber(row.duration_ms),
+      pingLatencyMs: nullableNumber(row.ping_latency_ms),
+      rateMultiplier: nullableNumber(row.rate_multiplier),
+      observedAt: row.observed_at || null,
+      metadata: row.metadata || {},
+    };
+  }
+
+  async listSupplierQualityTargets(connectionId) {
+    const result = await this.pool.query(`
+      SELECT t.*,c.supplier_id,c.name AS connection_name,c.adapter_type,c.detected_adapter_type,c.base_url,
+             c.auth_mode,c.credential_label,c.credentials_ciphertext,c.enabled AS connection_enabled,
+             c.inventory_interval_seconds,c.inventory_interval_minutes,c.active_check_enabled,c.active_check_limit,
+             c.quality_monitor_mode,c.low_balance_threshold,c.balance_currency,c.connection_status,
+             c.last_sync_at,c.last_success_at,c.next_sync_at,c.consecutive_failures,c.last_error AS connection_last_error,
+             s.name AS supplier_name,k.external_key_id,k.name AS key_name,k.masked_key,
+             k.status AS key_status,k.group_name,k.rate_multiplier
+      FROM ${this.schema}.supplier_quality_targets t
+      JOIN ${this.schema}.supplier_connections c ON c.id=t.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
+      WHERE t.connection_id=$1
+      ORDER BY t.enabled DESC,t.next_probe_at,t.id`, [connectionId]);
+    return { items: result.rows.map((row) => this.qualityTarget(row)) };
+  }
+
+  async getSupplierQualityTargetContext(targetId, { includeCiphertext = true } = {}) {
+    const result = await this.pool.query(`
+      SELECT t.*,c.supplier_id,c.name AS connection_name,c.adapter_type,c.detected_adapter_type,c.base_url,
+             c.auth_mode,c.credential_label,c.credentials_ciphertext,c.enabled AS connection_enabled,
+             c.inventory_interval_seconds,c.inventory_interval_minutes,c.active_check_enabled,c.active_check_limit,
+             c.quality_monitor_mode,c.low_balance_threshold,c.balance_currency,c.connection_status,
+             c.last_sync_at,c.last_success_at,c.next_sync_at,c.consecutive_failures,c.last_error AS connection_last_error,
+             s.name AS supplier_name,k.external_key_id,k.name AS key_name,k.masked_key,
+             k.status AS key_status,k.group_name,k.rate_multiplier
+      FROM ${this.schema}.supplier_quality_targets t
+      JOIN ${this.schema}.supplier_connections c ON c.id=t.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
+      WHERE t.id=$1`, [targetId]);
+    if (!result.rowCount) throw httpError('supplier quality target not found', 404);
+    return this.qualityTarget(result.rows[0], { includeCiphertext });
+  }
+
+  async getSupplierKeyContext(keyId, { includeCiphertext = true } = {}) {
+    const result = await this.pool.query(`
+      SELECT k.id AS supplier_key_id,k.external_key_id,k.name AS key_name,k.masked_key,k.status AS key_status,
+             k.group_name,k.rate_multiplier,c.*,s.name AS supplier_name
+      FROM ${this.schema}.supplier_keys k
+      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      WHERE k.id=$1`, [keyId]);
+    if (!result.rowCount) throw httpError('supplier key not found', 404);
+    return {
+      keyId: Number(result.rows[0].supplier_key_id),
+      externalKeyId: String(result.rows[0].external_key_id),
+      keyName: result.rows[0].key_name || '',
+      maskedKey: result.rows[0].masked_key || '',
+      keyStatus: result.rows[0].key_status || 'unknown',
+      groupName: result.rows[0].group_name || '',
+      rateMultiplier: nullableNumber(result.rows[0].rate_multiplier),
+      connection: supplierConnection(result.rows[0], { includeCiphertext }),
+    };
+  }
+
+  async listDueSupplierQualityTargets(limit = 20) {
+    const result = await this.pool.query(`
+      SELECT t.*,c.supplier_id,c.name AS connection_name,c.adapter_type,c.detected_adapter_type,c.base_url,
+             c.auth_mode,c.credential_label,c.credentials_ciphertext,c.enabled AS connection_enabled,
+             c.inventory_interval_seconds,c.inventory_interval_minutes,c.active_check_enabled,c.active_check_limit,
+             c.quality_monitor_mode,c.low_balance_threshold,c.balance_currency,c.connection_status,
+             c.last_sync_at,c.last_success_at,c.next_sync_at,c.consecutive_failures,c.last_error AS connection_last_error,
+             s.name AS supplier_name,k.external_key_id,k.name AS key_name,k.masked_key,
+             k.status AS key_status,k.group_name,k.rate_multiplier
+      FROM ${this.schema}.supplier_quality_targets t
+      JOIN ${this.schema}.supplier_connections c ON c.id=t.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
+      WHERE t.enabled AND c.enabled AND c.quality_monitor_mode IN ('active','hybrid')
+        AND t.next_probe_at<=NOW() AND k.removed_at IS NULL AND k.status='active'
+      ORDER BY t.next_probe_at,t.id LIMIT $1`, [limit]);
+    return result.rows.map((row) => this.qualityTarget(row, { includeCiphertext: true }));
+  }
+
+  async upsertSupplierQualityTarget(connectionId, input, actor = 'admin') {
+    const targetId = await inTransaction(this.pool, async (client) => {
+      const keyResult = await client.query(`
+        SELECT id FROM ${this.schema}.supplier_keys
+        WHERE id=$1 AND connection_id=$2 AND removed_at IS NULL`, [input.keyId, connectionId]);
+      if (!keyResult.rowCount) throw httpError('supplier key is not available for this connection', 400);
+      const result = await client.query(`
+        INSERT INTO ${this.schema}.supplier_quality_targets(
+          connection_id,supplier_key_id,model,enabled,interval_seconds,max_output_tokens,
+          next_probe_at,last_status,last_error,created_by,updated_by)
+        VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $4 THEN NOW() ELSE NOW()+$5*INTERVAL '1 second' END,
+          CASE WHEN $4 THEN 'pending' ELSE 'disabled' END,'',$7,$7)
+        ON CONFLICT(supplier_key_id,model) DO UPDATE SET
+          connection_id=EXCLUDED.connection_id,enabled=EXCLUDED.enabled,
+          interval_seconds=EXCLUDED.interval_seconds,max_output_tokens=EXCLUDED.max_output_tokens,
+          next_probe_at=CASE WHEN EXCLUDED.enabled THEN LEAST(
+            supplier_quality_targets.next_probe_at,EXCLUDED.next_probe_at)
+            ELSE supplier_quality_targets.next_probe_at END,
+          last_status=CASE WHEN EXCLUDED.enabled THEN
+            CASE WHEN supplier_quality_targets.last_status='disabled' THEN 'pending' ELSE supplier_quality_targets.last_status END
+            ELSE 'disabled' END,
+          updated_by=EXCLUDED.updated_by,updated_at=NOW()
+        RETURNING id`, [
+        connectionId,input.keyId,input.model,input.enabled,input.intervalSeconds,input.maxOutputTokens,actor,
+      ]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'upsert_supplier_quality_target','supplier_quality_target',$2,$3::jsonb)`,
+      [actor,String(result.rows[0].id),JSON.stringify({
+        connectionId, keyId: input.keyId, model: input.model, enabled: input.enabled,
+        intervalSeconds: input.intervalSeconds, maxOutputTokens: input.maxOutputTokens,
+      })]);
+      return Number(result.rows[0].id);
+    });
+    return this.getSupplierQualityTargetContext(targetId);
+  }
+
+  async updateSupplierQualityTarget(targetId, input, actor = 'admin') {
+    const updatedId = await inTransaction(this.pool, async (client) => {
+      const current = await client.query(`
+        SELECT connection_id FROM ${this.schema}.supplier_quality_targets WHERE id=$1 FOR UPDATE`, [targetId]);
+      if (!current.rowCount) throw httpError('supplier quality target not found', 404);
+      const key = await client.query(`
+        SELECT id FROM ${this.schema}.supplier_keys
+        WHERE id=$1 AND connection_id=$2 AND removed_at IS NULL`, [input.keyId, current.rows[0].connection_id]);
+      if (!key.rowCount) throw httpError('supplier key is not available for this connection', 400);
+      try {
+        await client.query(`
+          UPDATE ${this.schema}.supplier_quality_targets SET
+            supplier_key_id=$2,model=$3,enabled=$4,interval_seconds=$5,max_output_tokens=$6,
+            next_probe_at=CASE WHEN $4 THEN LEAST(next_probe_at,NOW()) ELSE next_probe_at END,
+            last_status=CASE WHEN $4 THEN CASE WHEN last_status='disabled' THEN 'pending' ELSE last_status END ELSE 'disabled' END,
+            last_error=CASE WHEN $4 THEN last_error ELSE '' END,updated_by=$7,updated_at=NOW()
+          WHERE id=$1`, [targetId,input.keyId,input.model,input.enabled,input.intervalSeconds,input.maxOutputTokens,actor]);
+      } catch (error) {
+        if (error?.code === '23505') throw httpError('this supplier key and model target already exists', 409);
+        throw error;
+      }
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_supplier_quality_target','supplier_quality_target',$2,$3::jsonb)`,
+      [actor,String(targetId),JSON.stringify(input)]);
+      return Number(targetId);
+    });
+    return this.getSupplierQualityTargetContext(updatedId);
+  }
+
+  async deleteSupplierQualityTarget(targetId, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        DELETE FROM ${this.schema}.supplier_quality_targets
+        WHERE id=$1 RETURNING id,connection_id,model`, [targetId]);
+      if (!result.rowCount) throw httpError('supplier quality target not found', 404);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'delete_supplier_quality_target','supplier_quality_target',$2,$3::jsonb)`,
+      [actor,String(targetId),JSON.stringify(result.rows[0])]);
+      return { id: Number(targetId), deleted: true };
+    });
+  }
+
+  async recordSupplierQualityObservations(connectionId, observations = []) {
+    if (!observations.length) return { inserted: 0 };
+    return inTransaction(this.pool, async (client) => {
+      const keys = await client.query(`
+        SELECT id,external_key_id FROM ${this.schema}.supplier_keys WHERE connection_id=$1`, [connectionId]);
+      const keyIds = new Map(keys.rows.map((row) => [String(row.external_key_id), Number(row.id)]));
+      let inserted = 0;
+      for (const observation of observations) {
+        const status = normalizeQualityStatus(observation.status);
+        const result = await client.query(`
+          INSERT INTO ${this.schema}.supplier_quality_observations(
+            connection_id,supplier_key_id,target_id,source_kind,external_observation_id,model,group_name,
+            status,availability_sample,http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,
+            observed_at,metadata)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+          ON CONFLICT(connection_id,source_kind,external_observation_id)
+          WHERE external_observation_id IS NOT NULL
+          DO NOTHING`,
+        [
+          connectionId,
+          observation.keyId || keyIds.get(String(observation.keyExternalId || '')) || null,
+          observation.targetId || null,
+          observation.sourceKind,
+          observation.externalObservationId || null,
+          String(observation.model || '').slice(0, 200),
+          String(observation.groupName || '').slice(0, 200),
+          status,
+          Boolean(observation.availabilitySample),
+          Number(observation.httpStatus || 0),
+          observation.ttftMs === null || observation.ttftMs === undefined ? null : Math.max(0, Math.round(Number(observation.ttftMs))),
+          observation.durationMs === null || observation.durationMs === undefined ? null : Math.max(0, Math.round(Number(observation.durationMs))),
+          observation.pingLatencyMs === null || observation.pingLatencyMs === undefined ? null : Math.max(0, Math.round(Number(observation.pingLatencyMs))),
+          observation.rateMultiplier === null || observation.rateMultiplier === undefined ? null : observation.rateMultiplier,
+          observation.observedAt || new Date().toISOString(),
+          JSON.stringify(observation.metadata || {}),
+        ]);
+        inserted += result.rowCount;
+      }
+      return { inserted };
+    });
+  }
+
+  async recordSupplierQualityTargetResult(targetId, observation) {
+    const resultTargetId = await inTransaction(this.pool, async (client) => {
+      const target = await client.query(`
+        SELECT id,connection_id,supplier_key_id,interval_seconds FROM ${this.schema}.supplier_quality_targets
+        WHERE id=$1 FOR UPDATE`, [targetId]);
+      if (!target.rowCount) throw httpError('supplier quality target not found', 404);
+      const status = normalizeQualityStatus(observation.status);
+      await client.query(`
+        INSERT INTO ${this.schema}.supplier_quality_observations(
+          connection_id,supplier_key_id,target_id,source_kind,external_observation_id,model,group_name,
+          status,availability_sample,http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,
+          observed_at,metadata)
+        VALUES($1,$2,$3,'active_probe',$4,$5,$6,$7,TRUE,$8,$9,$10,$11,$12,$13,$14::jsonb)
+        ON CONFLICT(connection_id,source_kind,external_observation_id)
+        WHERE external_observation_id IS NOT NULL
+        DO NOTHING`, [
+        target.rows[0].connection_id,target.rows[0].supplier_key_id,targetId,
+        `active:${targetId}:${observation.observedAt || new Date().toISOString()}`,
+        observation.model || '',observation.groupName || '',status,Number(observation.httpStatus || 0),
+        observation.ttftMs === null || observation.ttftMs === undefined ? null : Math.max(0, Math.round(Number(observation.ttftMs))),
+        observation.durationMs === null || observation.durationMs === undefined ? null : Math.max(0, Math.round(Number(observation.durationMs))),
+        observation.pingLatencyMs === null || observation.pingLatencyMs === undefined ? null : Math.max(0, Math.round(Number(observation.pingLatencyMs))),
+        observation.rateMultiplier === null || observation.rateMultiplier === undefined ? null : observation.rateMultiplier,
+        observation.observedAt || new Date().toISOString(),
+        JSON.stringify({ errorCode: observation.errorCode || '', errorMessage: observation.errorMessage || '', ...(observation.metadata || {}) }),
+      ]);
+      await client.query(`
+        UPDATE ${this.schema}.supplier_quality_targets
+        SET last_probe_at=NOW(),last_status=$2,last_error=$3,
+            next_probe_at=NOW()+interval_seconds*INTERVAL '1 second',updated_at=NOW()
+        WHERE id=$1`, [targetId,status,String(observation.errorMessage || observation.errorCode || '').slice(0, 1000)]);
+      return Number(targetId);
+    });
+    return this.getSupplierQualityTargetContext(resultTargetId);
+  }
+
+  async getSupplierQualityDashboard(connectionId) {
+    const [summaryResult, latestResult, keyResult] = await Promise.all([
+      this.pool.query(`
+        SELECT COUNT(*)::int AS sample_count,
+               COUNT(*) FILTER (WHERE availability_sample)::int AS availability_samples,
+               COUNT(*) FILTER (WHERE availability_sample AND status='ok')::int AS success_samples,
+               COUNT(*) FILTER (WHERE status='failed')::int AS failure_count,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms)
+                 FILTER (WHERE ttft_ms IS NOT NULL) AS ttft_p50_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms)
+                 FILTER (WHERE ttft_ms IS NOT NULL) AS ttft_p95_ms,
+               AVG(rate_multiplier) FILTER (WHERE rate_multiplier IS NOT NULL AND rate_multiplier>0) AS rate_multiplier,
+               MAX(observed_at) AS last_observed_at,
+               COUNT(*) FILTER (WHERE source_kind='passive_usage')::int AS passive_usage_samples,
+               COUNT(*) FILTER (WHERE source_kind='passive_monitor')::int AS passive_monitor_samples,
+               COUNT(*) FILTER (WHERE source_kind='active_probe')::int AS active_probe_samples
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE connection_id=$1 AND observed_at>=NOW()-INTERVAL '7 days'`, [connectionId]),
+      this.pool.query(`
+        SELECT id,source_kind,target_id,supplier_key_id,model,group_name,status,availability_sample,
+               http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,observed_at,metadata
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 100`, [connectionId]),
+      this.pool.query(`
+        SELECT MIN(rate_multiplier) FILTER (WHERE rate_multiplier IS NOT NULL AND rate_multiplier>0) AS best_rate_multiplier
+        FROM ${this.schema}.supplier_keys
+        WHERE connection_id=$1 AND removed_at IS NULL AND status='active'`, [connectionId]),
+    ]);
+    const row = summaryResult.rows[0] || {};
+    const metrics = {
+      sampleCount: Number(row.sample_count || 0),
+      availabilitySamples: Number(row.availability_samples || 0),
+      successSamples: Number(row.success_samples || 0),
+      failureCount: Number(row.failure_count || 0),
+      ttftP50Ms: nullableNumber(row.ttft_p50_ms),
+      ttftP95Ms: nullableNumber(row.ttft_p95_ms),
+      rateMultiplier: nullableNumber(row.rate_multiplier),
+      lastObservedAt: row.last_observed_at || null,
+      passiveUsageSamples: Number(row.passive_usage_samples || 0),
+      passiveMonitorSamples: Number(row.passive_monitor_samples || 0),
+      activeProbeSamples: Number(row.active_probe_samples || 0),
+    };
+    return {
+      score: supplierQualityScore(metrics, { bestRateMultiplier: nullableNumber(keyResult.rows[0]?.best_rate_multiplier) }),
+      metrics,
+      observations: latestResult.rows.map((item) => this.qualityObservation(item)),
+    };
   }
 
   async recordSupplierSyncFailure(connectionId, error) {

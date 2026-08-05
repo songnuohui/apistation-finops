@@ -152,3 +152,60 @@ test('supplier monitor records failures and supports scheduled due connections',
   assert.equal(failures.length, 1);
   assert.deepEqual(failures[0][1], { code: 'request_failed', httpStatus: 503, message: 'supplier unavailable' });
 });
+
+test('passive quality failures do not fail supplier inventory synchronization', async () => {
+  let success = false;
+  const repository = {
+    recordSupplierSyncSuccess: async () => { success = true; },
+    recordSupplierSyncFailure: async () => assert.fail('passive quality must not fail inventory sync'),
+  };
+  const service = new SupplierMonitorService(repository, config);
+  service.adapters = {
+    snapshot: async () => snapshot(),
+    check: async () => ({ status: 'ok', method: 'metadata', httpStatus: 200 }),
+    collectPassiveQuality: async () => { throw new Error('usage history unavailable'); },
+  };
+  const supplierConnection = connection(15, { qualityMonitorMode: 'passive' });
+  supplierConnection.credentialsCiphertext = service.encryptCredentials({ accessToken: 'portal-access-token' });
+
+  const result = await service.syncConnection(15, { connection: supplierConnection });
+
+  assert.equal(result.ok, true);
+  assert.equal(success, true);
+});
+
+test('due active quality targets wake their supplier connection and probe only the selected key and model', async () => {
+  const recorded = [];
+  const dueConnection = connection(16, {
+    qualityMonitorMode: 'active', activeCheckEnabled: false,
+  });
+  const repository = {
+    listDueSupplierConnections: async () => [],
+    listDueSupplierQualityTargets: async () => [{
+      id: 51, connectionId: 16, externalKeyId: 'two', model: 'gpt-4o-mini',
+      maxOutputTokens: 1, connection: dueConnection,
+    }],
+    listLinkedSupplierKeyExternalIds: async () => [],
+    recordSupplierSyncSuccess: async () => {},
+    recordSupplierSyncFailure: async () => assert.fail('unexpected sync failure'),
+    recordSupplierQualityTargetResult: async (targetId, observation) => recorded.push({ targetId, observation }),
+  };
+  const service = new SupplierMonitorService(repository, config);
+  dueConnection.credentialsCiphertext = service.encryptCredentials({ accessToken: 'portal-access-token' });
+  service.adapters = {
+    snapshot: async () => snapshot(),
+    check: async () => assert.fail('inventory checks are disabled'),
+    activeQualityProbe: async (_connection, _snapshot, key, target) => ({
+      sourceKind: 'active_probe', status: 'ok', availabilitySample: true,
+      model: target.model, groupName: key.groupName || '', ttftMs: 420, durationMs: 900,
+      observedAt: new Date().toISOString(), metadata: {},
+    }),
+  };
+
+  await service.runDue();
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].targetId, 51);
+  assert.equal(recorded[0].observation.model, 'gpt-4o-mini');
+  assert.equal(recorded[0].observation.ttftMs, 420);
+});

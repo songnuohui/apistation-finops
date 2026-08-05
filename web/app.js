@@ -1559,6 +1559,10 @@ function supplierAuthModeLabel(value) {
   return ({ password: '账号密码', access_token: '访问令牌', api_key: 'API 密钥' })[value] || value || '--';
 }
 
+function supplierQualityModeLabel(value) {
+  return ({ off: '关闭', passive: '仅被动', active: '仅主动', hybrid: '混合' })[value] || value || '仅被动';
+}
+
 function supplierState(status, label = '') {
   const meta = supplierStateMeta[String(status || '').toLowerCase()] || ['未知', 'pending'];
   return `<span class="supplier-state ${meta[1]}">${escapeHtml(label || meta[0])}</span>`;
@@ -1665,6 +1669,9 @@ function supplierConnectionFormMarkup(connection = null) {
         <div class="supplier-connection-form compact">
           <label class="supplier-form-toggle"><input name="enabled" type="checkbox" ${checked('enabled', true)}><span>启用连接</span><small>纳入定时读取</small></label>
           <label class="supplier-form-toggle"><input name="activeCheckEnabled" type="checkbox" ${checked('activeCheckEnabled', true)}><span>巡检可用密钥</span><small>只检测，不写入上游</small></label>
+          <label class="field"><span>质量监控模式</span>${select('qualityMonitorMode', [
+            ['off', '关闭'], ['passive', '仅被动上游数据'], ['active', '仅主动探测（产生少量费用）'], ['hybrid', '混合模式'],
+          ], 'passive')}<small class="field-hint">主动模式只请求你选择的密钥和模型</small></label>
           <label class="field"><span>库存同步间隔（秒）</span><input name="inventoryIntervalSeconds" type="number" min="3" max="86400" required value="${value('inventoryIntervalSeconds', 600)}"></label>
           <label class="field"><span>单次巡检上限</span><input name="activeCheckLimit" type="number" min="1" max="100" required value="${value('activeCheckLimit', 20)}"></label>
           <label class="field full"><span>低余额告警阈值（可选）</span><input name="lowBalanceThreshold" type="number" min="0" step="any" placeholder="不设置则不触发余额告警" value="${value('lowBalanceThreshold')}"></label>
@@ -1699,6 +1706,7 @@ function supplierConnectionPayload(form) {
     inventoryIntervalSeconds: values.inventoryIntervalSeconds,
     activeCheckEnabled: form.querySelector('[name="activeCheckEnabled"]').checked,
     activeCheckLimit: values.activeCheckLimit,
+    qualityMonitorMode: values.qualityMonitorMode || 'passive',
     lowBalanceThreshold: values.lowBalanceThreshold || null,
     balanceCurrency: values.balanceCurrency,
     credentials: {
@@ -1781,6 +1789,7 @@ function supplierDetailTabs(detail) {
   const openAlerts = (detail.alerts || []).filter((item) => item.status === 'open').length;
   const tabs = [
     ['keys', 'API 密钥', (detail.keys || []).length],
+    ['quality', '质量评分', (detail.quality?.metrics?.sampleCount || 0)],
     ['balances', '余额历史', (detail.balances || []).length],
     ['checks', '巡检记录', (detail.checks || []).length],
     ['alerts', '告警', openAlerts],
@@ -1879,8 +1888,125 @@ function supplierPurchasesTab(detail) {
   </section>`;
 }
 
+function supplierQualityMs(value) {
+  return supplierNumber(value) === null ? '--' : `${Math.round(Number(value))} ms`;
+}
+
+function supplierQualityTab(detail) {
+  const quality = detail.quality || {};
+  const score = quality.score || {};
+  const metrics = quality.metrics || {};
+  const targets = quality.targets || [];
+  const observations = quality.observations || [];
+  const sourceLabel = {
+    passive_usage: '被动用量',
+    passive_monitor: '被动监控',
+    active_probe: '主动探测',
+  };
+  return `<section class="detail-section supplier-detail-section supplier-quality-section">
+    <div class="detail-section-header">
+      <div><h3>供应商质量评分</h3><span>当前模式：${escapeHtml(supplierQualityModeLabel(detail.connection.qualityMonitorMode))}。评分使用最近 7 天价格、可用性、首字延迟和稳定性样本。</span></div>
+      <button type="button" class="button primary" data-supplier-quality-add ${['active', 'hybrid'].includes(detail.connection.qualityMonitorMode) ? '' : 'disabled'}>${icon('plus')}添加主动目标</button>
+    </div>
+    <div class="detail-metrics supplier-quality-metrics">
+      ${metric('综合评分', score.overallScore === null || score.overallScore === undefined ? '--' : Number(score.overallScore).toFixed(1), `可信度 ${score.confidence === null || score.confidence === undefined ? '--' : `${Number(score.confidence).toFixed(1)}%`}`, Number(score.overallScore || 0) >= 80 ? 'good' : Number(score.overallScore || 0) >= 60 ? 'warn' : 'bad')}
+      ${metric('可用性', score.availabilityScore === null || score.availabilityScore === undefined ? '--' : `${Number(score.availabilityScore).toFixed(2)}%`, `${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)} 成功`, Number(score.availabilityScore || 0) >= 99 ? 'good' : 'warn')}
+      ${metric('TTFT P50', supplierQualityMs(metrics.ttftP50Ms), `P95 ${supplierQualityMs(metrics.ttftP95Ms)}`, Number(metrics.ttftP50Ms || 0) <= 3000 ? 'good' : 'warn')}
+      ${metric('稳定性', score.stabilityScore === null || score.stabilityScore === undefined ? '--' : Number(score.stabilityScore).toFixed(1), `${compact(metrics.failureCount || 0)} 次失败`, Number(score.stabilityScore || 0) >= 85 ? 'good' : 'warn')}
+      ${metric('价格评分', score.priceScore === null || score.priceScore === undefined ? '--' : Number(score.priceScore).toFixed(1), metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '暂无倍率样本' : `样本倍率 ${Number(metrics.rateMultiplier).toFixed(4)}x`)}
+      ${metric('被动样本', compact((metrics.passiveUsageSamples || 0) + (metrics.passiveMonitorSamples || 0)), `用量 ${compact(metrics.passiveUsageSamples || 0)} · 监控 ${compact(metrics.passiveMonitorSamples || 0)}`)}
+      ${metric('主动样本', compact(metrics.activeProbeSamples || 0), targets.length ? `${compact(targets.filter((item) => item.enabled).length)} 个启用目标` : '尚未配置目标')}
+      ${metric('最近采样', metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--', `总样本 ${compact(metrics.sampleCount || 0)}`)}
+    </div>
+    <div class="supplier-quality-block">
+      <div class="panel-header"><div><h3>主动探测目标</h3><span>每个目标固定绑定一个供应商密钥和模型，最大输出 Token 用于控制费用。</span></div></div>
+      ${targets.length ? table([
+        { label: '密钥 / 模型' }, { label: '策略' }, { label: '最近结果' }, { label: '下次探测' }, { label: '操作' },
+      ], targets.map((target) => [
+        `<span class="primary-text">${escapeHtml(target.keyName || target.maskedKey || `密钥 #${target.keyId}`)}</span><div class="secondary-text">${escapeHtml(target.model)}</div>`,
+        `<span class="primary-text">${target.enabled ? `每 ${compact(target.intervalSeconds)} 秒` : '已停用'}</span><div class="secondary-text">最多 ${compact(target.maxOutputTokens)} Token</div>`,
+        `${supplierState(target.lastStatus || 'pending')}<div class="secondary-text">${target.lastProbeAt ? dateTime(target.lastProbeAt) : '尚未探测'}${target.lastError ? `<br>${escapeHtml(target.lastError)}` : ''}</div>`,
+        target.enabled ? dateTime(target.nextProbeAt) : '--',
+        `<div class="table-actions"><button type="button" class="icon-button table-icon" title="编辑目标" data-supplier-quality-edit="${target.id}">${icon('settings-2')}</button><button type="button" class="icon-button table-icon" title="立即探测" data-supplier-quality-run="${target.id}" ${target.enabled ? '' : 'disabled'}>${icon('activity')}</button><button type="button" class="icon-button table-icon" title="删除目标" data-supplier-quality-delete="${target.id}">${icon('trash-2')}</button></div>`,
+      ]), 940) : '<div class="empty"><strong>尚未配置主动探测目标</strong><p>切换到“仅主动”或“混合”模式后，选择密钥和模型即可开始受控探测。</p></div>'}
+    </div>
+    <div class="supplier-quality-block">
+      <div class="panel-header"><div><h3>最近质量样本</h3><span>仅保存脱敏指标，不保存供应商明文密钥或模型输出。</span></div></div>
+      ${observations.length ? table([
+        { label: '时间' }, { label: '来源' }, { label: '模型' }, { label: '状态' }, { label: 'TTFT' }, { label: '完整耗时' },
+      ], observations.slice(0, 30).map((item) => [
+        dateTime(item.observedAt), escapeHtml(sourceLabel[item.sourceKind] || item.sourceKind || '--'),
+        escapeHtml(item.model || '--'), supplierState(item.status), supplierQualityMs(item.ttftMs), supplierQualityMs(item.durationMs),
+      ]), 800) : '<div class="empty"><strong>暂无质量样本</strong><p>下一次供应商同步或主动探测完成后会显示数据。</p></div>'}
+    </div>
+  </section>`;
+}
+
+function openSupplierQualityTargetModal(detail, target = null) {
+  const keys = (detail.keys || []).filter((item) => item.status === 'active' && !item.removedAt);
+  if (!keys.length) return toast('当前连接没有可用于主动探测的供应商密钥');
+  const selectedKeyId = Number(target?.keyId || keys[0].id);
+  openContentModal(target ? '编辑主动探测目标' : '添加主动探测目标', `
+    <div class="supplier-quality-target-form">
+      <label class="field"><span>供应商密钥</span><select name="keyId">${keys.map((key) => (
+        `<option value="${key.id}" ${Number(key.id) === selectedKeyId ? 'selected' : ''}>${escapeHtml(key.name || key.maskedKey || `密钥 #${key.id}`)} · ${escapeHtml(key.groupName || '未分组')}</option>`
+      )).join('')}</select></label>
+      <label class="field"><span>探测模型</span><select name="model" required><option value="">正在读取模型...</option></select><small class="field-hint">模型来自该密钥的 /v1/models 接口</small></label>
+      <label class="field"><span>探测间隔（秒）</span><input name="intervalSeconds" type="number" min="60" max="86400" required value="${escapeHtml(target?.intervalSeconds || 1800)}"></label>
+      <label class="field"><span>最大输出 Token</span><input name="maxOutputTokens" type="number" min="1" max="32" required value="${escapeHtml(target?.maxOutputTokens || 1)}"></label>
+      <label class="supplier-form-toggle full"><input name="enabled" type="checkbox" ${target?.enabled === false ? '' : 'checked'}><span>启用此目标</span><small>到期后自动发起最小流式请求</small></label>
+    </div>
+    <div class="form-actions"><button type="button" class="button" data-supplier-quality-cancel>取消</button><button type="submit" class="button primary">保存目标</button></div>
+  `, 'supplier-quality-target-modal');
+  const form = document.querySelector('#modal-form');
+  const keySelect = form.elements.keyId;
+  const modelSelect = form.elements.model;
+  const loadModels = async () => {
+    modelSelect.disabled = true;
+    modelSelect.innerHTML = '<option value="">正在读取模型...</option>';
+    try {
+      const result = await api(`/supplier-keys/${keySelect.value}/models`, { range: false });
+      const models = result.models || [];
+      modelSelect.innerHTML = models.length
+        ? models.map((model) => `<option value="${escapeHtml(model)}" ${target?.model === model ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('')
+        : '<option value="">该密钥未返回可用模型</option>';
+    } catch (error) {
+      modelSelect.innerHTML = '<option value="">模型读取失败</option>';
+      toast(error.message);
+    } finally {
+      modelSelect.disabled = false;
+    }
+  };
+  keySelect.addEventListener('change', loadModels);
+  form.querySelector('[data-supplier-quality-cancel]')?.addEventListener('click', () => renderSupplierConnectionDetails(detail));
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    if (!modelSelect.value) return toast('请选择探测模型');
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      const payload = {
+        keyId: Number(keySelect.value), model: modelSelect.value,
+        intervalSeconds: Number(form.elements.intervalSeconds.value),
+        maxOutputTokens: Number(form.elements.maxOutputTokens.value),
+        enabled: form.elements.enabled.checked,
+      };
+      await api(target ? `/supplier-quality-targets/${target.id}` : `/supplier-connections/${detail.connection.id}/quality-targets`, {
+        method: target ? 'PATCH' : 'POST', range: false, body: JSON.stringify(payload),
+      });
+      toast('主动探测目标已保存');
+      await loadSupplierConnectionDetails(detail.connection.id);
+    } catch (error) {
+      toast(error.message);
+      submit.disabled = false;
+    }
+  };
+  loadModels();
+}
+
 function supplierDetailContent(detail) {
   switch (state.supplierDetail?.tab) {
+    case 'quality': return supplierQualityTab(detail);
     case 'balances': return supplierBalancesTab(detail);
     case 'checks': return supplierChecksTab(detail);
     case 'alerts': return supplierAlertsTab(detail);
@@ -1925,6 +2051,10 @@ function renderSupplierConnectionDetails(detail) {
     const unlink = event.target.closest('[data-supplier-key-unlink]');
     const acknowledge = event.target.closest('[data-supplier-alert-ack]');
     const cost = event.target.closest('[data-supplier-detail-cost]');
+    const qualityAdd = event.target.closest('[data-supplier-quality-add]');
+    const qualityEdit = event.target.closest('[data-supplier-quality-edit]');
+    const qualityRun = event.target.closest('[data-supplier-quality-run]');
+    const qualityDelete = event.target.closest('[data-supplier-quality-delete]');
     if (tab) {
       state.supplierDetail.tab = tab.dataset.supplierDetailTab;
       renderSupplierConnectionDetails(detail);
@@ -1977,6 +2107,40 @@ function renderSupplierConnectionDetails(detail) {
       } catch (error) {
         toast(error.message);
         acknowledge.disabled = false;
+      }
+      return;
+    }
+    if (qualityAdd) {
+      openSupplierQualityTargetModal(detail);
+      return;
+    }
+    if (qualityEdit) {
+      const target = detail.quality?.targets?.find((item) => Number(item.id) === Number(qualityEdit.dataset.supplierQualityEdit));
+      if (target) openSupplierQualityTargetModal(detail, target);
+      return;
+    }
+    if (qualityRun && !qualityRun.disabled) {
+      qualityRun.disabled = true;
+      try {
+        const result = await api(`/supplier-quality-targets/${qualityRun.dataset.supplierQualityRun}/run`, { method: 'POST', range: false });
+        toast(result.ok === false ? '主动模型探测失败，已记录失败样本' : '主动模型探测已完成');
+        await loadSupplierConnectionDetails(connection.id);
+      } catch (error) {
+        toast(error.message);
+        qualityRun.disabled = false;
+      }
+      return;
+    }
+    if (qualityDelete) {
+      if (!window.confirm('确定删除这个主动探测目标吗？历史质量样本也会一并删除。')) return;
+      qualityDelete.disabled = true;
+      try {
+        await api(`/supplier-quality-targets/${qualityDelete.dataset.supplierQualityDelete}`, { method: 'DELETE', range: false });
+        toast('主动探测目标已删除');
+        await loadSupplierConnectionDetails(connection.id);
+      } catch (error) {
+        toast(error.message);
+        qualityDelete.disabled = false;
       }
       return;
     }
@@ -2056,14 +2220,17 @@ async function loadSupplierConnectionDetails(connectionId) {
   const form = document.querySelector('#modal-form');
   if (form) form.innerHTML = '<div class="detail-loading"><span></span>正在读取供应商连接详情</div>';
   try {
-    const detail = await api(`/supplier-connections/${connectionId}/details`, { range: false });
+    const [detail, quality] = await Promise.all([
+      api(`/supplier-connections/${connectionId}/details`, { range: false }),
+      api(`/supplier-connections/${connectionId}/quality`, { range: false }),
+    ]);
     const overview = await api(`/suppliers?search=${encodeURIComponent(detail.connection.supplierName || '')}`);
     const supplierName = String(detail.connection.supplierName || '').trim().toLowerCase();
     const purchases = (overview.purchases || []).filter((item) => (
       String(item.supplier || '').trim().toLowerCase() === supplierName
     ));
     if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
-    renderSupplierConnectionDetails({ ...detail, purchases });
+    renderSupplierConnectionDetails({ ...detail, quality, purchases });
   } catch (error) {
     if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
     const currentForm = document.querySelector('#modal-form');

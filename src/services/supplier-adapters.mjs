@@ -2,6 +2,7 @@ import dns from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
 import { maskSecret, totpCode } from './supplier-credentials.mjs';
+import { normalizeQualityStatus } from './supplier-quality.mjs';
 
 export class SupplierAdapterError extends Error {
   constructor(code, message, { statusCode = 502, httpStatus = 0 } = {}) {
@@ -320,6 +321,102 @@ function pinnedHttpsRequest(urlValue, init, target, { timeoutMs, maxResponseByte
   });
 }
 
+function streamText(payload) {
+  const choice = payload?.choices?.[0];
+  const delta = choice?.delta || {};
+  const direct = delta.content ?? delta.reasoning_content ?? payload?.delta ?? payload?.output_text;
+  if (typeof direct === 'string') return direct;
+  if (Array.isArray(direct)) {
+    return direct.map((item) => item?.text || item?.content || '').join('');
+  }
+  if (payload?.type === 'response.output_text.delta' && typeof payload.delta === 'string') return payload.delta;
+  return '';
+}
+
+function consumeStreamChunk(state, chunk, elapsedMs) {
+  state.raw += chunk;
+  state.buffer += chunk;
+  const lines = state.buffer.split(/\r?\n/);
+  state.buffer = lines.pop() || '';
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') continue;
+    try {
+      if (streamText(JSON.parse(data)).trim() && state.ttftMs === null) state.ttftMs = elapsedMs;
+    } catch {
+      // Ignore keepalive and vendor-specific non-JSON SSE lines.
+    }
+  }
+}
+
+function finishStreamProbe(state, startedAt, httpStatus) {
+  const durationMs = Date.now() - startedAt;
+  if (state.ttftMs === null && state.raw.trim()) {
+    try {
+      const payload = JSON.parse(state.raw);
+      const text = payload?.choices?.[0]?.message?.content ?? payload?.output_text ?? '';
+      if (String(text).trim()) state.ttftMs = durationMs;
+    } catch {
+      // A valid SSE stream is not a single JSON document.
+    }
+  }
+  return {
+    status: httpStatus >= 200 && httpStatus < 300 && state.ttftMs !== null ? 'ok' : 'failed',
+    httpStatus,
+    ttftMs: state.ttftMs,
+    durationMs,
+    errorCode: httpStatus >= 200 && httpStatus < 300 ? (state.ttftMs === null ? 'first_token_missing' : '') : 'http_error',
+    errorMessage: httpStatus >= 200 && httpStatus < 300
+      ? (state.ttftMs === null ? 'stream completed without a measurable output token' : '')
+      : `HTTP ${httpStatus}`,
+  };
+}
+
+function pinnedHttpsStreamProbe(urlValue, init, target, { timeoutMs, maxResponseBytes }) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const state = { raw: '', buffer: '', ttftMs: null };
+    let length = 0;
+    let settled = false;
+    let timer;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const request = https.request(buildPinnedHttpsRequestOptions(urlValue, init, target), (response) => {
+      const httpStatus = Number(response.statusCode || 0);
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        if (settled) return;
+        length += Buffer.byteLength(chunk);
+        if (length > maxResponseBytes) {
+          response.destroy();
+          request.destroy();
+          finish(new SupplierAdapterError('response_too_large', 'supplier probe response is too large', { httpStatus }));
+          return;
+        }
+        consumeStreamChunk(state, chunk, Date.now() - startedAt);
+      });
+      response.on('end', () => finish(null, finishStreamProbe(state, startedAt, httpStatus)));
+      response.on('error', () => finish(new SupplierAdapterError('request_failed', 'could not read supplier probe response')));
+    });
+    request.on('error', (error) => finish(error instanceof SupplierAdapterError
+      ? error : new SupplierAdapterError('request_failed', 'could not connect to supplier probe')));
+    timer = setTimeout(() => {
+      const error = new SupplierAdapterError('timeout', 'supplier model probe timed out');
+      request.destroy(error);
+      finish(error);
+    }, timeoutMs);
+    request.write(init.body);
+    request.end();
+  });
+}
+
 export class SupplierHttpClient {
   constructor(config = {}, { fetchImpl, dnsLookup = dns.lookup } = {}) {
     if (fetchImpl !== undefined && typeof fetchImpl !== 'function') throw new TypeError('fetch implementation must be a function');
@@ -424,6 +521,75 @@ export class SupplierHttpClient {
       if (error?.name === 'AbortError') throw new SupplierAdapterError('timeout', `${stage}: supplier request timed out`);
       throw new SupplierAdapterError('request_failed', `${stage}: could not connect to supplier`);
     }
+  }
+
+  async probeChatCompletion(baseUrl, apiKey, model, { maxOutputTokens = 1, timeoutMs = 45_000 } = {}) {
+    const targets = await assertPublicSupplierUrl(baseUrl, this.dnsLookup, this.config.supplierBlockedHosts || []);
+    const maxResponseBytes = Math.min(Number(this.config.supplierMaxResponseBytes) || 1_048_576, 262_144);
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+      max_tokens: Number(maxOutputTokens) || 1,
+      stream: true,
+    });
+    const headers = {
+      Accept: 'text/event-stream, application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'User-Agent': 'ApiStation-FinOps-Quality-Probe/1.0',
+    };
+    if (this.fetchImpl) {
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const state = { raw: '', buffer: '', ttftMs: null };
+      let length = 0;
+      try {
+        const response = await this.fetchImpl(endpoint(baseUrl, '/v1/chat/completions'), {
+          method: 'POST', redirect: 'error', signal: controller.signal, headers, body,
+        });
+        const reader = response.body?.getReader?.();
+        if (reader) {
+          const decoder = new TextDecoder();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            length += value.byteLength;
+            if (length > maxResponseBytes) throw new SupplierAdapterError('response_too_large', 'supplier probe response is too large');
+            consumeStreamChunk(state, decoder.decode(value, { stream: true }), Date.now() - startedAt);
+          }
+        } else {
+          const raw = Buffer.from(await response.arrayBuffer());
+          if (raw.length > maxResponseBytes) throw new SupplierAdapterError('response_too_large', 'supplier probe response is too large');
+          consumeStreamChunk(state, raw.toString('utf8'), Date.now() - startedAt);
+        }
+        return finishStreamProbe(state, startedAt, response.status);
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new SupplierAdapterError('timeout', 'supplier model probe timed out');
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const startedAt = Date.now();
+    let lastError;
+    for (let index = 0; index < targets.length; index += 1) {
+      const remainingMs = timeoutMs - (Date.now() - startedAt);
+      if (remainingMs <= 0) break;
+      try {
+        return await pinnedHttpsStreamProbe(
+          endpoint(baseUrl, '/v1/chat/completions'),
+          { method: 'POST', headers, body },
+          targets[index],
+          { timeoutMs: remainingMs, maxResponseBytes },
+        );
+      } catch (error) {
+        lastError = error;
+        if (!['timeout', 'request_failed'].includes(error?.code) || index === targets.length - 1) throw error;
+      }
+    }
+    throw lastError || new SupplierAdapterError('timeout', 'supplier model probe timed out');
   }
 }
 
@@ -788,6 +954,107 @@ function checkNewApiKey() {
   return { status: 'skipped', method: 'portal_inventory', errorCode: 'raw_key_not_requested', errorMessage: 'per-key checks do not retrieve plaintext keys' };
 }
 
+function portalAuthOptions(snapshot) {
+  return {
+    token: snapshot.accessToken || '',
+    cookie: snapshot.sessionCookie || '',
+    ...(snapshot.userId ? { headers: { 'New-Api-User': String(snapshot.userId) } } : {}),
+  };
+}
+
+async function revealProbeKey(connection, snapshot, key, client) {
+  if (key.rawKey) return key.rawKey;
+  if (snapshot.adapterType !== 'newapi') {
+    throw new SupplierAdapterError('raw_key_unavailable', 'the selected supplier key is not available for active probing', { statusCode: 409 });
+  }
+  const result = await client.request(connection.baseUrl, `/api/token/${encodeURIComponent(key.externalId)}/key`, {
+    ...portalAuthOptions(snapshot),
+    method: 'POST',
+    allowError: true,
+  });
+  if (!result.response.ok) {
+    throw new SupplierAdapterError('raw_key_unavailable', 'NewAPI did not allow the selected key to be used for probing', {
+      statusCode: 409, httpStatus: result.response.status,
+    });
+  }
+  const data = unwrap(result.payload);
+  const revealed = rawKey(typeof data === 'string' ? data : data?.key ?? data?.token);
+  if (!revealed) throw new SupplierAdapterError('raw_key_unavailable', 'NewAPI returned no usable key material for the selected token', { statusCode: 409 });
+  return revealed;
+}
+
+function sub2ApiPassiveQuality(payloads) {
+  const observations = [];
+  for (const monitor of items(unwrap(payloads.monitors) || {})) {
+    const timeline = Array.isArray(monitor.timeline) && monitor.timeline.length
+      ? monitor.timeline
+      : [{
+        status: monitor.primary_status,
+        latency_ms: monitor.primary_latency_ms,
+        ping_latency_ms: monitor.primary_ping_latency_ms,
+        checked_at: monitor.last_checked_at,
+      }];
+    for (const point of timeline) {
+      const observedAt = timestamp(point.checked_at);
+      if (!observedAt) continue;
+      observations.push({
+        sourceKind: 'passive_monitor',
+        externalObservationId: `monitor:${monitor.id}:${observedAt}`,
+        model: String(monitor.primary_model || ''),
+        groupName: String(monitor.group_name || ''),
+        status: normalizeQualityStatus(point.status || monitor.primary_status),
+        availabilitySample: true,
+        durationMs: number(point.latency_ms),
+        pingLatencyMs: number(point.ping_latency_ms),
+        observedAt,
+        metadata: { monitorId: String(monitor.id || '') },
+      });
+    }
+  }
+  for (const usage of items(unwrap(payloads.usage) || {})) {
+    const observedAt = timestamp(usage.created_at);
+    if (!observedAt || (!number(usage.first_token_ms) && !number(usage.duration_ms))) continue;
+    observations.push({
+      sourceKind: 'passive_usage',
+      externalObservationId: `usage:${usage.id}`,
+      keyExternalId: usage.api_key_id === null || usage.api_key_id === undefined ? '' : String(usage.api_key_id),
+      model: String(usage.model || ''),
+      groupName: String(usage.group || usage.group_name || ''),
+      status: 'ok',
+      availabilitySample: false,
+      ttftMs: number(usage.first_token_ms),
+      durationMs: number(usage.duration_ms),
+      rateMultiplier: number(usage.rate_multiplier),
+      observedAt,
+      metadata: { usageId: String(usage.id || '') },
+    });
+  }
+  return observations;
+}
+
+function newApiPassiveQuality(payload) {
+  return items(unwrap(payload) || {}).flatMap((log) => {
+    const observedAt = timestamp(log.created_at ?? log.created_timestamp);
+    const model = String(log.model_name || log.model || '');
+    if (!observedAt || !model) return [];
+    const rawStatus = String(log.status || log.type_name || '').toLowerCase();
+    const failed = Number(log.type) === 5 || ['failed', 'error'].includes(rawStatus);
+    const explicitAvailability = failed || ['ok', 'success', 'succeeded'].includes(rawStatus);
+    return [{
+      sourceKind: 'passive_usage',
+      externalObservationId: `log:${log.id}`,
+      model,
+      groupName: String(log.group || log.group_name || ''),
+      status: failed ? 'failed' : 'ok',
+      availabilitySample: explicitAvailability,
+      ttftMs: number(log.first_token_ms ?? log.first_token_time ?? log.stream_time),
+      durationMs: number(log.elapsed_time ?? log.duration_ms),
+      observedAt,
+      metadata: { logId: String(log.id || '') },
+    }];
+  });
+}
+
 async function checkOpenAiKey(connection, key, client) {
   const result = await client.request(connection.baseUrl, '/v1/models', { token: key.rawKey, allowError: true });
   if ([404, 405].includes(result.response.status)) return { status: 'unsupported', method: 'models', httpStatus: result.response.status, latencyMs: result.latencyMs };
@@ -827,5 +1094,64 @@ export class SupplierAdapterRegistry {
     if (snapshot.adapterType === 'newapi') return checkNewApiKey(connection, credentials, snapshot, key);
     if (snapshot.adapterType === 'openai_compatible') return checkOpenAiKey(connection, key, this.client);
     return { status: 'unsupported', method: 'none', errorCode: 'unsupported_adapter', errorMessage: 'no check adapter is configured' };
+  }
+
+  async collectPassiveQuality(connection, snapshot) {
+    if (snapshot.adapterType === 'sub2api') {
+      const options = { token: snapshot.accessToken || '', allowError: true };
+      const [monitors, usage] = await Promise.all([
+        this.client.request(connection.baseUrl, '/api/v1/channel-monitors', options),
+        this.client.request(connection.baseUrl, '/api/v1/usage?page=1&page_size=100&sort_by=created_at&sort_order=desc', options),
+      ]);
+      return sub2ApiPassiveQuality({ monitors: monitors.payload, usage: usage.payload });
+    }
+    if (snapshot.adapterType === 'newapi') {
+      const result = await this.client.request(connection.baseUrl, '/api/log/self?p=0&page_size=100', {
+        ...portalAuthOptions(snapshot),
+        allowError: true,
+      });
+      return result.response.ok ? newApiPassiveQuality(result.payload) : [];
+    }
+    return [];
+  }
+
+  async listProbeModels(connection, snapshot, key) {
+    let apiKey = '';
+    try {
+      apiKey = await revealProbeKey(connection, snapshot, key, this.client);
+      const result = await this.client.request(connection.baseUrl, '/v1/models', { token: apiKey, allowError: true });
+      if (!result.response.ok) {
+        throw new SupplierAdapterError('model_discovery_failed', 'the selected supplier key could not list models', {
+          statusCode: 502, httpStatus: result.response.status,
+        });
+      }
+      const data = result.payload?.data ?? unwrap(result.payload);
+      const models = Array.isArray(data) ? data : items(data);
+      return [...new Set(models.map((item) => String(item?.id || item?.model || item || '').trim()).filter(Boolean))].sort();
+    } finally {
+      apiKey = '';
+    }
+  }
+
+  async activeQualityProbe(connection, snapshot, key, target) {
+    let apiKey = '';
+    try {
+      apiKey = await revealProbeKey(connection, snapshot, key, this.client);
+      const result = await this.client.probeChatCompletion(connection.baseUrl, apiKey, target.model, {
+        maxOutputTokens: target.maxOutputTokens,
+      });
+      return {
+        ...result,
+        sourceKind: 'active_probe',
+        model: target.model,
+        groupName: key.groupName || '',
+        availabilitySample: true,
+        rateMultiplier: key.rateMultiplier,
+        observedAt: new Date().toISOString(),
+        metadata: {},
+      };
+    } finally {
+      apiKey = '';
+    }
   }
 }

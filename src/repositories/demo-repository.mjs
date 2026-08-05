@@ -1,4 +1,5 @@
 import { splitFixedCostCny } from '../services/cost-accounting.mjs';
+import { supplierQualityScore } from '../services/supplier-quality.mjs';
 
 function effectiveCostCny(costType, ignoredReferenceCost, purchaseAllocatedCostCny) {
   if (costType === 'free') return 0;
@@ -200,6 +201,7 @@ export class DemoRepository {
       credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true,
       inventoryIntervalSeconds: 600, inventoryIntervalMinutes: 10, activeCheckEnabled: true, activeCheckLimit: 20,
       lowBalanceThreshold: 5, balanceCurrency: 'USD', balance: 10.84, connectionStatus: 'ok',
+      qualityMonitorMode: 'hybrid',
       keyCount: 4, activeKeyCount: 4, failedKeyCount: 0, openAlertCount: 1,
       lastSyncAt: new Date(Date.now() - 3 * 60_000).toISOString(), lastSuccessAt: new Date(Date.now() - 3 * 60_000).toISOString(),
       nextSyncAt: new Date(Date.now() + 7 * 60_000).toISOString(), consecutiveFailures: 0, lastError: '',
@@ -219,6 +221,18 @@ export class DemoRepository {
         alerts: [{ id:1,keyId:3,type:'multiplier_changed',severity:'warning',status:'open',title:'密钥倍率发生变化',message:'cc-pro：0.04x → 0.03x',lastSeenAt:new Date(supplierNow-3600000).toISOString(),occurrenceCount:1 }],
       },
     ]]);
+    this.supplierQualityTargets = [{
+      id: 1, connectionId: 1, keyId: 1, externalKeyId: '101', keyName: 'plus-鐗规儬',
+      maskedKey: 'sk-db8...cb4b', keyStatus: 'active', groupName: 'ChatGPT-Plus', rateMultiplier: 0.05,
+      model: 'gpt-4o-mini', enabled: true, intervalSeconds: 1800, maxOutputTokens: 1,
+      nextProbeAt: new Date(Date.now() + 12 * 60_000).toISOString(),
+      lastProbeAt: new Date(Date.now() - 8 * 60_000).toISOString(), lastStatus: 'ok', lastError: '',
+    }];
+    this.supplierQualityObservations = [
+      { id: 1, connectionId: 1, sourceKind: 'passive_usage', keyId: 1, model: 'gpt-4o-mini', status: 'ok', availabilitySample: false, ttftMs: 780, durationMs: 2400, rateMultiplier: 0.05, observedAt: new Date(Date.now() - 5 * 60_000).toISOString(), metadata: {} },
+      { id: 2, connectionId: 1, sourceKind: 'passive_monitor', keyId: null, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, durationMs: 1100, pingLatencyMs: 42, observedAt: new Date(Date.now() - 15 * 60_000).toISOString(), metadata: {} },
+      { id: 3, connectionId: 1, sourceKind: 'active_probe', targetId: 1, keyId: 1, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, ttftMs: 920, durationMs: 1800, rateMultiplier: 0.05, observedAt: new Date(Date.now() - 8 * 60_000).toISOString(), metadata: {} },
+    ];
     this.accountCostPeriods = this.accounts.map((account, index) => {
       const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
       const effectiveTo = account.expiresAt
@@ -848,6 +862,7 @@ export class DemoRepository {
       activeCheckLimit: input.activeCheckLimit,
       lowBalanceThreshold: input.lowBalanceThreshold,
       balanceCurrency: input.credentials?.balanceCurrency || input.balanceCurrency,
+      qualityMonitorMode: input.qualityMonitorMode || 'passive',
       balance,
       connectionStatus: input.enabled ? 'pending' : 'disabled',
       keyCount: 0,
@@ -890,6 +905,7 @@ export class DemoRepository {
       activeCheckLimit: input.activeCheckLimit,
       lowBalanceThreshold: input.lowBalanceThreshold,
       balanceCurrency: input.credentials?.balanceCurrency || input.balanceCurrency,
+      qualityMonitorMode: input.qualityMonitorMode || connection.qualityMonitorMode || 'passive',
       connectionStatus: input.enabled ? 'pending' : 'disabled',
       nextSyncAt: input.enabled ? new Date().toISOString() : null,
       lastError: '',
@@ -977,6 +993,159 @@ export class DemoRepository {
       alerts: detail.alerts,
       accounts: this.accounts.map((item) => ({ id:item.id,name:item.name,platform:item.platform,status:item.status })),
     };
+  }
+
+  qualityTarget(target) {
+    return { ...target };
+  }
+
+  qualityObservation(observation) {
+    return { ...observation, metadata: { ...(observation.metadata || {}) } };
+  }
+
+  async listSupplierQualityTargets(connectionId) {
+    return {
+      items: this.supplierQualityTargets
+        .filter((target) => Number(target.connectionId) === Number(connectionId))
+        .map((target) => this.qualityTarget(target)),
+    };
+  }
+
+  async getSupplierQualityTargetContext(targetId) {
+    const target = this.supplierQualityTargets.find((item) => Number(item.id) === Number(targetId));
+    if (!target) throw Object.assign(new Error('supplier quality target not found'), { statusCode: 404 });
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(target.connectionId));
+    return { ...this.qualityTarget(target), connection: copySupplierConnection(connection, { includeCiphertext: true }) };
+  }
+
+  async getSupplierKeyContext(keyId) {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    return {
+      keyId: Number(keyId), externalKeyId: String(match.key.externalId), keyName: match.key.name || '',
+      maskedKey: match.key.maskedKey || '', keyStatus: match.key.status, groupName: match.key.groupName || '',
+      rateMultiplier: match.key.rateMultiplier, connection: copySupplierConnection(match.connection, { includeCiphertext: true }),
+    };
+  }
+
+  async upsertSupplierQualityTarget(connectionId, input) {
+    const key = this.supplierDetail(connectionId).keys.find((item) => Number(item.id) === Number(input.keyId));
+    if (!key || key.removedAt) throw Object.assign(new Error('supplier key is not available for this connection'), { statusCode: 400 });
+    const duplicate = this.supplierQualityTargets.find((item) => (
+      Number(item.keyId) === Number(input.keyId) && item.model === input.model
+    ));
+    const target = duplicate || {
+      id: Math.max(0, ...this.supplierQualityTargets.map((item) => Number(item.id) || 0)) + 1,
+      connectionId: Number(connectionId), keyId: Number(input.keyId), externalKeyId: key.externalId,
+      keyName: key.name, maskedKey: key.maskedKey, keyStatus: key.status, groupName: key.groupName,
+      rateMultiplier: key.rateMultiplier,
+    };
+    Object.assign(target, {
+      model: input.model, enabled: input.enabled, intervalSeconds: input.intervalSeconds,
+      maxOutputTokens: input.maxOutputTokens,
+      lastStatus: input.enabled ? (target.lastStatus === 'disabled' ? 'pending' : target.lastStatus) : 'disabled',
+      lastError: input.enabled ? target.lastError : '',
+    });
+    if (!duplicate) this.supplierQualityTargets.push(target);
+    return this.qualityTarget(target);
+  }
+
+  async updateSupplierQualityTarget(targetId, input) {
+    const target = this.supplierQualityTargets.find((item) => Number(item.id) === Number(targetId));
+    if (!target) throw Object.assign(new Error('supplier quality target not found'), { statusCode: 404 });
+    const key = this.supplierDetail(target.connectionId).keys.find((item) => Number(item.id) === Number(input.keyId));
+    if (!key || key.removedAt) throw Object.assign(new Error('supplier key is not available for this connection'), { statusCode: 400 });
+    const duplicate = this.supplierQualityTargets.find((item) => (
+      Number(item.id) !== Number(targetId) && Number(item.keyId) === Number(input.keyId) && item.model === input.model
+    ));
+    if (duplicate) throw Object.assign(new Error('this supplier key and model target already exists'), { statusCode: 409 });
+    Object.assign(target, {
+      keyId: Number(input.keyId), externalKeyId: key.externalId, keyName: key.name, maskedKey: key.maskedKey,
+      keyStatus: key.status, groupName: key.groupName, rateMultiplier: key.rateMultiplier,
+      model: input.model, enabled: input.enabled, intervalSeconds: input.intervalSeconds,
+      maxOutputTokens: input.maxOutputTokens,
+      lastStatus: input.enabled ? (target.lastStatus === 'disabled' ? 'pending' : target.lastStatus) : 'disabled',
+      lastError: input.enabled ? target.lastError : '',
+    });
+    return this.qualityTarget(target);
+  }
+
+  async deleteSupplierQualityTarget(targetId) {
+    const index = this.supplierQualityTargets.findIndex((item) => Number(item.id) === Number(targetId));
+    if (index < 0) throw Object.assign(new Error('supplier quality target not found'), { statusCode: 404 });
+    this.supplierQualityTargets.splice(index, 1);
+    this.supplierQualityObservations = this.supplierQualityObservations.filter((item) => Number(item.targetId) !== Number(targetId));
+    return { id: Number(targetId), deleted: true };
+  }
+
+  async recordSupplierQualityObservations(connectionId, observations = []) {
+    let inserted = 0;
+    for (const observation of observations) {
+      const externalId = observation.externalObservationId || `${observation.sourceKind}:${observation.observedAt}`;
+      if (this.supplierQualityObservations.some((item) => (
+        Number(item.connectionId) === Number(connectionId)
+        && item.sourceKind === observation.sourceKind
+        && item.externalObservationId === externalId
+      ))) continue;
+      this.supplierQualityObservations.unshift({
+        id: Math.max(0, ...this.supplierQualityObservations.map((item) => Number(item.id) || 0)) + 1,
+        connectionId: Number(connectionId), keyId: observation.keyId || null,
+        targetId: observation.targetId || null, externalObservationId: externalId,
+        sourceKind: observation.sourceKind, model: observation.model || '',
+        groupName: observation.groupName || '', status: ['ok', 'degraded'].includes(observation.status) ? observation.status : 'failed',
+        availabilitySample: Boolean(observation.availabilitySample), httpStatus: Number(observation.httpStatus || 0),
+        ttftMs: finiteNumber(observation.ttftMs), durationMs: finiteNumber(observation.durationMs),
+        pingLatencyMs: finiteNumber(observation.pingLatencyMs), rateMultiplier: finiteNumber(observation.rateMultiplier),
+        observedAt: observation.observedAt || new Date().toISOString(), metadata: { ...(observation.metadata || {}) },
+      });
+      inserted += 1;
+    }
+    return { inserted };
+  }
+
+  async recordSupplierQualityTargetResult(targetId, observation) {
+    const target = this.supplierQualityTargets.find((item) => Number(item.id) === Number(targetId));
+    if (!target) throw Object.assign(new Error('supplier quality target not found'), { statusCode: 404 });
+    target.lastProbeAt = new Date().toISOString();
+    target.lastStatus = ['ok', 'degraded'].includes(observation.status) ? observation.status : 'failed';
+    target.lastError = observation.errorMessage || observation.errorCode || '';
+    target.nextProbeAt = new Date(Date.now() + target.intervalSeconds * 1000).toISOString();
+    await this.recordSupplierQualityObservations(target.connectionId, [{
+      ...observation, targetId: Number(targetId), keyId: target.keyId,
+      externalObservationId: `active:${targetId}:${target.lastProbeAt}`,
+    }]);
+    return this.qualityTarget(target);
+  }
+
+  async getSupplierQualityDashboard(connectionId) {
+    const observations = this.supplierQualityObservations.filter((item) => Number(item.connectionId) === Number(connectionId));
+    const metrics = {
+      sampleCount: observations.length,
+      availabilitySamples: observations.filter((item) => item.availabilitySample).length,
+      successSamples: observations.filter((item) => item.availabilitySample && item.status === 'ok').length,
+      failureCount: observations.filter((item) => item.status === 'failed').length,
+      ttftP50Ms: observations.filter((item) => item.ttftMs !== null).map((item) => item.ttftMs).sort((a, b) => a - b)[Math.floor(observations.filter((item) => item.ttftMs !== null).length * 0.5)] || null,
+      ttftP95Ms: observations.filter((item) => item.ttftMs !== null).map((item) => item.ttftMs).sort((a, b) => a - b)[Math.max(0, Math.ceil(observations.filter((item) => item.ttftMs !== null).length * 0.95) - 1)] || null,
+      rateMultiplier: observations.find((item) => item.rateMultiplier !== null)?.rateMultiplier ?? null,
+      lastObservedAt: observations[0]?.observedAt || null,
+      passiveUsageSamples: observations.filter((item) => item.sourceKind === 'passive_usage').length,
+      passiveMonitorSamples: observations.filter((item) => item.sourceKind === 'passive_monitor').length,
+      activeProbeSamples: observations.filter((item) => item.sourceKind === 'active_probe').length,
+    };
+    const activeRates = this.supplierDetail(connectionId).keys.filter((item) => item.status === 'active' && item.rateMultiplier > 0).map((item) => item.rateMultiplier);
+    return {
+      score: supplierQualityScore(metrics, { bestRateMultiplier: activeRates.length ? Math.min(...activeRates) : null }),
+      metrics,
+      observations: observations.slice(0, 100).map((item) => this.qualityObservation(item)),
+    };
+  }
+
+  async runSupplierQualityTarget(targetId) {
+    return this.recordSupplierQualityTargetResult(targetId, {
+      sourceKind: 'active_probe', model: this.supplierQualityTargets.find((item) => Number(item.id) === Number(targetId))?.model || '',
+      status: 'ok', availabilitySample: true, httpStatus: 200, ttftMs: 860, durationMs: 1750,
+      observedAt: new Date().toISOString(), metadata: { demo: true },
+    });
   }
 
   async setSupplierKeyAccountLink(keyId, accountId, linked) {

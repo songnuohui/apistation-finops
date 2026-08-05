@@ -17,7 +17,7 @@ import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
-  normalizeUserBalanceStatsWhitelist,
+  normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -229,6 +229,48 @@ async function api(request,res,url){
   if(request.method==='GET'&&supplierConnectionDetails){
     return json(res,200,await repository.getSupplierConnectionDetails(Number(supplierConnectionDetails[1])));
   }
+  const supplierQuality=/^\/api\/supplier-connections\/(\d+)\/quality$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierQuality){
+    const connectionId=Number(supplierQuality[1]);
+    await repository.getSupplierConnection(connectionId);
+    const [dashboard,targets]=await Promise.all([
+      repository.getSupplierQualityDashboard(connectionId),
+      repository.listSupplierQualityTargets(connectionId),
+    ]);
+    return json(res,200,{...dashboard,targets:targets.items||[]});
+  }
+  const supplierQualityTargets=/^\/api\/supplier-connections\/(\d+)\/quality-targets$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierQualityTargets){
+    return json(res,200,await repository.listSupplierQualityTargets(Number(supplierQualityTargets[1])));
+  }
+  const supplierKeyModels=/^\/api\/supplier-keys\/(\d+)\/models$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierKeyModels){
+    if(config.demoMode)return json(res,200,{keyId:Number(supplierKeyModels[1]),models:['gpt-4o-mini','claude-3-5-haiku','deepseek-chat']});
+    return json(res,200,await supplierMonitorService.listSupplierKeyModels(Number(supplierKeyModels[1])));
+  }
+  if(request.method==='POST'&&supplierQualityTargets){
+    const connectionId=Number(supplierQualityTargets[1]);
+    await repository.getSupplierConnection(connectionId);
+    return json(res,201,await repository.upsertSupplierQualityTarget(
+      connectionId,normalizeSupplierQualityTarget(await body(request)),auth.actor,
+    ));
+  }
+  const supplierQualityTargetId=/^\/api\/supplier-quality-targets\/(\d+)$/.exec(url.pathname);
+  if(request.method==='PATCH'&&supplierQualityTargetId){
+    const targetId=Number(supplierQualityTargetId[1]);
+    return json(res,200,await repository.updateSupplierQualityTarget(
+      targetId,normalizeSupplierQualityTarget(await body(request)),auth.actor,
+    ));
+  }
+  if(request.method==='DELETE'&&supplierQualityTargetId){
+    return json(res,200,await repository.deleteSupplierQualityTarget(Number(supplierQualityTargetId[1]),auth.actor));
+  }
+  const supplierQualityTargetRun=/^\/api\/supplier-quality-targets\/(\d+)\/run$/.exec(url.pathname);
+  if(request.method==='POST'&&supplierQualityTargetRun){
+    const targetId=Number(supplierQualityTargetRun[1]);
+    if(config.demoMode)return json(res,200,await repository.runSupplierQualityTarget(targetId));
+    return json(res,200,await supplierMonitorService.probeSupplierQualityTarget(targetId));
+  }
   if(request.method==='POST'&&url.pathname==='/api/supplier-connections'){
     if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
     const input=normalizeSupplierConnection(await body(request));
@@ -364,14 +406,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring']],
   );
-  if(migration.rowCount < 17)throw new Error('required FinOps migrations 002_cny_accounting through 018_backfill_supplier_key_cost_links are not applied');
+  if(migration.rowCount < 19)throw new Error('required FinOps migrations through 020_supplier_quality_monitoring are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

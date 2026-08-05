@@ -232,3 +232,65 @@ test('NewAPI cookie login fails clearly when the legacy user ID is missing', asy
     (error) => error.code === 'authentication_failed' && /user ID required/.test(error.message),
   );
 });
+
+test('active probes measure the first streamed output token and honor the selected model budget', async () => {
+  let request;
+  const encoder = new TextEncoder();
+  const client = new SupplierHttpClient(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      request = { url, body: JSON.parse(options.body), authorization: options.headers.Authorization };
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'));
+          setTimeout(() => {
+            controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'));
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          }, 15);
+        },
+      }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+
+  const result = await client.probeChatCompletion(
+    'https://supplier.example.test', 'sk-probe', 'gpt-4o-mini', { maxOutputTokens: 2 },
+  );
+
+  assert.equal(request.url, 'https://supplier.example.test/v1/chat/completions');
+  assert.equal(request.authorization, 'Bearer sk-probe');
+  assert.equal(request.body.model, 'gpt-4o-mini');
+  assert.equal(request.body.max_tokens, 2);
+  assert.equal(request.body.stream, true);
+  assert.equal(result.status, 'ok');
+  assert.ok(result.ttftMs >= 10);
+  assert.ok(result.durationMs >= result.ttftMs);
+});
+
+test('NewAPI model discovery reveals only the selected key in memory', async () => {
+  const requests = [];
+  const registry = new SupplierAdapterRegistry(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      const parsed = new URL(url);
+      requests.push({ path: parsed.pathname, method: options.method, authorization: options.headers.Authorization || '' });
+      if (parsed.pathname === '/api/token/9/key') {
+        return json({ success: true, data: { key: 'sk-selected-key' } });
+      }
+      if (parsed.pathname === '/v1/models') {
+        assert.equal(options.headers.Authorization, 'Bearer sk-selected-key');
+        return json({ object: 'list', data: [{ id: 'model-b' }, { id: 'model-a' }, { id: 'model-a' }] });
+      }
+      assert.fail(`unexpected request: ${parsed.pathname}`);
+    },
+  });
+  const models = await registry.listProbeModels(
+    { adapterType: 'newapi', baseUrl: 'https://supplier.example.test' },
+    { adapterType: 'newapi', accessToken: 'portal-token', keys: [] },
+    { externalId: '9', rawKey: '' },
+  );
+  assert.deepEqual(models, ['model-a', 'model-b']);
+  assert.deepEqual(requests.map((item) => `${item.method} ${item.path}`), [
+    'POST /api/token/9/key', 'GET /v1/models',
+  ]);
+});

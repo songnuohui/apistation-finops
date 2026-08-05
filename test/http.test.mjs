@@ -7,7 +7,7 @@ import { resolveStaticPath } from '../src/http/static-path.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
-  normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection,
+  normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -197,4 +197,15 @@ test('supplier connections validate encrypted portal and API-key credentials', (
   assert.equal(openAi.authMode, 'api_key');
   assert.equal(assertSupplierCredentials(openAi), true);
   assert.throws(() => assertSupplierCredentials({ ...openAi, authMode: 'access_token' }), /requires api_key/);
+});
+
+test('supplier quality targets require a selected model and bounded probe costs', () => {
+  assert.deepEqual(normalizeSupplierQualityTarget({
+    keyId: '9', model: 'gpt-4o-mini', intervalSeconds: '900', maxOutputTokens: '2', enabled: 'true',
+  }), {
+    keyId: 9, model: 'gpt-4o-mini', intervalSeconds: 900, maxOutputTokens: 2, enabled: true,
+  });
+  assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: '', intervalSeconds: 900 }), /missing field: model/);
+  assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: 'gpt-4o-mini', intervalSeconds: 59 }), /invalid intervalSeconds/);
+  assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: 'gpt-4o-mini', maxOutputTokens: 33 }), /invalid maxOutputTokens/);
 });

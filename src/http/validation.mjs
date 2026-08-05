@@ -13,6 +13,7 @@ const CASH_TYPES = new Set([
 const DIRECTIONS = new Set(['in', 'out']);
 const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_compatible', 'custom']);
 const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'api_key']);
+const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -246,6 +247,7 @@ export function normalizeSupplierConnection(input) {
     activeCheckEnabled: input.activeCheckEnabled === undefined ? true : booleanValue(input.activeCheckEnabled, 'activeCheckEnabled'),
     activeCheckLimit: input.activeCheckLimit === undefined
       ? 20 : integerValue(input.activeCheckLimit, 'activeCheckLimit', { min: 1, max: 100 }),
+    qualityMonitorMode: enumValue(input.qualityMonitorMode || 'passive', 'qualityMonitorMode', SUPPLIER_QUALITY_MODES),
     lowBalanceThreshold: optionalDecimal(input.lowBalanceThreshold, 'lowBalanceThreshold', { min: 0, allowZero: true }),
     balanceCurrency: currencyValue(input.balanceCurrency || 'USD', 'balanceCurrency'),
     credentials: {
@@ -281,6 +283,18 @@ export function assertSupplierCredentials(input, { existing = false } = {}) {
     throw badRequest('api_key authentication requires apiKey');
   }
   return true;
+}
+
+export function normalizeSupplierQualityTarget(input) {
+  return {
+    keyId: optionalId(input.keyId, 'keyId') ?? (() => { throw badRequest('missing field: keyId'); })(),
+    model: textValue(input.model, 'model', { max: 200 }),
+    enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
+    intervalSeconds: input.intervalSeconds === undefined
+      ? 1800 : integerValue(input.intervalSeconds, 'intervalSeconds', { min: 60, max: 86400 }),
+    maxOutputTokens: input.maxOutputTokens === undefined
+      ? 1 : integerValue(input.maxOutputTokens, 'maxOutputTokens', { min: 1, max: 32 }),
+  };
 }
 
 export function normalizeSupplierAccountLink(input) {
