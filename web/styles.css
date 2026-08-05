@@ -479,6 +479,56 @@ textarea:focus-visible {
   line-height: 15px;
 }
 
+.quality-header-label,
+.quality-sort-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quality-help {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #9eb1c8;
+  border-radius: 50%;
+  color: #58708f;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+  cursor: help;
+}
+
+.quality-help:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.quality-help:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.quality-tooltip {
+  position: fixed;
+  z-index: 70;
+  max-width: 300px;
+  padding: 9px 11px;
+  border: 1px solid #cbd9ea;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .98);
+  color: #405269;
+  box-shadow: 0 9px 22px rgba(40, 64, 96, .18);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
+}
+
+.quality-tooltip[hidden] { display: none; }
+
 .metric .value {
   margin-top: 8px;
   color: #111827;
@@ -1019,6 +1069,10 @@ textarea:focus-visible {
   padding: 0;
   color: inherit;
   white-space: nowrap;
+}
+
+.quality-sort-header .sort-button {
+  min-width: 0;
 }
 
 .sort-button span { color: #8b9ab0; font-size: 13px; }

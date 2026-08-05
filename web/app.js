@@ -95,12 +95,51 @@ function dateTimeInputValue(value) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
-function metric(label, value, hint = '', tone = '') {
-  return `<div class="metric ${tone}"><div class="label">${label}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
+function qualityTipMarkup(description) {
+  if (!description) return '';
+  const text = escapeHtml(description);
+  return `<span class="quality-help" tabindex="0" data-quality-tip="${text}" aria-label="查看评分说明">?</span>`;
+}
+
+function metric(label, value, hint = '', tone = '', description = '') {
+  return `<div class="metric ${tone}"><div class="label">${label}${qualityTipMarkup(description)}</div><div class="value">${value}</div><div class="hint">${hint}</div></div>`;
 }
 
 function metricAction(label, value, hint = '', tone = '', action = '') {
   return `<button type="button" class="metric metric-action ${tone}" ${action}><span class="label">${label}</span><span class="value">${value}</span><span class="hint">${hint}</span></button>`;
+}
+
+let qualityTooltipElement;
+
+function qualityTooltip() {
+  if (qualityTooltipElement) return qualityTooltipElement;
+  qualityTooltipElement = document.createElement('div');
+  qualityTooltipElement.className = 'quality-tooltip';
+  qualityTooltipElement.hidden = true;
+  qualityTooltipElement.setAttribute('role', 'tooltip');
+  document.body.append(qualityTooltipElement);
+  return qualityTooltipElement;
+}
+
+function showQualityTooltip(target) {
+  const text = target?.dataset?.qualityTip;
+  if (!text) return;
+  const tooltip = qualityTooltip();
+  tooltip.textContent = text;
+  tooltip.hidden = false;
+  const rect = target.getBoundingClientRect();
+  const gap = 8;
+  const width = Math.min(300, window.innerWidth - 24);
+  tooltip.style.width = `${width}px`;
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const left = Math.max(12, Math.min(window.innerWidth - tooltipRect.width - 12, rect.left + rect.width / 2 - tooltipRect.width / 2));
+  const above = rect.top - tooltipRect.height - gap;
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${above >= 12 ? above : rect.bottom + gap}px`;
+}
+
+function hideQualityTooltip() {
+  if (qualityTooltipElement) qualityTooltipElement.hidden = true;
 }
 
 function maskedIdentity(value) {
@@ -1920,21 +1959,27 @@ function supplierQualityTab(detail) {
       <button type="button" class="button primary" data-supplier-quality-add ${['active', 'hybrid'].includes(detail.connection.qualityMonitorMode) ? '' : 'disabled'}>${icon('plus')}添加主动目标</button>
     </div>
     <div class="detail-metrics supplier-quality-metrics">
-      ${metric('风险调整分', score.riskAdjustedScore === null || score.riskAdjustedScore === undefined ? '--' : Number(score.riskAdjustedScore).toFixed(1), `原始分 ${score.rawOverallScore === null || score.rawOverallScore === undefined ? '--' : Number(score.rawOverallScore).toFixed(1)}`, Number(score.riskAdjustedScore || 0) >= 80 ? 'good' : Number(score.riskAdjustedScore || 0) >= 60 ? 'warn' : 'bad')}
-      ${metric('可用性', score.availabilityScore === null || score.availabilityScore === undefined ? '--' : `${Number(score.availabilityScore).toFixed(2)}%`, `${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)} 成功`, Number(score.availabilityScore || 0) >= 99 ? 'good' : 'warn')}
-      ${metric('TTFT P50', supplierQualityMs(metrics.ttftP50Ms), `P95 ${supplierQualityMs(metrics.ttftP95Ms)}`, Number(metrics.ttftP50Ms || 0) <= 3000 ? 'good' : 'warn')}
-      ${metric('稳定性', score.stabilityScore === null || score.stabilityScore === undefined ? '--' : Number(score.stabilityScore).toFixed(1), `${compact(metrics.failureCount || 0)} 次失败`, Number(score.stabilityScore || 0) >= 85 ? 'good' : 'warn')}
-      ${metric('价格评分', score.priceScore === null || score.priceScore === undefined ? '--' : Number(score.priceScore).toFixed(1), metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '暂无倍率样本' : `当前倍率 ${Number(metrics.rateMultiplier).toFixed(4)}x`)}
-      ${metric('被动样本', compact((metrics.passiveUsageSamples || 0) + (metrics.passiveMonitorSamples || 0)), `用量 ${compact(metrics.passiveUsageSamples || 0)} · 监控 ${compact(metrics.passiveMonitorSamples || 0)}`)}
-      ${metric('主动样本', compact(metrics.activeProbeSamples || 0), targets.length ? `${compact(targets.filter((item) => item.enabled).length)} 个启用目标` : '尚未配置目标')}
-      ${metric('最近采样', metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--', `总样本 ${compact(metrics.sampleCount || 0)}`)}
+      ${metric('风险调整分', score.riskAdjustedScore === null || score.riskAdjustedScore === undefined ? '--' : Number(score.riskAdjustedScore).toFixed(1), `原始分 ${score.rawOverallScore === null || score.rawOverallScore === undefined ? '--' : Number(score.rawOverallScore).toFixed(1)}`, Number(score.riskAdjustedScore || 0) >= 80 ? 'good' : Number(score.riskAdjustedScore || 0) >= 60 ? 'warn' : 'bad', supplierQualityExplanations.riskAdjustedScore)}
+      ${metric('可用性', score.availabilityScore === null || score.availabilityScore === undefined ? '--' : `${Number(score.availabilityScore).toFixed(2)}%`, `${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)} 成功`, Number(score.availabilityScore || 0) >= 99 ? 'good' : 'warn', supplierQualityExplanations.availabilityScore)}
+      ${metric('TTFT P50', supplierQualityMs(metrics.ttftP50Ms), `P95 ${supplierQualityMs(metrics.ttftP95Ms)}`, Number(metrics.ttftP50Ms || 0) <= 3000 ? 'good' : 'warn', supplierQualityExplanations.ttft)}
+      ${metric('稳定性', score.stabilityScore === null || score.stabilityScore === undefined ? '--' : Number(score.stabilityScore).toFixed(1), `${compact(metrics.failureCount || 0)} 次失败`, Number(score.stabilityScore || 0) >= 85 ? 'good' : 'warn', supplierQualityExplanations.stabilityScore)}
+      ${metric('价格评分', score.priceScore === null || score.priceScore === undefined ? '--' : Number(score.priceScore).toFixed(1), metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '暂无倍率样本' : `当前倍率 ${Number(metrics.rateMultiplier).toFixed(4)}x`, '', supplierQualityExplanations.priceScore)}
+      ${metric('被动样本', compact((metrics.passiveUsageSamples || 0) + (metrics.passiveMonitorSamples || 0)), `用量 ${compact(metrics.passiveUsageSamples || 0)} · 监控 ${compact(metrics.passiveMonitorSamples || 0)}`, '', supplierQualityExplanations.passiveSamples)}
+      ${metric('主动样本', compact(metrics.activeProbeSamples || 0), targets.length ? `${compact(targets.filter((item) => item.enabled).length)} 个启用目标` : '尚未配置目标', '', supplierQualityExplanations.activeSamples)}
+      ${metric('最近采样', metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--', `总样本 ${compact(metrics.sampleCount || 0)}`, '', supplierQualityExplanations.lastObservedAt)}
     </div>
     <div class="supplier-quality-block">
       <div class="panel-header"><div><h3>模型与密钥评分明细</h3><span>价格只在同一模型的不同供应商之间比较；风险调整分已计入样本量、新鲜度与来源可信度。</span></div></div>
       ${modelRows.length ? table([
-        { label: '模型 / 密钥' }, { label: '风险分', right: true }, { label: '原始分', right: true },
-        { label: '价格倍率' }, { label: '可用性', right: true }, { label: 'TTFT' },
-        { label: '稳定性', right: true }, { label: '可信度', right: true }, { label: '数据状态' },
+        { label: supplierQualityHeaderLabel('模型 / 密钥', 'unit') },
+        { label: supplierQualityHeaderLabel('风险分', 'riskAdjustedScore'), right: true },
+        { label: supplierQualityHeaderLabel('原始分', 'rawOverallScore'), right: true },
+        { label: supplierQualityHeaderLabel('价格倍率', 'priceMultiplier') },
+        { label: supplierQualityHeaderLabel('可用性', 'availabilityScore'), right: true },
+        { label: supplierQualityHeaderLabel('TTFT', 'ttft') },
+        { label: supplierQualityHeaderLabel('稳定性', 'stabilityScore'), right: true },
+        { label: supplierQualityHeaderLabel('可信度', 'confidence'), right: true },
+        { label: supplierQualityHeaderLabel('数据状态', 'dataStatus') },
       ], modelRows.map(({ model, key, score: itemScore, metrics: itemMetrics }) => [
         `<span class="primary-text">${escapeHtml(model.model)}</span><div class="secondary-text">${escapeHtml(key.keyName || key.maskedKey || (key.keyId ? `密钥 #${key.keyId}` : '连接级样本'))}${key.groupName ? ` · ${escapeHtml(key.groupName)}` : ''} · 权重 ${supplierQualityScoreText(Number(model.weight || 0) * Number(key.weight || 0) * 100, '%')}</div>`,
         `<span class="${supplierQualityScoreClass(itemScore.riskAdjustedScore)}">${supplierQualityScoreText(itemScore.riskAdjustedScore)}</span>`,
@@ -2387,13 +2432,40 @@ async function renderSuppliers(search = state.supplierSearch) {
   });
 }
 
+const supplierQualityExplanations = Object.freeze({
+  supplier: '供应商名称和本系统中的连接名称。评分以连接为汇总单位，并向下拆分到模型和供应商密钥。',
+  adapter: '供应商系统类型以及质量监控模式。被动模式读取已有监控和用量，主动模式会按配置发起最小模型请求。',
+  status: '供应商门户连接和最近同步状态，不直接等同于模型请求可用性。',
+  riskAdjustedScore: '默认排序分。风险调整分 = 原始分 ×（0.6 + 0.4 × 可信度），样本少、数据旧或来源单一时会降低。',
+  rawOverallScore: '价格 30%、可用性 35%、TTFT 20%、稳定性 15% 加权得到。缺失维度会按已有维度重新归一化，可用性不足时会触发封顶。',
+  priceScore: '只比较同一模型。价格分 = 同模型市场最低有效倍率 ÷ 当前倍率 × 100；少于两个供应商可比时不评分。',
+  availabilityScore: '使用最近 7 天成功/可用性样本计算 Wilson 置信下界，避免少量成功样本直接得到高分。低于 90% 或 98% 会限制原始综合分。',
+  ttftP50Ms: '首字延迟中位数。50% 的有效请求首个输出 Token 延迟不高于该值，越低越好。',
+  ttftP95Ms: '首字延迟第 95 百分位。用于识别少量特别慢的长尾请求，越低且越接近 P50 越稳定。',
+  stabilityScore: '综合失败比例与 TTFT P95/P50 长尾差距计算。失败越多、长尾波动越大，稳定性分越低。',
+  confidence: '由有效样本量、最近成功时间、评分维度覆盖和数据来源质量共同计算，用于修正原始分。',
+  modelCount: '最近 7 天有观测数据的模型数 / 纳入本次评分的模型总数。模型可来自实际用量或主动探测目标。',
+  dataStatus: '可推荐、可用性不足、连续失败、数据已过期或样本不足。最近 24 小时没有成功可用性样本会标记为数据过期。',
+  passiveSamples: '来自供应商已有用量记录和监控记录的样本，不会额外发起模型请求。',
+  activeSamples: 'FinOps 按主动探测目标发起的受控模型请求样本，可通过模型和最大输出 Token 控制费用。',
+  sampleCount: '最近 7 天纳入计算的被动用量、被动监控和主动探测样本总数。',
+  lastObservedAt: '该供应商连接最近一条质量观测的时间，不代表最近一次成功请求时间。',
+  unit: '评分最小单元为供应商连接 + 密钥 + 模型。权重优先使用最近 7 天实际消费金额，单模型最高 40%。',
+  priceMultiplier: '当前倍率优先使用供应商密钥库存中的有效倍率，其次使用最近真实用量倍率；市场最低值来自其他支持同模型的供应商。',
+  ttft: '同时展示 P50 和 P95。P50 反映典型体验，P95 反映长尾慢请求。',
+});
+
+function supplierQualityHeaderLabel(label, key) {
+  return `<span class="quality-header-label">${escapeHtml(label)}${qualityTipMarkup(supplierQualityExplanations[key])}</span>`;
+}
+
 function supplierQualitySortHeader(label, key, right = false) {
   const active = state.supplierQualitySort === key;
   const direction = active ? state.supplierQualitySortDirection : '';
   const indicator = direction === 'asc' ? '↑' : direction === 'desc' ? '↓' : '↕';
   return {
     right,
-    label: `<button type="button" class="sort-button ${active ? 'active' : ''}" data-supplier-quality-sort="${key}" aria-label="按${label}排序">${label}<span>${indicator}</span></button>`,
+    label: `<span class="quality-sort-header"><button type="button" class="sort-button ${active ? 'active' : ''}" data-supplier-quality-sort="${key}" aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}<span>${indicator}</span></button>${qualityTipMarkup(supplierQualityExplanations[key])}</span>`,
   };
 }
 
@@ -3414,13 +3486,30 @@ document.querySelector('#drawer-backdrop').addEventListener('click', () => {
   document.querySelector('#sidebar').classList.remove('open');
   document.querySelector('#drawer-backdrop').classList.remove('show');
 });
+document.addEventListener('mouseover', (event) => {
+  const target = event.target.closest('[data-quality-tip]');
+  if (target && !target.contains(event.relatedTarget)) showQualityTooltip(target);
+});
+document.addEventListener('mouseout', (event) => {
+  const target = event.target.closest('[data-quality-tip]');
+  if (target && !target.contains(event.relatedTarget)) hideQualityTooltip();
+});
+document.addEventListener('focusin', (event) => {
+  const target = event.target.closest('[data-quality-tip]');
+  if (target) showQualityTooltip(target);
+});
+document.addEventListener('focusout', (event) => {
+  if (event.target.closest('[data-quality-tip]')) hideQualityTooltip();
+});
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  hideQualityTooltip();
   closeModal();
   document.querySelector('#sidebar').classList.remove('open');
   document.querySelector('#drawer-backdrop').classList.remove('show');
 });
 window.addEventListener('resize', () => {
+  hideQualityTooltip();
   if (state.page === 'overview' && state.overviewTrend) {
     drawTrendWithTooltip(
       document.querySelector('#trend-chart'),
