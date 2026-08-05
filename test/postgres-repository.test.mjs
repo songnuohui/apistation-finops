@@ -38,35 +38,79 @@ test('fixed allocation strategies are rendered as SQL string literals', () => {
   assert.match(token, /COALESCE\('token_weight', 'standard_cost_weight'\)/);
 });
 
-test('supplier quality overview maps aggregate metrics and scores for every connection', async () => {
+test('supplier quality overview loads model, key, and usage data for cross-supplier scoring', async () => {
+  const observedAt = new Date().toISOString();
   const pool = {
     async query(text) {
-      assert.match(text, /supplier_quality_observations/);
-      assert.match(text, /NOW\(\)-INTERVAL '7 days'/);
-      return {
-        rows: [{
+      if (text.includes('FROM "finops".supplier_connections c')) {
+        return { rows: [{
           id: '7', supplier_id: '3', supplier_name: 'Provider A', name: 'main',
           adapter_type: 'sub2api', detected_adapter_type: 'sub2api', base_url: 'https://provider.example',
           auth_mode: 'password', credentials_ciphertext: 'encrypted', enabled: true,
           inventory_interval_seconds: 600, quality_monitor_mode: 'hybrid',
           balance_currency: 'USD', connection_status: 'ok',
           key_count: 2, active_key_count: 2, failed_key_count: 0, open_alert_count: 0,
-          sample_count: 12, availability_samples: 10, success_samples: 9, failure_count: 1,
-          ttft_p50_ms: '800', ttft_p95_ms: '1400', rate_multiplier: '0.08',
-          last_observed_at: '2026-08-05T08:00:00.000Z',
-          passive_usage_samples: 5, passive_monitor_samples: 4, active_probe_samples: 3,
-          enabled_target_count: 2, best_rate_multiplier: '0.08', models: ['gpt-4o-mini'],
-        }],
-      };
+          enabled_target_count: 1,
+        }, {
+          id: '8', supplier_id: '4', supplier_name: 'Provider B', name: 'main',
+          adapter_type: 'newapi', detected_adapter_type: 'newapi', base_url: 'https://provider-b.example',
+          auth_mode: 'password', credentials_ciphertext: 'encrypted', enabled: true,
+          inventory_interval_seconds: 600, quality_monitor_mode: 'hybrid',
+          balance_currency: 'USD', connection_status: 'ok',
+          key_count: 1, active_key_count: 1, failed_key_count: 0, open_alert_count: 0,
+          enabled_target_count: 1,
+        }] };
+      }
+      if (text.includes('FROM "finops".supplier_quality_observations')) {
+        assert.match(text, /NOW\(\)-INTERVAL '7 days'/);
+        return { rows: Array.from({ length: 200 }, (_, index) => ({
+          id: String(index + 1),
+          connection_id: index < 100 ? '7' : '8',
+          supplier_key_id: index < 100 ? '70' : '80',
+          source_kind: 'active_probe',
+          model: 'gpt-4o-mini',
+          group_name: '',
+          status: 'ok',
+          availability_sample: true,
+          http_status: 200,
+          ttft_ms: index < 100 ? 800 : 1200,
+          duration_ms: 1600,
+          ping_latency_ms: null,
+          rate_multiplier: index < 100 ? '0.08' : '0.16',
+          observed_at: observedAt,
+          metadata: {},
+        })) };
+      }
+      if (text.includes('SELECT id,connection_id,name,masked_key')) {
+        return { rows: [
+          { id: '70', connection_id: '7', name: 'key-a', masked_key: 'sk-a', group_name: 'default', status: 'active', removed_at: null, rate_multiplier: '0.08' },
+          { id: '80', connection_id: '8', name: 'key-b', masked_key: 'sk-b', group_name: 'default', status: 'active', removed_at: null, rate_multiplier: '0.16' },
+        ] };
+      }
+      if (text.includes('SELECT id,connection_id,supplier_key_id')) {
+        return { rows: [
+          { id: '1', connection_id: '7', supplier_key_id: '70', model: 'gpt-4o-mini', enabled: true, last_status: 'ok', last_probe_at: observedAt },
+          { id: '2', connection_id: '8', supplier_key_id: '80', model: 'gpt-4o-mini', enabled: true, last_status: 'ok', last_probe_at: observedAt },
+        ] };
+      }
+      if (text.includes('FROM "finops".fact_usage_events f')) {
+        return { rows: [
+          { connection_id: '7', supplier_key_id: '70', model: 'gpt-4o-mini', amount: '120' },
+          { connection_id: '8', supplier_key_id: '80', model: 'gpt-4o-mini', amount: '80' },
+        ] };
+      }
+      throw new Error(`unexpected query: ${text}`);
     },
   };
   const repository = new PostgresRepository(pool, config);
   const overview = await repository.listSupplierQualityOverview();
 
   assert.equal(overview.items[0].connection.id, 7);
-  assert.equal(overview.items[0].metrics.enabledTargetCount, 2);
+  assert.equal(overview.items[0].metrics.enabledTargetCount, 1);
   assert.equal(overview.items[0].score.priceScore, 100);
   assert.deepEqual(overview.items[0].models, ['gpt-4o-mini']);
+  assert.equal(overview.items[1].score.priceScore, 50);
+  assert.equal(overview.items[1].score.modelScores[0].keyScores[0].score.bestRateMultiplier, 0.08);
 });
 
 test('daily usage rollups bind timezone-safe date keys separately from exact cost windows', async () => {

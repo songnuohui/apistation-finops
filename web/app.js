@@ -30,7 +30,7 @@ const state = {
   supplierQualityMode: 'all',
   supplierQualityStatus: 'all',
   supplierQualityScoreScope: 'all',
-  supplierQualitySort: 'overallScore',
+  supplierQualitySort: 'riskAdjustedScore',
   supplierQualitySortDirection: 'desc',
   supplierDetail: null,
   runtimeRefreshTimer: null,
@@ -1879,12 +1879,36 @@ function supplierQualityMs(value) {
   return supplierNumber(value) ? `${Math.round(Number(value))} ms` : '--';
 }
 
+function supplierQualityDataStatus(value) {
+  const labels = {
+    ready: ['可推荐', 'good'],
+    unavailable: ['可用性不足', 'bad'],
+    not_recommended: ['连续失败', 'bad'],
+    data_expired: ['数据已过期', 'warning'],
+    insufficient_data: ['样本不足', 'warning'],
+  };
+  const [label, tone] = labels[value] || ['待采样', 'warning'];
+  return `<span class="supplier-score ${tone}">${label}</span>`;
+}
+
+function supplierQualityPrice(score) {
+  if (score.priceMultiplier === null || score.priceMultiplier === undefined) return '--';
+  const current = `${Number(score.priceMultiplier).toFixed(4)}x`;
+  if (Number(score.comparableSupplierCount || 0) < 2 || score.bestRateMultiplier === null || score.bestRateMultiplier === undefined) {
+    return `<span class="primary-text">${current}</span><div class="secondary-text">暂无同模型对比</div>`;
+  }
+  return `<span class="primary-text">${current}</span><div class="secondary-text">市场最低 ${Number(score.bestRateMultiplier).toFixed(4)}x · ${compact(score.comparableSupplierCount)} 家</div>`;
+}
+
 function supplierQualityTab(detail) {
   const quality = detail.quality || {};
   const score = quality.score || {};
   const metrics = quality.metrics || {};
   const targets = quality.targets || [];
   const observations = quality.observations || [];
+  const modelRows = (score.modelScores || []).flatMap((model) => (
+    (model.keyScores || []).map((key) => ({ model, key, score: key.score || {}, metrics: key.metrics || {} }))
+  ));
   const sourceLabel = {
     passive_usage: '被动用量',
     passive_monitor: '被动监控',
@@ -1896,14 +1920,32 @@ function supplierQualityTab(detail) {
       <button type="button" class="button primary" data-supplier-quality-add ${['active', 'hybrid'].includes(detail.connection.qualityMonitorMode) ? '' : 'disabled'}>${icon('plus')}添加主动目标</button>
     </div>
     <div class="detail-metrics supplier-quality-metrics">
-      ${metric('综合评分', score.overallScore === null || score.overallScore === undefined ? '--' : Number(score.overallScore).toFixed(1), `可信度 ${score.confidence === null || score.confidence === undefined ? '--' : `${Number(score.confidence).toFixed(1)}%`}`, Number(score.overallScore || 0) >= 80 ? 'good' : Number(score.overallScore || 0) >= 60 ? 'warn' : 'bad')}
+      ${metric('风险调整分', score.riskAdjustedScore === null || score.riskAdjustedScore === undefined ? '--' : Number(score.riskAdjustedScore).toFixed(1), `原始分 ${score.rawOverallScore === null || score.rawOverallScore === undefined ? '--' : Number(score.rawOverallScore).toFixed(1)}`, Number(score.riskAdjustedScore || 0) >= 80 ? 'good' : Number(score.riskAdjustedScore || 0) >= 60 ? 'warn' : 'bad')}
       ${metric('可用性', score.availabilityScore === null || score.availabilityScore === undefined ? '--' : `${Number(score.availabilityScore).toFixed(2)}%`, `${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)} 成功`, Number(score.availabilityScore || 0) >= 99 ? 'good' : 'warn')}
       ${metric('TTFT P50', supplierQualityMs(metrics.ttftP50Ms), `P95 ${supplierQualityMs(metrics.ttftP95Ms)}`, Number(metrics.ttftP50Ms || 0) <= 3000 ? 'good' : 'warn')}
       ${metric('稳定性', score.stabilityScore === null || score.stabilityScore === undefined ? '--' : Number(score.stabilityScore).toFixed(1), `${compact(metrics.failureCount || 0)} 次失败`, Number(score.stabilityScore || 0) >= 85 ? 'good' : 'warn')}
-      ${metric('价格评分', score.priceScore === null || score.priceScore === undefined ? '--' : Number(score.priceScore).toFixed(1), metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '暂无倍率样本' : `样本倍率 ${Number(metrics.rateMultiplier).toFixed(4)}x`)}
+      ${metric('价格评分', score.priceScore === null || score.priceScore === undefined ? '--' : Number(score.priceScore).toFixed(1), metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '暂无倍率样本' : `当前倍率 ${Number(metrics.rateMultiplier).toFixed(4)}x`)}
       ${metric('被动样本', compact((metrics.passiveUsageSamples || 0) + (metrics.passiveMonitorSamples || 0)), `用量 ${compact(metrics.passiveUsageSamples || 0)} · 监控 ${compact(metrics.passiveMonitorSamples || 0)}`)}
       ${metric('主动样本', compact(metrics.activeProbeSamples || 0), targets.length ? `${compact(targets.filter((item) => item.enabled).length)} 个启用目标` : '尚未配置目标')}
       ${metric('最近采样', metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--', `总样本 ${compact(metrics.sampleCount || 0)}`)}
+    </div>
+    <div class="supplier-quality-block">
+      <div class="panel-header"><div><h3>模型与密钥评分明细</h3><span>价格只在同一模型的不同供应商之间比较；风险调整分已计入样本量、新鲜度与来源可信度。</span></div></div>
+      ${modelRows.length ? table([
+        { label: '模型 / 密钥' }, { label: '风险分', right: true }, { label: '原始分', right: true },
+        { label: '价格倍率' }, { label: '可用性', right: true }, { label: 'TTFT' },
+        { label: '稳定性', right: true }, { label: '可信度', right: true }, { label: '数据状态' },
+      ], modelRows.map(({ model, key, score: itemScore, metrics: itemMetrics }) => [
+        `<span class="primary-text">${escapeHtml(model.model)}</span><div class="secondary-text">${escapeHtml(key.keyName || key.maskedKey || (key.keyId ? `密钥 #${key.keyId}` : '连接级样本'))}${key.groupName ? ` · ${escapeHtml(key.groupName)}` : ''} · 权重 ${supplierQualityScoreText(Number(model.weight || 0) * Number(key.weight || 0) * 100, '%')}</div>`,
+        `<span class="${supplierQualityScoreClass(itemScore.riskAdjustedScore)}">${supplierQualityScoreText(itemScore.riskAdjustedScore)}</span>`,
+        `<span class="${supplierQualityScoreClass(itemScore.rawOverallScore)}">${supplierQualityScoreText(itemScore.rawOverallScore)}</span>`,
+        supplierQualityPrice(itemScore),
+        `<span class="${supplierQualityScoreClass(itemScore.availabilityScore)}">${supplierQualityScoreText(itemScore.availabilityScore, '%')}</span><div class="secondary-text">${compact(itemMetrics.successSamples || 0)} / ${compact(itemMetrics.availabilitySamples || 0)}</div>`,
+        `<span class="primary-text">${supplierQualityMs(itemMetrics.ttftP50Ms)}</span><div class="secondary-text">P95 ${supplierQualityMs(itemMetrics.ttftP95Ms)}</div>`,
+        `<span class="${supplierQualityScoreClass(itemScore.stabilityScore)}">${supplierQualityScoreText(itemScore.stabilityScore)}</span>`,
+        supplierQualityScoreText(itemScore.confidence, '%'),
+        supplierQualityDataStatus(itemScore.dataStatus),
+      ]), 1320) : '<div class="empty"><strong>暂无可评分的模型</strong><p>添加主动探测目标或等待真实用量与被动监控样本进入后即可计算。</p></div>'}
     </div>
     <div class="supplier-quality-block">
       <div class="panel-header"><div><h3>主动探测目标</h3><span>每个目标固定绑定一个供应商密钥和模型，最大输出 Token 用于控制费用。</span></div></div>
@@ -2375,6 +2417,8 @@ function supplierQualitySortValue(item, key) {
   if (key === 'mode') return supplierQualityModeLabel(connection.qualityMonitorMode).toLowerCase();
   if (key === 'status') return String(connection.connectionStatus || '').toLowerCase();
   if (key === 'sampleCount') return Number(metrics.sampleCount || 0);
+  if (key === 'modelCount') return Number(metrics.modelCount || 0);
+  if (key === 'dataStatus') return String(score.dataStatus || '').toLowerCase();
   if (key === 'ttftP50Ms' || key === 'ttftP95Ms') return metrics[key] === null || metrics[key] === undefined ? null : Number(metrics[key]);
   if (key === 'lastObservedAt') return metrics.lastObservedAt ? new Date(metrics.lastObservedAt).getTime() : null;
   return score[key] === null || score[key] === undefined ? null : Number(score[key]);
@@ -2393,8 +2437,8 @@ function supplierQualityFilteredItems() {
     if (needle && !haystack.includes(needle)) return false;
     if (state.supplierQualityMode !== 'all' && connection.qualityMonitorMode !== state.supplierQualityMode) return false;
     if (state.supplierQualityStatus !== 'all' && connection.connectionStatus !== state.supplierQualityStatus) return false;
-    if (state.supplierQualityScoreScope === 'scored' && (score.overallScore === null || score.overallScore === undefined)) return false;
-    if (state.supplierQualityScoreScope === 'unscored' && score.overallScore !== null && score.overallScore !== undefined) return false;
+    if (state.supplierQualityScoreScope === 'scored' && (score.riskAdjustedScore === null || score.riskAdjustedScore === undefined)) return false;
+    if (state.supplierQualityScoreScope === 'unscored' && score.riskAdjustedScore !== null && score.riskAdjustedScore !== undefined) return false;
     return true;
   });
   const direction = state.supplierQualitySortDirection === 'asc' ? 1 : -1;
@@ -2448,13 +2492,16 @@ async function renderSupplierQuality({ reload = true } = {}) {
         supplierQualitySortHeader('供应商 / 连接', 'supplier'),
         supplierQualitySortHeader('系统 / 模式', 'adapter'),
         supplierQualitySortHeader('连接状态', 'status'),
-        supplierQualitySortHeader('综合评分', 'overallScore', true),
+        supplierQualitySortHeader('风险调整分', 'riskAdjustedScore', true),
+        supplierQualitySortHeader('原始分', 'rawOverallScore', true),
         supplierQualitySortHeader('价格', 'priceScore', true),
         supplierQualitySortHeader('可用性', 'availabilityScore', true),
         supplierQualitySortHeader('TTFT P50', 'ttftP50Ms', true),
         supplierQualitySortHeader('TTFT P95', 'ttftP95Ms', true),
         supplierQualitySortHeader('稳定性', 'stabilityScore', true),
         supplierQualitySortHeader('可信度', 'confidence', true),
+        supplierQualitySortHeader('模型覆盖', 'modelCount', true),
+        supplierQualitySortHeader('数据状态', 'dataStatus'),
         supplierQualitySortHeader('样本', 'sampleCount', true),
         supplierQualitySortHeader('最近采样', 'lastObservedAt'),
         { label: '操作' },
@@ -2467,18 +2514,21 @@ async function renderSupplierQuality({ reload = true } = {}) {
           `<button type="button" class="supplier-connection-link" data-supplier-quality-detail="${connection.id}"><span>${escapeHtml(connection.supplierName || '未命名供应商')}</span><small>${escapeHtml(connection.name || '默认连接')}</small></button><div class="secondary-text supplier-quality-models">${escapeHtml((item.models || []).join('、') || '暂无模型样本')}</div>`,
           `<span class="primary-text">${escapeHtml(supplierAdapterLabel(connection.detectedAdapterType || connection.adapterType))}</span><div class="secondary-text">${escapeHtml(supplierQualityModeLabel(connection.qualityMonitorMode))}</div>`,
           `${supplierState(connection.connectionStatus)}<div class="secondary-text">${escapeHtml(supplierConnectionStatusHint(connection))}</div>`,
-          `<span class="${supplierQualityScoreClass(score.overallScore)}">${supplierQualityScoreText(score.overallScore)}</span>`,
+          `<span class="${supplierQualityScoreClass(score.riskAdjustedScore)}">${supplierQualityScoreText(score.riskAdjustedScore)}</span>`,
+          `<span class="${supplierQualityScoreClass(score.rawOverallScore)}">${supplierQualityScoreText(score.rawOverallScore)}</span>`,
           `<span class="${supplierQualityScoreClass(score.priceScore)}">${supplierQualityScoreText(score.priceScore)}</span><div class="secondary-text">${metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '无倍率样本' : `${Number(metrics.rateMultiplier).toFixed(4)}x`}</div>`,
           `<span class="${supplierQualityScoreClass(score.availabilityScore)}">${supplierQualityScoreText(score.availabilityScore, '%')}</span><div class="secondary-text">${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)}</div>`,
           supplierQualityMs(metrics.ttftP50Ms),
           supplierQualityMs(metrics.ttftP95Ms),
           `<span class="${supplierQualityScoreClass(score.stabilityScore)}">${supplierQualityScoreText(score.stabilityScore)}</span><div class="secondary-text">${compact(metrics.failureCount || 0)} 次失败</div>`,
           `${supplierQualityScoreText(score.confidence, '%')}`,
+          `<span class="primary-text">${compact(metrics.modelsWithData || 0)} / ${compact(metrics.modelCount || 0)}</span><div class="secondary-text">${escapeHtml((item.models || []).join('、') || '暂无模型')}</div>`,
+          supplierQualityDataStatus(score.dataStatus),
           `<span class="primary-text">${compact(metrics.sampleCount || 0)}</span><div class="secondary-text">被动 ${compact(passiveSamples)} · 主动 ${compact(metrics.activeProbeSamples || 0)} · 目标 ${compact(metrics.enabledTargetCount || 0)}</div>`,
           metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--',
           `<button type="button" class="icon-button table-icon" title="查看连接与评分详情" data-supplier-quality-detail="${connection.id}">${icon('receipt-text')}</button>`,
         ];
-      }), 1650)}
+      }), 1920)}
       ${pager(data, 'supplierQuality', '个供应商连接')}
     </section>`;
 

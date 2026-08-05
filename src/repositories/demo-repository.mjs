@@ -1,5 +1,5 @@
 import { splitFixedCostCny } from '../services/cost-accounting.mjs';
-import { supplierQualityScore } from '../services/supplier-quality.mjs';
+import { buildSupplierQualityScores } from '../services/supplier-quality.mjs';
 
 function effectiveCostCny(costType, ignoredReferenceCost, purchaseAllocatedCostCny) {
   if (costType === 'free') return 0;
@@ -1123,52 +1123,54 @@ export class DemoRepository {
     return this.qualityTarget(target);
   }
 
-  async getSupplierQualityDashboard(connectionId) {
+  supplierQualityScores() {
     const cutoff = Date.now() - 7 * 86_400_000;
-    const observations = this.supplierQualityObservations.filter((item) => (
-      Number(item.connectionId) === Number(connectionId)
-      && new Date(item.observedAt).getTime() >= cutoff
+    const keys = this.supplierConnections.flatMap((connection) => (
+      this.supplierDetail(connection.id).keys.map((key) => ({
+        id: Number(key.id),
+        connectionId: Number(connection.id),
+        name: key.name || '',
+        maskedKey: key.maskedKey || '',
+        groupName: key.groupName || '',
+        status: key.status,
+        removedAt: key.removedAt || null,
+        rateMultiplier: key.rateMultiplier,
+      }))
     ));
-    const metrics = {
-      sampleCount: observations.length,
-      availabilitySamples: observations.filter((item) => item.availabilitySample).length,
-      successSamples: observations.filter((item) => item.availabilitySample && item.status === 'ok').length,
-      failureCount: observations.filter((item) => item.status === 'failed').length,
-      ttftP50Ms: observations.filter((item) => item.ttftMs !== null).map((item) => item.ttftMs).sort((a, b) => a - b)[Math.floor(observations.filter((item) => item.ttftMs !== null).length * 0.5)] || null,
-      ttftP95Ms: observations.filter((item) => item.ttftMs !== null).map((item) => item.ttftMs).sort((a, b) => a - b)[Math.max(0, Math.ceil(observations.filter((item) => item.ttftMs !== null).length * 0.95) - 1)] || null,
-      rateMultiplier: observations.find((item) => item.rateMultiplier !== null)?.rateMultiplier ?? null,
-      lastObservedAt: observations[0]?.observedAt || null,
-      passiveUsageSamples: observations.filter((item) => item.sourceKind === 'passive_usage').length,
-      passiveMonitorSamples: observations.filter((item) => item.sourceKind === 'passive_monitor').length,
-      activeProbeSamples: observations.filter((item) => item.sourceKind === 'active_probe').length,
-    };
-    const activeRates = this.supplierDetail(connectionId).keys.filter((item) => item.status === 'active' && item.rateMultiplier > 0).map((item) => item.rateMultiplier);
+    return buildSupplierQualityScores({
+      connections: this.supplierConnections.map((connection) => copySupplierConnection(connection)),
+      observations: this.supplierQualityObservations.filter((item) => new Date(item.observedAt).getTime() >= cutoff),
+      keys,
+      targets: this.supplierQualityTargets,
+      usageWeights: [],
+    }).map((item) => ({
+      ...item,
+      metrics: {
+        ...item.metrics,
+        enabledTargetCount: this.supplierQualityTargets.filter((target) => (
+          Number(target.connectionId) === Number(item.connection.id) && target.enabled
+        )).length,
+      },
+    }));
+  }
+
+  async getSupplierQualityDashboard(connectionId) {
+    const dashboard = this.supplierQualityScores()
+      .find((item) => Number(item.connection.id) === Number(connectionId));
+    if (!dashboard) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    const observations = this.supplierQualityObservations
+      .filter((item) => Number(item.connectionId) === Number(connectionId))
+      .sort((left, right) => new Date(right.observedAt).getTime() - new Date(left.observedAt).getTime());
     return {
-      score: supplierQualityScore(metrics, { bestRateMultiplier: activeRates.length ? Math.min(...activeRates) : null }),
-      metrics,
+      score: dashboard.score,
+      metrics: dashboard.metrics,
+      models: dashboard.models,
       observations: observations.slice(0, 100).map((item) => this.qualityObservation(item)),
     };
   }
 
   async listSupplierQualityOverview() {
-    const items = await Promise.all(this.supplierConnections.map(async (connection) => {
-      const dashboard = await this.getSupplierQualityDashboard(connection.id);
-      const targets = this.supplierQualityTargets.filter((item) => Number(item.connectionId) === Number(connection.id));
-      const models = [...new Set(dashboard.observations
-        .filter((item) => item.model)
-        .map((item) => item.model))]
-        .sort((left, right) => left.localeCompare(right));
-      return {
-        connection: copySupplierConnection(connection),
-        score: dashboard.score,
-        metrics: {
-          ...dashboard.metrics,
-          enabledTargetCount: targets.filter((item) => item.enabled).length,
-        },
-        models,
-      };
-    }));
-    return { items };
+    return { items: this.supplierQualityScores() };
   }
 
   async runSupplierQualityTarget(targetId) {
