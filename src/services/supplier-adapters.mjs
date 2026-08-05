@@ -484,13 +484,34 @@ export class SupplierHttpClient {
         }
         if (!response) throw lastError || new SupplierAdapterError('timeout', 'supplier request timed out');
       }
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location') || '';
+        let redirectOrigin = '';
+        try {
+          redirectOrigin = new URL(location, endpoint(baseUrl, pathname)).origin;
+        } catch {
+          redirectOrigin = '';
+        }
+        throw new SupplierAdapterError(
+          'supplier_redirect',
+          redirectOrigin && redirectOrigin !== new URL(baseUrl).origin
+            ? `${stage}: supplier moved this API to ${redirectOrigin}; update the supplier connection address`
+            : `${stage}: supplier returned HTTP ${response.status} redirect; update the supplier connection address`,
+          { statusCode: 422, httpStatus: response.status },
+        );
+      }
       let payload = null;
       if (raw.length) {
         try {
           payload = JSON.parse(raw.toString('utf8'));
         } catch {
           if (!response.ok || !allowError) {
-            throw new SupplierAdapterError('invalid_json', 'supplier response is not JSON', { httpStatus: response.status });
+            const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim();
+            throw new SupplierAdapterError(
+              'invalid_json',
+              `${stage}: supplier returned ${contentType || 'a non-JSON response'} with HTTP ${response.status}`,
+              { httpStatus: response.status },
+            );
           }
         }
       }

@@ -54,6 +54,56 @@ test('pinned HTTPS requests connect directly to the validated address while pres
   assert.equal('lookup' in options, false);
 });
 
+test('supplier redirects identify the migrated host without forwarding credentials', async () => {
+  let request;
+  const client = new SupplierHttpClient(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      request = { url, redirect: options.redirect, authorization: options.headers.Authorization };
+      return new Response('<html>moved</html>', {
+        status: 301,
+        headers: {
+          location: 'https://new-supplier.example.test/api/v1/auth/me',
+          'content-type': 'text/html',
+        },
+      });
+    },
+  });
+
+  await assert.rejects(
+    client.request('https://supplier.example.test', '/api/v1/auth/me', { token: 'portal-token' }),
+    (error) => error instanceof SupplierAdapterError
+      && error.code === 'supplier_redirect'
+      && error.statusCode === 422
+      && error.httpStatus === 301
+      && /GET \/api\/v1\/auth\/me/.test(error.message)
+      && /https:\/\/new-supplier\.example\.test/.test(error.message),
+  );
+  assert.deepEqual(request, {
+    url: 'https://supplier.example.test/api/v1/auth/me',
+    redirect: 'error',
+    authorization: 'Bearer portal-token',
+  });
+});
+
+test('non-JSON supplier errors include the request stage and response type', async () => {
+  const client = new SupplierHttpClient(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async () => new Response('<html>gateway error</html>', {
+      status: 502,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  });
+
+  await assert.rejects(
+    client.request('https://supplier.example.test', '/api/v1/groups/rates'),
+    (error) => error instanceof SupplierAdapterError
+      && error.code === 'invalid_json'
+      && error.httpStatus === 502
+      && error.message === 'GET /api/v1/groups/rates: supplier returned text/html with HTTP 502',
+  );
+});
+
 test('Sub2API adapter supports password plus TOTP and probes only the documented billing read endpoint', async () => {
   const requests = [];
   const registry = new SupplierAdapterRegistry(config, {
