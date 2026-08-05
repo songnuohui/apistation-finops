@@ -137,3 +137,13 @@ test('recent usage weights models while preventing one model from dominating mul
   assert.equal(weights.get('b'), 0.3);
   assert.equal(weights.get('c'), 0.3);
 });
+
+test('connections without models or observations remain explicitly unscored', () => {
+  const [result] = buildSupplierQualityScores({
+    now: now.getTime(),
+    connections: [{ id: 1 }],
+  });
+  assert.equal(result.score.riskAdjustedScore, null);
+  assert.equal(result.score.dataStatus, 'insufficient_data');
+  assert.equal(result.metrics.modelCount, 0);
+});

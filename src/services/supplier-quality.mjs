@@ -259,20 +259,34 @@ function weightedField(items, field) {
 }
 
 function aggregateScores(items) {
+  if (!items.length) {
+    return {
+      overallScore: null,
+      riskAdjustedScore: null,
+      rawOverallScore: null,
+      priceScore: null,
+      availabilityScore: null,
+      latencyScore: null,
+      stabilityScore: null,
+      confidence: null,
+      dataStatus: 'insufficient_data',
+    };
+  }
   const statuses = [...new Set(items.map((item) => item.score.dataStatus))];
+  const availabilityScore = weightedField(items, 'availabilityScore');
   return {
     overallScore: weightedField(items, 'riskAdjustedScore'),
     riskAdjustedScore: weightedField(items, 'riskAdjustedScore'),
     rawOverallScore: weightedField(items, 'rawOverallScore'),
     priceScore: weightedField(items, 'priceScore'),
-    availabilityScore: weightedField(items, 'availabilityScore'),
+    availabilityScore,
     latencyScore: weightedField(items, 'latencyScore'),
     stabilityScore: weightedField(items, 'stabilityScore'),
     confidence: weightedField(items, 'confidence'),
     dataStatus: statuses.includes('not_recommended') ? 'not_recommended'
-      : statuses.includes('data_expired') ? 'data_expired'
-        : statuses.includes('insufficient_data') ? 'insufficient_data'
-          : statuses.includes('unavailable') ? 'unavailable' : 'ready',
+      : statuses.every((status) => status === 'insufficient_data') ? 'insufficient_data'
+        : statuses.every((status) => ['data_expired', 'insufficient_data'].includes(status)) ? 'data_expired'
+          : availabilityScore !== null && availabilityScore < 90 ? 'unavailable' : 'ready',
   };
 }
 
