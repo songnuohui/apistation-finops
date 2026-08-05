@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#ffffff">
   <title>ApiStation FinOps</title>
-  <link rel="stylesheet" href="/styles.css?v=0.1.5">
+  <link rel="stylesheet" href="/styles.css?v=0.1.6">
 </head>
 <body>
   <div class="shell">
@@ -25,12 +25,8 @@
         <section class="nav-group" aria-labelledby="nav-cost">
           <h2 class="nav-group-label" id="nav-cost">资源与成本</h2>
           <button class="nav-item" data-page="accounts"><img src="/icons/landmark.svg" alt="">账号台账与成本</button>
-          <button class="nav-item" data-page="suppliers"><img src="/icons/server-cog.svg" alt="">供应商与采购</button>
-          <button class="nav-item" data-page="costs"><img src="/icons/tags.svg" alt="">成本核算</button>
-        </section>
-        <section class="nav-group" aria-labelledby="nav-system">
-          <h2 class="nav-group-label" id="nav-system">系统治理</h2>
-          <button class="nav-item" data-page="runtime"><img src="/icons/activity.svg" alt="">并发与排队</button>
+          <button class="nav-item" data-page="suppliers"><img src="/icons/server-cog.svg" alt="">供应商连接</button>
+          <button class="nav-item" data-page="supplier-quality"><img src="/icons/shield-check.svg" alt="">供应商评分</button>
         </section>
       </nav>
       <div class="sidebar-footer">
@@ -79,7 +75,7 @@
     </section>
   </div>
   <div class="toast" id="toast" hidden></div>
-  <script type="module" src="/app.js?v=0.1.5"></script>
+  <script type="module" src="/app.js?v=0.1.7"></script>
   <script type="module" src="/session.js?v=0.2.0"></script>
 </body>
 </html>

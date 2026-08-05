@@ -3378,6 +3378,103 @@ export class PostgresRepository {
     };
   }
 
+  async listSupplierQualityOverview() {
+    const result = await this.pool.query(`
+      WITH quality AS (
+        SELECT connection_id,
+               COUNT(*)::int AS sample_count,
+               COUNT(*) FILTER (WHERE availability_sample)::int AS availability_samples,
+               COUNT(*) FILTER (WHERE availability_sample AND status='ok')::int AS success_samples,
+               COUNT(*) FILTER (WHERE status='failed')::int AS failure_count,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms)
+                 FILTER (WHERE ttft_ms IS NOT NULL) AS ttft_p50_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms)
+                 FILTER (WHERE ttft_ms IS NOT NULL) AS ttft_p95_ms,
+               AVG(rate_multiplier) FILTER (WHERE rate_multiplier IS NOT NULL AND rate_multiplier>0) AS rate_multiplier,
+               MAX(observed_at) AS last_observed_at,
+               COUNT(*) FILTER (WHERE source_kind='passive_usage')::int AS passive_usage_samples,
+               COUNT(*) FILTER (WHERE source_kind='passive_monitor')::int AS passive_monitor_samples,
+               COUNT(*) FILTER (WHERE source_kind='active_probe')::int AS active_probe_samples,
+               ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(model,'')),NULL) AS models
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE observed_at>=NOW()-INTERVAL '7 days'
+        GROUP BY connection_id
+      ),
+      keys AS (
+        SELECT connection_id,
+               COUNT(*) FILTER (WHERE removed_at IS NULL)::int AS key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND status='active')::int AS active_key_count,
+               COUNT(*) FILTER (WHERE removed_at IS NULL AND last_check_status='failed')::int AS failed_key_count,
+               MIN(rate_multiplier) FILTER (
+                 WHERE removed_at IS NULL AND status='active' AND rate_multiplier IS NOT NULL AND rate_multiplier>0
+               ) AS best_rate_multiplier
+        FROM ${this.schema}.supplier_keys
+        GROUP BY connection_id
+      ),
+      alerts AS (
+        SELECT connection_id,COUNT(*) FILTER (WHERE status='open')::int AS open_alert_count
+        FROM ${this.schema}.supplier_alert_events
+        GROUP BY connection_id
+      ),
+      targets AS (
+        SELECT connection_id,COUNT(*) FILTER (WHERE enabled)::int AS enabled_target_count
+        FROM ${this.schema}.supplier_quality_targets
+        GROUP BY connection_id
+      )
+      SELECT c.*,s.name AS supplier_name,b.balance,
+             COALESCE(keys.key_count,0)::int AS key_count,
+             COALESCE(keys.active_key_count,0)::int AS active_key_count,
+             COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
+             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count,
+             COALESCE(quality.sample_count,0)::int AS sample_count,
+             COALESCE(quality.availability_samples,0)::int AS availability_samples,
+             COALESCE(quality.success_samples,0)::int AS success_samples,
+             COALESCE(quality.failure_count,0)::int AS failure_count,
+             quality.ttft_p50_ms,quality.ttft_p95_ms,quality.rate_multiplier,
+             quality.last_observed_at,
+             COALESCE(quality.passive_usage_samples,0)::int AS passive_usage_samples,
+             COALESCE(quality.passive_monitor_samples,0)::int AS passive_monitor_samples,
+             COALESCE(quality.active_probe_samples,0)::int AS active_probe_samples,
+             COALESCE(quality.models,ARRAY[]::text[]) AS models,
+             keys.best_rate_multiplier,
+             COALESCE(targets.enabled_target_count,0)::int AS enabled_target_count
+      FROM ${this.schema}.supplier_connections c
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN LATERAL (
+        SELECT balance FROM ${this.schema}.supplier_balance_snapshots
+        WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
+      ) b ON TRUE
+      LEFT JOIN keys ON keys.connection_id=c.id
+      LEFT JOIN alerts ON alerts.connection_id=c.id
+      LEFT JOIN quality ON quality.connection_id=c.id
+      LEFT JOIN targets ON targets.connection_id=c.id
+      ORDER BY s.name,c.name`);
+    return {
+      items: result.rows.map((row) => {
+        const metrics = {
+          sampleCount: Number(row.sample_count || 0),
+          availabilitySamples: Number(row.availability_samples || 0),
+          successSamples: Number(row.success_samples || 0),
+          failureCount: Number(row.failure_count || 0),
+          ttftP50Ms: nullableNumber(row.ttft_p50_ms),
+          ttftP95Ms: nullableNumber(row.ttft_p95_ms),
+          rateMultiplier: nullableNumber(row.rate_multiplier),
+          lastObservedAt: row.last_observed_at || null,
+          passiveUsageSamples: Number(row.passive_usage_samples || 0),
+          passiveMonitorSamples: Number(row.passive_monitor_samples || 0),
+          activeProbeSamples: Number(row.active_probe_samples || 0),
+          enabledTargetCount: Number(row.enabled_target_count || 0),
+        };
+        return {
+          connection: supplierConnection(row),
+          score: supplierQualityScore(metrics, { bestRateMultiplier: nullableNumber(row.best_rate_multiplier) }),
+          metrics,
+          models: Array.isArray(row.models) ? [...row.models].sort((left, right) => left.localeCompare(right)) : [],
+        };
+      }),
+    };
+  }
+
   async recordSupplierSyncFailure(connectionId, error) {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`

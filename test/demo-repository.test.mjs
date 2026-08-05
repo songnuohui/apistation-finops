@@ -209,6 +209,18 @@ test('demo supplier connections support create, edit, sync, account links, and a
   assert.equal((await repository.getSupplierConnectionDetails(1)).connection.openAlertCount, 0);
 });
 
+test('supplier quality overview exposes connection scores, samples, models, and targets', async () => {
+  const repository = new DemoRepository(config);
+  const overview = await repository.listSupplierQualityOverview();
+
+  assert.equal(overview.items.length, 1);
+  assert.equal(overview.items[0].connection.supplierName, 'Cloud Seats');
+  assert.ok(overview.items[0].score.overallScore > 0);
+  assert.equal(overview.items[0].metrics.sampleCount, 3);
+  assert.equal(overview.items[0].metrics.enabledTargetCount, 1);
+  assert.deepEqual(overview.items[0].models, ['gpt-4o-mini']);
+});
+
 test('sync details expose source-level health without errors', async () => {
   const repository = new DemoRepository(config);
   const details = await repository.getSyncDetails();

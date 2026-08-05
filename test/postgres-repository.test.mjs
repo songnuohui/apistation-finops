@@ -38,6 +38,37 @@ test('fixed allocation strategies are rendered as SQL string literals', () => {
   assert.match(token, /COALESCE\('token_weight', 'standard_cost_weight'\)/);
 });
 
+test('supplier quality overview maps aggregate metrics and scores for every connection', async () => {
+  const pool = {
+    async query(text) {
+      assert.match(text, /supplier_quality_observations/);
+      assert.match(text, /NOW\(\)-INTERVAL '7 days'/);
+      return {
+        rows: [{
+          id: '7', supplier_id: '3', supplier_name: 'Provider A', name: 'main',
+          adapter_type: 'sub2api', detected_adapter_type: 'sub2api', base_url: 'https://provider.example',
+          auth_mode: 'password', credentials_ciphertext: 'encrypted', enabled: true,
+          inventory_interval_seconds: 600, quality_monitor_mode: 'hybrid',
+          balance_currency: 'USD', connection_status: 'ok',
+          key_count: 2, active_key_count: 2, failed_key_count: 0, open_alert_count: 0,
+          sample_count: 12, availability_samples: 10, success_samples: 9, failure_count: 1,
+          ttft_p50_ms: '800', ttft_p95_ms: '1400', rate_multiplier: '0.08',
+          last_observed_at: '2026-08-05T08:00:00.000Z',
+          passive_usage_samples: 5, passive_monitor_samples: 4, active_probe_samples: 3,
+          enabled_target_count: 2, best_rate_multiplier: '0.08', models: ['gpt-4o-mini'],
+        }],
+      };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const overview = await repository.listSupplierQualityOverview();
+
+  assert.equal(overview.items[0].connection.id, 7);
+  assert.equal(overview.items[0].metrics.enabledTargetCount, 2);
+  assert.equal(overview.items[0].score.priceScore, 100);
+  assert.deepEqual(overview.items[0].models, ['gpt-4o-mini']);
+});
+
 test('daily usage rollups bind timezone-safe date keys separately from exact cost windows', async () => {
   const queries = [];
   const pool = {

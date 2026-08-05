@@ -25,6 +25,13 @@ const state = {
   whitelistManager: null,
   supplierSearch: '',
   supplierConnectionItems: new Map(),
+  supplierQualityItems: [],
+  supplierQualitySearch: '',
+  supplierQualityMode: 'all',
+  supplierQualityStatus: 'all',
+  supplierQualityScoreScope: 'all',
+  supplierQualitySort: 'overallScore',
+  supplierQualitySortDirection: 'desc',
   supplierDetail: null,
   runtimeRefreshTimer: null,
 };
@@ -37,9 +44,8 @@ const pageMeta = {
   users: ['用户账务与利润', '充值、人工调账、实际消费和用户贡献'],
   accounts: ['账号台账与成本', '账号采购、成本归属、实际消费与毛利'],
   usage: ['用量与扣费', '按模型汇总或逐请求核查实际扣费、成本快照与计价来源'],
-  suppliers: ['供应商与采购', '上游资源、采购批次与经营毛利'],
-  costs: ['成本核算', '成本模板、生效期间和分摊方法'],
-  runtime: ['并发与排队', '只读展示 Sub2API 当前并发、工作线程和排队负载'],
+  suppliers: ['供应商连接', '读取上游余额、密钥库存、巡检和告警'],
+  'supplier-quality': ['供应商评分', '按最近 7 天价格、可用性、首字延迟和稳定性评估上游质量'],
 };
 
 const content = document.querySelector('#content');
@@ -1653,7 +1659,7 @@ function supplierConnectionFormMarkup(connection = null) {
   const configuredAuthMode = connection?.authMode;
   const authMode = authOptions.some(([mode]) => mode === configuredAuthMode) ? configuredAuthMode : authOptions[0][0];
   const requiresCredentialReplacement = editing && configuredAuthMode && configuredAuthMode !== authMode;
-  return `<div class="supplier-form-note">供应商连接仅供 FinOps 读取上游门户的库存、余额和密钥巡检；采购金额与成本期在下方的采购核算中单独登记。</div>
+  return `<div class="supplier-form-note">供应商连接仅供 FinOps 读取上游门户的库存、余额、质量样本和密钥巡检；不会修改供应商或 Sub2API 数据。</div>
     <div class="supplier-connection-form">
       <label class="field"><span>供应商名称</span><input name="supplierName" required value="${value('supplierName')}"></label>
       <label class="field"><span>连接名称</span><input name="name" required value="${value('name', '主账号')}"></label>
@@ -1793,7 +1799,6 @@ function supplierDetailTabs(detail) {
     ['balances', '余额历史', (detail.balances || []).length],
     ['checks', '巡检记录', (detail.checks || []).length],
     ['alerts', '告警', openAlerts],
-    ['purchases', '采购批次', (detail.purchases || []).length],
   ];
   return `<div class="supplier-detail-tabs" role="tablist" aria-label="供应商连接详情">${tabs.map(([name, label, count]) => (
     `<button type="button" role="tab" data-supplier-detail-tab="${name}" class="${state.supplierDetail?.tab === name ? 'active' : ''}" aria-selected="${state.supplierDetail?.tab === name}">${label}<small>${compact(count)}</small></button>`
@@ -1870,26 +1875,8 @@ function supplierAlertsTab(detail) {
   </section>`;
 }
 
-function supplierPurchasesTab(detail) {
-  const purchases = detail.purchases || [];
-  return `<section class="detail-section supplier-detail-section">
-    <div class="detail-section-header">
-      <div><h3>采购批次</h3><span>采购金额、生效期和分摊独立于供应商门户连接；请以实际采购单据登记人民币成本。</span></div>
-      <button type="button" class="button primary" data-supplier-detail-cost>${icon('plus')}登记采购成本</button>
-    </div>
-    ${table([
-      { label: '账号' }, { label: '采购批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
-    ], purchases.map((item) => [
-      `<span class="primary-text">${escapeHtml(item.accountName || `账号 #${item.accountId}`)}</span><div class="secondary-text">#${escapeHtml(item.accountId)}</div>`,
-      `<span class="primary-text">${escapeHtml(item.purchaseBatch || '未标注批次')}</span><div class="secondary-text">${escapeHtml(item.supplier || detail.connection.supplierName)}</div>`,
-      `<span class="tag neutral">${escapeHtml(item.costProfile || '未绑定模板')}</span>`, cny(item.totalCost),
-      `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
-    ]), 920)}
-  </section>`;
-}
-
 function supplierQualityMs(value) {
-  return supplierNumber(value) === null ? '--' : `${Math.round(Number(value))} ms`;
+  return supplierNumber(value) ? `${Math.round(Number(value))} ms` : '--';
 }
 
 function supplierQualityTab(detail) {
@@ -2010,7 +1997,6 @@ function supplierDetailContent(detail) {
     case 'balances': return supplierBalancesTab(detail);
     case 'checks': return supplierChecksTab(detail);
     case 'alerts': return supplierAlertsTab(detail);
-    case 'purchases': return supplierPurchasesTab(detail);
     default: return supplierKeysTab(detail);
   }
 }
@@ -2050,7 +2036,6 @@ function renderSupplierConnectionDetails(detail) {
     const linkPicker = event.target.closest('[data-supplier-key-link-picker]');
     const unlink = event.target.closest('[data-supplier-key-unlink]');
     const acknowledge = event.target.closest('[data-supplier-alert-ack]');
-    const cost = event.target.closest('[data-supplier-detail-cost]');
     const qualityAdd = event.target.closest('[data-supplier-quality-add]');
     const qualityEdit = event.target.closest('[data-supplier-quality-edit]');
     const qualityRun = event.target.closest('[data-supplier-quality-run]');
@@ -2144,7 +2129,6 @@ function renderSupplierConnectionDetails(detail) {
       }
       return;
     }
-    if (cost) openSupplierPurchaseCostModal(detail);
   };
 }
 
@@ -2224,13 +2208,8 @@ async function loadSupplierConnectionDetails(connectionId) {
       api(`/supplier-connections/${connectionId}/details`, { range: false }),
       api(`/supplier-connections/${connectionId}/quality`, { range: false }),
     ]);
-    const overview = await api(`/suppliers?search=${encodeURIComponent(detail.connection.supplierName || '')}`);
-    const supplierName = String(detail.connection.supplierName || '').trim().toLowerCase();
-    const purchases = (overview.purchases || []).filter((item) => (
-      String(item.supplier || '').trim().toLowerCase() === supplierName
-    ));
     if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
-    renderSupplierConnectionDetails({ ...detail, quality, purchases });
+    renderSupplierConnectionDetails({ ...detail, quality });
   } catch (error) {
     if (!state.supplierDetail || state.supplierDetail.id !== Number(connectionId)) return;
     const currentForm = document.querySelector('#modal-form');
@@ -2245,46 +2224,15 @@ function openSupplierConnectionDetails(connectionId) {
   loadSupplierConnectionDetails(Number(connectionId));
 }
 
-async function openSupplierPurchaseCostModal(detail) {
-  try {
-    const [profiles, catalog] = await Promise.all([
-      api('/cost-profiles', { range: false }),
-      loadPurchaseCatalog(),
-    ]);
-    const accounts = (detail.accounts || []).filter((item) => item.status === 'active');
-    if (!accounts.length) return toast('没有可登记采购成本的本地账号');
-    const picker = {
-      options: accounts.map((item) => [item.id, `${item.name} · ${item.platform || '--'}`]),
-      value: accounts[0].id,
-      supplier: detail.connection.supplierName,
-    };
-    openModal(`登记采购成本 · ${detail.connection.supplierName}`, costFields(profiles, picker, { includeAccount: true, catalog }), (data) => api('/account-cost-periods', {
-      method: 'POST', range: false, body: JSON.stringify(normalizeCostPayload(data)),
-    }));
-    bindPurchaseCatalogForm(document.querySelector('#modal-form'), catalog);
-    document.querySelector('#form-cancel').onclick = () => renderSupplierConnectionDetails(detail);
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
 async function renderSuppliers(search = state.supplierSearch) {
   state.supplierSearch = search;
-  const [source, connectionSource, profiles, accountData] = await Promise.all([
-    api(`/suppliers?search=${encodeURIComponent(search)}`),
-    api(`/supplier-connections?search=${encodeURIComponent(search)}`, { range: false }),
-    api('/cost-profiles', { range: false }),
-    api(`/accounts?${queryFor('supplierAccounts', search)}`),
-  ]);
+  const connectionSource = await api(`/supplier-connections?search=${encodeURIComponent(search)}`, { range: false });
   const connections = localPage(connectionSource.items || [], 'supplierConnections');
-  const suppliers = localPage(source.items || [], 'suppliersList');
-  const purchases = localPage(source.purchases || [], 'purchasesList');
-  const summary = source.summary || {};
   state.supplierConnectionItems = new Map((connectionSource.items || []).map((item) => [String(item.id), item]));
   state.lastExport = connections.items;
   content.innerHTML = `${section('供应商连接', '通过 FinOps 读取供应商门户的余额、密钥库存、巡检和告警；不等同于采购成本记录')}
-    <section class="table-panel supplier-connection-panel">${searchTools('搜索供应商、连接、站点或采购批次', `<button type="button" class="button primary" id="supplier-connection-create">${icon('plus')}新建连接</button>`, search)}
-      <div class="supplier-connection-note">连接凭据仅加密保存在 FinOps。同步和巡检均为读取操作，采购金额、生效期与成本分摊请在下方单独登记。</div>
+    <section class="table-panel supplier-connection-panel">${searchTools('搜索供应商、连接或站点', `<button type="button" class="button primary" id="supplier-connection-create">${icon('plus')}新建连接</button>`, search)}
+      <div class="supplier-connection-note">连接凭据仅加密保存在 FinOps。同步和巡检均为读取操作，不会修改供应商或 Sub2API。</div>
       ${table([
         { label: '供应商连接' }, { label: '连接状态' }, { label: '余额' }, { label: '密钥 / 异常' }, { label: '告警' }, { label: '最近同步' }, { label: '操作' },
       ], connections.items.map((item) => [
@@ -2295,34 +2243,7 @@ async function renderSuppliers(search = state.supplierSearch) {
         item.openAlertCount ? `<span class="supplier-alert-count">${compact(item.openAlertCount)} 待处理</span><div class="secondary-text">请查看告警详情</div>` : '<span class="secondary-text">没有开放告警</span>',
         `<span class="primary-text">${item.lastSuccessAt ? escapeHtml(dateTime(item.lastSuccessAt)) : '--'}</span><div class="secondary-text">${item.nextSyncAt ? `下次 ${escapeHtml(dateTime(item.nextSyncAt))}` : item.enabled ? '等待排程' : '连接已停用'}</div>`,
         `<div class="table-actions supplier-row-actions"><button type="button" class="icon-button table-icon" title="查看连接详情" data-supplier-connection-detail="${item.id}">${icon('receipt-text')}</button><button type="button" class="icon-button table-icon" title="编辑连接" data-supplier-connection-edit="${item.id}">${icon('settings-2')}</button><button type="button" class="icon-button table-icon" title="立即同步" data-supplier-connection-sync="${item.id}" ${!item.enabled ? 'disabled' : ''}>${icon('refresh-cw')}</button></div>`,
-      ]), 1330)}${pager(connections, 'supplierConnections', '个供应商连接')}
-    </section>
-    ${section('采购成本核算', '采购批次和成本期独立于供应商连接，按实际人民币采购金额、税费和生效期核算')}
-    <div class="metric-grid">
-      ${metric('供应商', compact(summary.supplierCount), '按采购成本归集')}
-      ${metric('关联账号', compact(summary.accountCount), '已归集到采购口径')}
-      ${metric('期间采购', cny(summary.purchaseSpend), '含手续费与税费', 'warn')}
-      ${metric('经营毛利', cny(summary.grossProfit), '实际消费减已登记成本', Number(summary.grossProfit) >= 0 ? 'good' : 'bad')}
-      ${metric('待补成本账号', compact(summary.unbookedAccountCount), '有用量但无成本期间', Number(summary.unbookedAccountCount) ? 'warn' : 'good')}
-    </div>
-    <section class="table-panel"><div class="table-tools supplier-procurement-tools"><span class="supplier-filter-note">采购核算沿用上方搜索条件</span><div class="table-actions"><button type="button" class="button primary" id="supplier-cost-button">${icon('plus')}登记采购成本</button></div></div>${
-      table([
-        { label: '供应商' }, { label: '平台' }, { label: '账号', right: true }, { label: '实际消费 CNY', right: true },
-        { label: '采购分摊 CNY', right: true }, { label: '已登记成本 CNY', right: true }, { label: '经营毛利 CNY', right: true }, { label: '成本覆盖' },
-      ], suppliers.items.map((item) => [
-        `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${item.missingRuleCount ? `${item.missingRuleCount} 个账号缺成本规则` : '成本规则完整'}</div>`,
-        tags(item.platforms), compact(item.accountCount), cny(item.userChargeCny), cny(item.purchaseAllocatedCostCny), cny(item.bookedCostCny),
-        `<span class="${profitClass(item.bookedProfitCny)}">${cny(item.bookedProfitCny)}</span>`, costCoverage(item),
-      ]), 1080)
-    }${pager(suppliers, 'suppliersList', '个供应商')}</section>
-    <section class="table-panel supplier-purchase-panel"><div class="panel-header"><div><h2>采购批次</h2><span>账号采购成本、生效期和供应商归属</span></div></div>${table([
-      { label: '账号' }, { label: '供应商 / 批次' }, { label: '成本模板' }, { label: '含税费 CNY', right: true }, { label: '生效期' }, { label: '状态' },
-    ], purchases.items.map((item) => [
-      `<span class="primary-text">${escapeHtml(item.accountName)}</span><div class="secondary-text">#${item.accountId}</div>`,
-      `<span class="primary-text">${escapeHtml(item.supplier)}</span><div class="secondary-text">${escapeHtml(item.purchaseBatch)}</div>`,
-      `<span class="tag neutral">${escapeHtml(item.costProfile)}</span>`, cny(item.totalCost),
-      `${dateOnly(item.effectiveFrom)} - ${dateOnly(item.effectiveTo)}`, supplierState(item.status, item.status === 'active' ? '生效' : item.status),
-    ]), 920)}${pager(purchases, 'purchasesList', '个采购批次')}</section>`;
+      ]), 1330)}${pager(connections, 'supplierConnections', '个供应商连接')}</section>`;
   bindSearch(renderSuppliers);
   document.querySelector('#supplier-connection-create')?.addEventListener('click', () => openSupplierConnectionModal());
   document.querySelectorAll('[data-supplier-connection-detail]').forEach((button) => {
@@ -2349,8 +2270,179 @@ async function renderSuppliers(search = state.supplierSearch) {
       }
     });
   });
-  document.querySelector('#supplier-cost-button')?.addEventListener('click', () => {
-    openSingleCostModal(accountData.items, profiles).catch((error) => toast(error.message));
+}
+
+function supplierQualitySortHeader(label, key, right = false) {
+  const active = state.supplierQualitySort === key;
+  const direction = active ? state.supplierQualitySortDirection : '';
+  const indicator = direction === 'asc' ? '↑' : direction === 'desc' ? '↓' : '↕';
+  return {
+    right,
+    label: `<button type="button" class="sort-button ${active ? 'active' : ''}" data-supplier-quality-sort="${key}" aria-label="按${label}排序">${label}<span>${indicator}</span></button>`,
+  };
+}
+
+function supplierQualityScoreText(value, suffix = '') {
+  return value === null || value === undefined ? '--' : `${Number(value).toFixed(1)}${suffix}`;
+}
+
+function supplierQualityScoreClass(value) {
+  if (value === null || value === undefined) return 'supplier-score unscored';
+  if (Number(value) >= 85) return 'supplier-score good';
+  if (Number(value) >= 65) return 'supplier-score warning';
+  return 'supplier-score bad';
+}
+
+function supplierQualitySortValue(item, key) {
+  const connection = item.connection || {};
+  const score = item.score || {};
+  const metrics = item.metrics || {};
+  if (key === 'supplier') return `${connection.supplierName || ''} ${connection.name || ''}`.trim().toLowerCase();
+  if (key === 'adapter') return `${supplierAdapterLabel(connection.detectedAdapterType || connection.adapterType)} ${supplierQualityModeLabel(connection.qualityMonitorMode)}`.toLowerCase();
+  if (key === 'mode') return supplierQualityModeLabel(connection.qualityMonitorMode).toLowerCase();
+  if (key === 'status') return String(connection.connectionStatus || '').toLowerCase();
+  if (key === 'sampleCount') return Number(metrics.sampleCount || 0);
+  if (key === 'ttftP50Ms' || key === 'ttftP95Ms') return metrics[key] === null || metrics[key] === undefined ? null : Number(metrics[key]);
+  if (key === 'lastObservedAt') return metrics.lastObservedAt ? new Date(metrics.lastObservedAt).getTime() : null;
+  return score[key] === null || score[key] === undefined ? null : Number(score[key]);
+}
+
+function supplierQualityFilteredItems() {
+  const needle = state.supplierQualitySearch.trim().toLowerCase();
+  const filtered = state.supplierQualityItems.filter((item) => {
+    const connection = item.connection || {};
+    const score = item.score || {};
+    const haystack = [
+      connection.supplierName, connection.name, connection.baseUrl,
+      supplierAdapterLabel(connection.detectedAdapterType || connection.adapterType),
+      ...(item.models || []),
+    ].join(' ').toLowerCase();
+    if (needle && !haystack.includes(needle)) return false;
+    if (state.supplierQualityMode !== 'all' && connection.qualityMonitorMode !== state.supplierQualityMode) return false;
+    if (state.supplierQualityStatus !== 'all' && connection.connectionStatus !== state.supplierQualityStatus) return false;
+    if (state.supplierQualityScoreScope === 'scored' && (score.overallScore === null || score.overallScore === undefined)) return false;
+    if (state.supplierQualityScoreScope === 'unscored' && score.overallScore !== null && score.overallScore !== undefined) return false;
+    return true;
+  });
+  const direction = state.supplierQualitySortDirection === 'asc' ? 1 : -1;
+  return filtered.sort((left, right) => {
+    const leftValue = supplierQualitySortValue(left, state.supplierQualitySort);
+    const rightValue = supplierQualitySortValue(right, state.supplierQualitySort);
+    if (leftValue === null || leftValue === undefined || leftValue === '') return rightValue === null || rightValue === undefined || rightValue === '' ? 0 : 1;
+    if (rightValue === null || rightValue === undefined || rightValue === '') return -1;
+    const comparison = typeof leftValue === 'string'
+      ? leftValue.localeCompare(rightValue, 'zh-CN')
+      : leftValue - rightValue;
+    return comparison * direction;
+  });
+}
+
+async function renderSupplierQuality({ reload = true } = {}) {
+  if (reload) {
+    const source = await api('/supplier-quality-overview', { range: false });
+    state.supplierQualityItems = source.items || [];
+  }
+  const filtered = supplierQualityFilteredItems();
+  const data = localPage(filtered, 'supplierQuality');
+  state.lastExport = data.items.map((item) => ({
+    supplier: item.connection?.supplierName,
+    connection: item.connection?.name,
+    adapter: supplierAdapterLabel(item.connection?.detectedAdapterType || item.connection?.adapterType),
+    monitorMode: supplierQualityModeLabel(item.connection?.qualityMonitorMode),
+    connectionStatus: item.connection?.connectionStatus,
+    ...item.score,
+    ...item.metrics,
+    models: (item.models || []).join(', '),
+  }));
+  const modeOptions = [
+    ['all', '全部模式'], ['off', '关闭'], ['passive', '被动监控'], ['active', '主动探测'], ['hybrid', '混合监控'],
+  ];
+  const statusOptions = [
+    ['all', '全部状态'], ['ok', '正常'], ['warning', '需关注'], ['pending', '待同步'], ['failed', '失败'], ['disabled', '已停用'], ['unsupported', '不支持'],
+  ];
+  const scoreOptions = [['all', '全部评分'], ['scored', '已有评分'], ['unscored', '暂无评分']];
+  content.innerHTML = `${section('供应商质量评分', '统一查看每个供应商连接最近 7 天的价格、可用性、首字延迟与稳定性')}
+    <section class="table-panel supplier-quality-list">
+      <div class="table-tools supplier-quality-toolbar">
+        <div class="search">${icon('search')}<input id="supplier-quality-search" placeholder="搜索供应商、连接、站点或模型" value="${escapeHtml(state.supplierQualitySearch)}"></div>
+        <div class="supplier-quality-filters">
+          <label><span>监控模式</span><select data-supplier-quality-filter="mode">${selectOptions(modeOptions, state.supplierQualityMode)}</select></label>
+          <label><span>连接状态</span><select data-supplier-quality-filter="status">${selectOptions(statusOptions, state.supplierQualityStatus)}</select></label>
+          <label><span>评分状态</span><select data-supplier-quality-filter="score">${selectOptions(scoreOptions, state.supplierQualityScoreScope)}</select></label>
+        </div>
+      </div>
+      ${table([
+        supplierQualitySortHeader('供应商 / 连接', 'supplier'),
+        supplierQualitySortHeader('系统 / 模式', 'adapter'),
+        supplierQualitySortHeader('连接状态', 'status'),
+        supplierQualitySortHeader('综合评分', 'overallScore', true),
+        supplierQualitySortHeader('价格', 'priceScore', true),
+        supplierQualitySortHeader('可用性', 'availabilityScore', true),
+        supplierQualitySortHeader('TTFT P50', 'ttftP50Ms', true),
+        supplierQualitySortHeader('TTFT P95', 'ttftP95Ms', true),
+        supplierQualitySortHeader('稳定性', 'stabilityScore', true),
+        supplierQualitySortHeader('可信度', 'confidence', true),
+        supplierQualitySortHeader('样本', 'sampleCount', true),
+        supplierQualitySortHeader('最近采样', 'lastObservedAt'),
+        { label: '操作' },
+      ], data.items.map((item) => {
+        const connection = item.connection || {};
+        const score = item.score || {};
+        const metrics = item.metrics || {};
+        const passiveSamples = Number(metrics.passiveUsageSamples || 0) + Number(metrics.passiveMonitorSamples || 0);
+        return [
+          `<button type="button" class="supplier-connection-link" data-supplier-quality-detail="${connection.id}"><span>${escapeHtml(connection.supplierName || '未命名供应商')}</span><small>${escapeHtml(connection.name || '默认连接')}</small></button><div class="secondary-text supplier-quality-models">${escapeHtml((item.models || []).join('、') || '暂无模型样本')}</div>`,
+          `<span class="primary-text">${escapeHtml(supplierAdapterLabel(connection.detectedAdapterType || connection.adapterType))}</span><div class="secondary-text">${escapeHtml(supplierQualityModeLabel(connection.qualityMonitorMode))}</div>`,
+          `${supplierState(connection.connectionStatus)}<div class="secondary-text">${escapeHtml(supplierConnectionStatusHint(connection))}</div>`,
+          `<span class="${supplierQualityScoreClass(score.overallScore)}">${supplierQualityScoreText(score.overallScore)}</span>`,
+          `<span class="${supplierQualityScoreClass(score.priceScore)}">${supplierQualityScoreText(score.priceScore)}</span><div class="secondary-text">${metrics.rateMultiplier === null || metrics.rateMultiplier === undefined ? '无倍率样本' : `${Number(metrics.rateMultiplier).toFixed(4)}x`}</div>`,
+          `<span class="${supplierQualityScoreClass(score.availabilityScore)}">${supplierQualityScoreText(score.availabilityScore, '%')}</span><div class="secondary-text">${compact(metrics.successSamples || 0)} / ${compact(metrics.availabilitySamples || 0)}</div>`,
+          supplierQualityMs(metrics.ttftP50Ms),
+          supplierQualityMs(metrics.ttftP95Ms),
+          `<span class="${supplierQualityScoreClass(score.stabilityScore)}">${supplierQualityScoreText(score.stabilityScore)}</span><div class="secondary-text">${compact(metrics.failureCount || 0)} 次失败</div>`,
+          `${supplierQualityScoreText(score.confidence, '%')}`,
+          `<span class="primary-text">${compact(metrics.sampleCount || 0)}</span><div class="secondary-text">被动 ${compact(passiveSamples)} · 主动 ${compact(metrics.activeProbeSamples || 0)} · 目标 ${compact(metrics.enabledTargetCount || 0)}</div>`,
+          metrics.lastObservedAt ? dateTime(metrics.lastObservedAt) : '--',
+          `<button type="button" class="icon-button table-icon" title="查看连接与评分详情" data-supplier-quality-detail="${connection.id}">${icon('receipt-text')}</button>`,
+        ];
+      }), 1650)}
+      ${pager(data, 'supplierQuality', '个供应商连接')}
+    </section>`;
+
+  let searchTimer;
+  document.querySelector('#supplier-quality-search')?.addEventListener('input', (event) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.supplierQualitySearch = event.target.value;
+      tableState('supplierQuality').page = 1;
+      renderSupplierQuality({ reload: false });
+    }, 220);
+  });
+  document.querySelectorAll('[data-supplier-quality-filter]').forEach((select) => {
+    select.addEventListener('change', () => {
+      const kind = select.dataset.supplierQualityFilter;
+      if (kind === 'mode') state.supplierQualityMode = select.value;
+      if (kind === 'status') state.supplierQualityStatus = select.value;
+      if (kind === 'score') state.supplierQualityScoreScope = select.value;
+      tableState('supplierQuality').page = 1;
+      renderSupplierQuality({ reload: false });
+    });
+  });
+  document.querySelectorAll('[data-supplier-quality-sort]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const sort = button.dataset.supplierQualitySort;
+      if (state.supplierQualitySort === sort) {
+        state.supplierQualitySortDirection = state.supplierQualitySortDirection === 'desc' ? 'asc' : 'desc';
+      } else {
+        state.supplierQualitySort = sort;
+        state.supplierQualitySortDirection = ['supplier', 'adapter', 'status'].includes(sort) ? 'asc' : 'desc';
+      }
+      tableState('supplierQuality').page = 1;
+      renderSupplierQuality({ reload: false });
+    });
+  });
+  document.querySelectorAll('[data-supplier-quality-detail]').forEach((button) => {
+    button.addEventListener('click', () => openSupplierConnectionDetails(Number(button.dataset.supplierQualityDetail)));
   });
 }
 
@@ -2413,8 +2505,7 @@ const renderers = {
   accounts: renderAccounts,
   usage: renderUsage,
   suppliers: renderSuppliers,
-  costs: renderCosts,
-  runtime: renderRuntime,
+  'supplier-quality': renderSupplierQuality,
 };
 
 async function render() {
@@ -2439,12 +2530,8 @@ async function render() {
 }
 
 function scheduleRuntimeRefresh() {
-  if (!['overview', 'runtime'].includes(state.page)) return;
+  if (state.page !== 'overview') return;
   state.runtimeRefreshTimer = setTimeout(async () => {
-    if (state.page === 'runtime') {
-      render();
-      return;
-    }
     try {
       await refreshOverviewRuntimePanel();
     } catch (error) {

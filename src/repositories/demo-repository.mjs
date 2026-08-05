@@ -1118,7 +1118,11 @@ export class DemoRepository {
   }
 
   async getSupplierQualityDashboard(connectionId) {
-    const observations = this.supplierQualityObservations.filter((item) => Number(item.connectionId) === Number(connectionId));
+    const cutoff = Date.now() - 7 * 86_400_000;
+    const observations = this.supplierQualityObservations.filter((item) => (
+      Number(item.connectionId) === Number(connectionId)
+      && new Date(item.observedAt).getTime() >= cutoff
+    ));
     const metrics = {
       sampleCount: observations.length,
       availabilitySamples: observations.filter((item) => item.availabilitySample).length,
@@ -1138,6 +1142,27 @@ export class DemoRepository {
       metrics,
       observations: observations.slice(0, 100).map((item) => this.qualityObservation(item)),
     };
+  }
+
+  async listSupplierQualityOverview() {
+    const items = await Promise.all(this.supplierConnections.map(async (connection) => {
+      const dashboard = await this.getSupplierQualityDashboard(connection.id);
+      const targets = this.supplierQualityTargets.filter((item) => Number(item.connectionId) === Number(connection.id));
+      const models = [...new Set(dashboard.observations
+        .filter((item) => item.model)
+        .map((item) => item.model))]
+        .sort((left, right) => left.localeCompare(right));
+      return {
+        connection: copySupplierConnection(connection),
+        score: dashboard.score,
+        metrics: {
+          ...dashboard.metrics,
+          enabledTargetCount: targets.filter((item) => item.enabled).length,
+        },
+        models,
+      };
+    }));
+    return { items };
   }
 
   async runSupplierQualityTarget(targetId) {

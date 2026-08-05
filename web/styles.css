@@ -1278,9 +1278,6 @@ textarea:focus-visible {
   line-height: 16px;
 }
 
-.supplier-procurement-tools { min-height: 53px; }
-.supplier-filter-note { color: var(--muted); font-size: 10px; }
-
 .supplier-connection-link {
   max-width: 100%;
   padding: 0;
@@ -1301,6 +1298,59 @@ textarea:focus-visible {
 .supplier-url { max-width: 235px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .supplier-connection-status-hint { max-width: 205px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .supplier-row-actions { min-width: 88px; }
+
+.supplier-quality-toolbar {
+  min-height: 58px;
+  align-items: flex-end;
+}
+
+.supplier-quality-filters {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.supplier-quality-filters label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 12px;
+}
+
+.supplier-quality-filters select {
+  min-width: 112px;
+  height: 32px;
+  padding: 0 27px 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: #33465f;
+  font-size: 10px;
+}
+
+.supplier-quality-models {
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supplier-score {
+  display: inline-flex;
+  min-width: 44px;
+  justify-content: flex-end;
+  color: #44566e;
+  font-size: 12px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.supplier-score.good { color: var(--green); }
+.supplier-score.warning { color: var(--orange); }
+.supplier-score.bad { color: var(--red); }
+.supplier-score.unscored { color: var(--muted); font-weight: 600; }
 
 .supplier-state {
   display: inline-flex;
@@ -1831,6 +1881,9 @@ textarea:focus-visible {
   .overview-ranking-grid > :nth-child(3) { grid-column: auto; }
   .recon-grid { grid-template-columns: 1fr; }
   .table-tools { align-items: stretch; }
+  .supplier-quality-toolbar { align-items: stretch; flex-wrap: wrap; }
+  .supplier-quality-toolbar .search { width: 100%; }
+  .supplier-quality-filters { width: 100%; justify-content: flex-start; overflow-x: auto; }
   .search { flex: 1 1 auto; }
   .custom-range { flex: 1 1 100%; order: 3; justify-content: flex-end; }
   .custom-range input { flex: 1 1 0; max-width: 160px; }
@@ -1888,6 +1941,9 @@ textarea:focus-visible {
   .metric { min-height: 84px; }
   .metric .value { font-size: 19px; }
   .table-tools { flex-wrap: wrap; }
+  .supplier-quality-filters { flex-wrap: wrap; overflow: visible; }
+  .supplier-quality-filters label { flex: 1 1 calc(50% - 4px); }
+  .supplier-quality-filters select { width: 100%; min-width: 0; }
   .table-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .account-scope { width: 100%; justify-content: space-between; }
   .account-scope-tabs { flex: 1 1 auto; }
