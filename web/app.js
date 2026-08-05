@@ -918,7 +918,7 @@ function accountPricingDetail(account) {
     }
     const nextStep = account.supplierKeyId
       ? `${keyLabel || '已关联密钥'} · 等待有效倍率快照`
-      : account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '请关联 Sub2API 供应商密钥';
+      : account.probeStatus === 'unsupported' ? '请切换为手动倍率' : '请关联 Sub2API 或 NewAPI 供应商密钥';
     return `<span class="secondary-text">${escapeHtml(probeStatusLabel(account.probeStatus))}</span><div class="secondary-text">${nextStep}</div>`;
   }
   return '<span class="secondary-text">先选择固定成本或倍率模式</span>';
@@ -2224,6 +2224,78 @@ function openSupplierConnectionDetails(connectionId) {
   loadSupplierConnectionDetails(Number(connectionId));
 }
 
+async function openAlertNotificationSettings() {
+  openContentModal('QQ 告警通知', '<div class="detail-loading"><span></span>正在读取告警通知配置</div>', 'alert-notification-modal');
+  try {
+    const settings = await api('/alert-notification-settings', { range: false });
+    const form = document.querySelector('#modal-form');
+    form.innerHTML = `
+      <div class="supplier-form-note">QQ 私聊需要一个已登录 QQ 机器人的 OneBot HTTP 网关（例如 NapCat）。仅填写 QQ 号无法直接调用腾讯接口；FinOps 不保存 QQ 密码，也不会登录 QQ。</div>
+      <div class="alert-notification-form">
+        <label class="supplier-form-toggle full">
+          <input type="checkbox" name="enabled" ${settings.enabled ? 'checked' : ''}>
+          <span>启用 QQ 告警</span>
+          <small>供应商连接失败、密钥巡检失败、余额不足和倍率变化等告警会发送到指定 QQ。</small>
+        </label>
+        <label class="field"><span>接收 QQ 号</span><input name="qqNumber" inputmode="numeric" pattern="\\d{5,12}" value="${escapeHtml(settings.qqNumber || '')}" placeholder="例如 123456789"></label>
+        <label class="field full"><span>OneBot HTTP 地址</span><input name="onebotEndpoint" value="${escapeHtml(settings.onebotEndpoint || '')}" placeholder="宿主机网关例如 http://host.docker.internal:3000"></label>
+        <label class="field full"><span>OneBot Access Token（可选）</span><input name="accessToken" type="password" autocomplete="new-password" placeholder="${settings.accessTokenConfigured ? '已加密配置，留空表示继续使用' : '网关未启用令牌时可留空'}"></label>
+        ${settings.accessTokenConfigured ? `<label class="supplier-form-toggle full">
+          <input type="checkbox" name="clearAccessToken">
+          <span>清除已保存的 Access Token</span>
+          <small>仅在 OneBot 网关已经关闭鉴权时使用。</small>
+        </label>` : ''}
+      </div>
+      <div class="alert-notification-status">当前状态：<strong>${settings.enabled ? '已启用' : '未启用'}</strong>${settings.updatedAt ? ` · ${escapeHtml(dateTime(settings.updatedAt))} 更新` : ''}</div>
+      <div class="form-actions">
+        <button type="button" class="button" data-alert-notification-cancel>取消</button>
+        <button type="button" class="button" data-alert-notification-test>${icon('send')}发送测试消息</button>
+        <button type="submit" class="button primary">保存配置</button>
+      </div>`;
+    form.className = 'modal-content';
+    const payload = () => ({
+      enabled:Boolean(form.elements.enabled.checked),
+      qqNumber:form.elements.qqNumber.value.trim(),
+      onebotEndpoint:form.elements.onebotEndpoint.value.trim(),
+      accessToken:form.elements.accessToken.value,
+      clearAccessToken:Boolean(form.elements.clearAccessToken?.checked),
+    });
+    const save = async () => api('/alert-notification-settings', {
+      method:'PATCH',range:false,body:JSON.stringify(payload()),
+    });
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        await save();
+        toast('QQ 告警配置已保存');
+        closeModal();
+      } catch (error) {
+        toast(error.message);
+        button.disabled = false;
+      }
+    };
+    form.querySelector('[data-alert-notification-cancel]')?.addEventListener('click', closeModal);
+    form.querySelector('[data-alert-notification-test]')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await save();
+        await api('/alert-notification-settings/test', { method:'POST',range:false,body:'{}' });
+        toast('QQ 测试消息已发送');
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  } catch (error) {
+    const form = document.querySelector('#modal-form');
+    form.innerHTML = `<div class="empty"><strong>告警通知配置读取失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
 async function renderSuppliers(search = state.supplierSearch) {
   state.supplierSearch = search;
   const connectionSource = await api(`/supplier-connections?search=${encodeURIComponent(search)}`, { range: false });
@@ -2231,7 +2303,7 @@ async function renderSuppliers(search = state.supplierSearch) {
   state.supplierConnectionItems = new Map((connectionSource.items || []).map((item) => [String(item.id), item]));
   state.lastExport = connections.items;
   content.innerHTML = `${section('供应商连接', '通过 FinOps 读取供应商门户的余额、密钥库存、巡检和告警；不等同于采购成本记录')}
-    <section class="table-panel supplier-connection-panel">${searchTools('搜索供应商、连接或站点', `<button type="button" class="button primary" id="supplier-connection-create">${icon('plus')}新建连接</button>`, search)}
+    <section class="table-panel supplier-connection-panel">${searchTools('搜索供应商、连接或站点', `<button type="button" class="button" id="alert-notification-settings">${icon('settings-2')}QQ 告警</button><button type="button" class="button primary" id="supplier-connection-create">${icon('plus')}新建连接</button>`, search)}
       <div class="supplier-connection-note">连接凭据仅加密保存在 FinOps。同步和巡检均为读取操作，不会修改供应商或 Sub2API。</div>
       ${table([
         { label: '供应商连接' }, { label: '连接状态' }, { label: '余额' }, { label: '密钥 / 异常' }, { label: '告警' }, { label: '最近同步' }, { label: '操作' },
@@ -2245,6 +2317,7 @@ async function renderSuppliers(search = state.supplierSearch) {
         `<div class="table-actions supplier-row-actions"><button type="button" class="icon-button table-icon" title="查看连接详情" data-supplier-connection-detail="${item.id}">${icon('receipt-text')}</button><button type="button" class="icon-button table-icon" title="编辑连接" data-supplier-connection-edit="${item.id}">${icon('settings-2')}</button><button type="button" class="icon-button table-icon" title="立即同步" data-supplier-connection-sync="${item.id}" ${!item.enabled ? 'disabled' : ''}>${icon('refresh-cw')}</button></div>`,
       ]), 1330)}${pager(connections, 'supplierConnections', '个供应商连接')}</section>`;
   bindSearch(renderSuppliers);
+  document.querySelector('#alert-notification-settings')?.addEventListener('click', openAlertNotificationSettings);
   document.querySelector('#supplier-connection-create')?.addEventListener('click', () => openSupplierConnectionModal());
   document.querySelectorAll('[data-supplier-connection-detail]').forEach((button) => {
     button.addEventListener('click', () => openSupplierConnectionDetails(Number(button.dataset.supplierConnectionDetail)));
@@ -2646,15 +2719,16 @@ function catalogSupplierKeyOptions(catalog, account) {
   for (const item of catalog?.supplierKeys || []) {
     if (!keys.has(String(item.id))) keys.set(String(item.id), item);
   }
-  const options = [['', '请选择已接入的 Sub2API 供应商密钥']];
+  const options = [['', '请选择已接入的 Sub2API / NewAPI 供应商密钥']];
   for (const item of keys.values()) {
     const identity = item.name || item.maskedKey || `密钥 #${item.id}`;
+    const adapter = item.adapterType ? ` · ${supplierAdapterLabel(item.adapterType)}` : '';
     const group = item.groupName ? ` · ${item.groupName}` : '';
     const rate = item.rateMultiplier === null || item.rateMultiplier === undefined
       ? '' : ` · ${multiplier(item.rateMultiplier)}`;
     const linked = item.accountId && String(item.accountId) !== String(account?.id)
       ? ` · 已关联账号 #${item.accountId}` : '';
-    options.push([item.id, `${item.supplier} · ${identity}${group}${rate}${linked}`]);
+    options.push([item.id, `${item.supplier}${adapter} · ${identity}${group}${rate}${linked}`]);
   }
   if (account?.supplierKeyId && !keys.has(String(account.supplierKeyId))) {
     options.splice(1, 0, [
@@ -2844,9 +2918,9 @@ function ledgerFields(profiles, account, catalog) {
   const profileId = account.costProfileId || '';
   return [
     { name: 'costProfileId', label: '成本模板（可选）', type: 'select', required: false, value: profileId, options: [['', '不使用模板'], ...profiles.map((item) => [item.id, item.name])] },
-    { name: 'costMode', label: '账号成本方式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['fixed_purchase', '固定采购成本（自有账号）'], ['probe_multiplier', 'Sub2API 密钥自动倍率'], ['manual_multiplier', '手动填写上游倍率'], ['free', '免费资源']] },
+    { name: 'costMode', label: '账号成本方式', type: 'select', value: ['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free'].includes(account.costMode || account.costType) ? (account.costMode || account.costType) : 'fixed_purchase', options: [['fixed_purchase', '固定采购成本（自有账号）'], ['probe_multiplier', '供应商密钥自动倍率'], ['manual_multiplier', '手动填写上游倍率'], ['free', '免费资源']] },
     { type: 'notice', hook: 'account-cost-mode-hint' },
-    { name: 'supplierKeyId', label: '采购批次（Sub2API 密钥）', type: 'select', required: false, value: account.supplierKeyId || '', options: catalogSupplierKeyOptions(catalog, account) },
+    { name: 'supplierKeyId', label: '采购批次（供应商密钥）', type: 'select', required: false, value: account.supplierKeyId || '', options: catalogSupplierKeyOptions(catalog, account) },
     { name: 'basisMode', label: '倍率计价基础', type: 'select', value: account.basisMode || 'revenue_backsolve', options: [['revenue_backsolve', '按实际消费记录回推（推荐）'], ['reference_cny', '目录价乘 CNY 基准']] },
     { name: 'upstreamMultiplier', label: '上游进货倍率', type: 'number', required: false, value: (account.costMode || account.costType) === 'manual_multiplier' ? account.upstreamMultiplier || '' : '' },
     { name: 'cnyPerReferenceUnit', label: '每 USD 目录价 CNY 基准', type: 'number', required: false, value: account.cnyPerReferenceUnit || '' },
@@ -2860,7 +2934,7 @@ function ledgerFields(profiles, account, catalog) {
 function accountCostModeHint(mode) {
   return ({
     fixed_purchase: '固定采购成本按已登记的采购金额和生效期分摊；金额不填在倍率字段里。',
-    probe_multiplier: '选择已接入的 Sub2API 供应商密钥；该密钥会自动成为采购批次和供应商统计维度，FinOps 读取权威倍率并按每笔实际消费记录自动计算成本。',
+    probe_multiplier: '选择已接入的 Sub2API 或 NewAPI 供应商密钥；该密钥会自动成为采购批次和供应商统计维度，FinOps 读取上游分组倍率并按每笔实际消费记录自动计算成本。',
     manual_multiplier: '填写实际进货倍率；销售倍率由 sub2api 每笔消费记录读取，无需在这里配置。',
     free: '该账号不计入上游成本。存在未结束固定成本期时不能切换为免费资源。',
   })[mode] || '请选择该账号实际采用的成本方式。';
@@ -2927,7 +3001,7 @@ function openAccountLedgerModal(account, profiles, catalog) {
     const payload = normalizePurchaseSelection(data);
     payload.tags = data.tags ? data.tags.split(',').map((item) => item.trim()).filter(Boolean) : [];
     if (payload.costMode === 'probe_multiplier') {
-      if (!payload.supplierKeyId) throw new Error('请选择用于该账号成本核算的 Sub2API 供应商密钥');
+      if (!payload.supplierKeyId) throw new Error('请选择用于该账号成本核算的 Sub2API 或 NewAPI 供应商密钥');
       const selectedKey = (catalog.supplierKeys || []).find((item) => String(item.id) === String(payload.supplierKeyId));
       if (String(account.supplierKeyId || '') !== String(payload.supplierKeyId)) {
         await api(`/supplier-keys/${payload.supplierKeyId}/account-link`, {

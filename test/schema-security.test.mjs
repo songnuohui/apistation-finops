@@ -197,3 +197,12 @@ test('supplier quality monitoring remains FinOps-owned and never stores plaintex
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(migration, /\braw_key\b|\bapi_key\s+(?:TEXT|VARCHAR)|credentials_ciphertext/i);
 });
+
+test('QQ alert delivery remains FinOps-owned and stores only encrypted gateway tokens', () => {
+  const migration = read('migrations/021_qq_alert_notifications.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*alert_notification_settings/s);
+  assert.match(migration, /access_token_ciphertext TEXT NOT NULL/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*supplier_alert_deliveries/s);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\bqq_password\b|\baccess_token\s+(?:TEXT|VARCHAR)/i);
+});

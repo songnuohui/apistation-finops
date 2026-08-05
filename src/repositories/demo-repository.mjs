@@ -233,6 +233,11 @@ export class DemoRepository {
       { id: 2, connectionId: 1, sourceKind: 'passive_monitor', keyId: null, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, durationMs: 1100, pingLatencyMs: 42, observedAt: new Date(Date.now() - 15 * 60_000).toISOString(), metadata: {} },
       { id: 3, connectionId: 1, sourceKind: 'active_probe', targetId: 1, keyId: 1, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, ttftMs: 920, durationMs: 1800, rateMultiplier: 0.05, observedAt: new Date(Date.now() - 8 * 60_000).toISOString(), metadata: {} },
     ];
+    this.alertNotificationSettings = {
+      enabled:false,qqNumber:'',onebotEndpoint:'',accessTokenConfigured:false,
+      accessTokenCiphertext:'',updatedBy:'',updatedAt:null,
+    };
+    this.supplierAlertDeliveries = new Map();
     this.accountCostPeriods = this.accounts.map((account, index) => {
       const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
       const effectiveTo = account.expiresAt
@@ -735,7 +740,7 @@ export class DemoRepository {
     this.accountCostPeriods.forEach((item) => collect(item.supplier, item.purchaseBatch));
     const supplierKeys = this.supplierConnections.flatMap((connection) => {
       const detail = this.supplierConnectionDetails.get(Number(connection.id));
-      if (!detail || (connection.detectedAdapterType || connection.adapterType) !== 'sub2api') return [];
+      if (!detail || !['sub2api','newapi'].includes(connection.detectedAdapterType || connection.adapterType)) return [];
       return detail.keys
         .filter((key) => !key.removedAt && key.status === 'active')
         .flatMap((key) => {
@@ -745,6 +750,7 @@ export class DemoRepository {
             supplier:connection.supplierName,
             connectionId:connection.id,
             connectionName:connection.name,
+            adapterType:connection.detectedAdapterType || connection.adapterType,
             name:key.name,
             maskedKey:key.maskedKey,
             groupName:key.groupName,
@@ -1223,7 +1229,49 @@ export class DemoRepository {
       costMode: linked ? 'probe_multiplier' : '',
       probeStatus: match.key.lastCheckStatus || 'pending',
       probeCheckedAt: match.key.lastCheckAt || null,
+      adapterType: match.connection.detectedAdapterType || match.connection.adapterType,
     };
+  }
+
+  async getAlertNotificationSettings({ includeCiphertext = false } = {}) {
+    const result = { ...this.alertNotificationSettings };
+    if (!includeCiphertext) delete result.accessTokenCiphertext;
+    return result;
+  }
+
+  async updateAlertNotificationSettings(input, accessTokenCiphertext, actor = 'admin') {
+    Object.assign(this.alertNotificationSettings, {
+      enabled:input.enabled,
+      qqNumber:input.qqNumber,
+      onebotEndpoint:input.onebotEndpoint,
+      updatedBy:actor,
+      updatedAt:new Date().toISOString(),
+    });
+    if (accessTokenCiphertext !== undefined) {
+      this.alertNotificationSettings.accessTokenCiphertext = accessTokenCiphertext;
+      this.alertNotificationSettings.accessTokenConfigured = Boolean(accessTokenCiphertext);
+    }
+    return this.getAlertNotificationSettings();
+  }
+
+  async listPendingSupplierAlertDeliveries(limit = 20) {
+    const alerts = [];
+    for (const connection of this.supplierConnections) {
+      const detail = this.supplierConnectionDetails.get(Number(connection.id));
+      for (const alert of detail?.alerts || []) {
+        if (alert.status !== 'open') continue;
+        const payloadHash = JSON.stringify([alert.severity,alert.title,alert.message,alert.details || {}]);
+        if (this.supplierAlertDeliveries.get(alert.id)?.payloadHash === payloadHash) continue;
+        alerts.push({
+          ...alert,payloadHash,connectionName:connection.name,supplierName:connection.supplierName,
+        });
+      }
+    }
+    return alerts.slice(0,limit);
+  }
+
+  async recordSupplierAlertDelivery(alertId, payloadHash, { delivered, error = '' }) {
+    this.supplierAlertDeliveries.set(Number(alertId), { payloadHash,delivered,error });
   }
 
   async acknowledgeSupplierAlert(alertId, actor = 'admin') {

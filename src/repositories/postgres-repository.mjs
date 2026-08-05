@@ -1603,13 +1603,14 @@ export class PostgresRepository {
       this.pool.query(`
         SELECT k.id,k.external_key_id,k.name,k.masked_key,k.group_name,k.rate_multiplier,k.last_check_status,
                k.last_check_at,c.id AS connection_id,c.name AS connection_name,s.name AS supplier_name,
+               COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type) AS adapter_type,
                l.source_account_id
         FROM ${this.schema}.supplier_keys k
         JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
         JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
         LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
         WHERE k.removed_at IS NULL AND k.status='active' AND c.enabled
-          AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type)='sub2api'
+          AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type) IN ('sub2api','newapi')
         ORDER BY s.name,c.name,k.name,k.id`),
     ]);
     const keyCatalog = supplierKeys.rows.map((row) => ({
@@ -1618,6 +1619,7 @@ export class PostgresRepository {
       supplier:row.supplier_name,
       connectionId:Number(row.connection_id),
       connectionName:row.connection_name,
+      adapterType:row.adapter_type,
       name:row.name,
       maskedKey:row.masked_key,
       groupName:row.group_name,
@@ -1633,7 +1635,7 @@ export class PostgresRepository {
         supplier: row.supplier,
         purchaseBatch: row.purchaseBatch,
         supplierKeyId: row.id,
-        source: 'sub2api_key',
+        source: `${row.adapterType}_key`,
       })),
     ];
     const uniqueBatches = new Map();
@@ -2701,10 +2703,10 @@ export class PostgresRepository {
           WHERE l.source_account_id=$1
             AND ($2::bigint IS NULL OR k.id=$2)
             AND k.removed_at IS NULL AND k.status='active' AND c.enabled
-            AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type)='sub2api'
+            AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type) IN ('sub2api','newapi')
           LIMIT 1`, [accountId,input.supplierKeyId]);
         if (input.supplierKeyId && !linkedKey.rowCount) {
-          throw httpError('link the selected Sub2API supplier key to this account before saving automatic multiplier costs', 409);
+          throw httpError('link the selected Sub2API or NewAPI supplier key to this account before saving automatic multiplier costs', 409);
         }
         if (linkedKey.rowCount) {
           supplierKeyId = Number(linkedKey.rows[0].id);
@@ -3723,11 +3725,11 @@ export class PostgresRepository {
       let rule = null;
       if (linked) {
         const adapterType = key.detected_adapter_type || key.adapter_type;
-        if (adapterType !== 'sub2api') {
-          throw httpError('only Sub2API supplier keys can drive automatic account multipliers', 409);
+        if (!['sub2api','newapi'].includes(adapterType)) {
+          throw httpError('only Sub2API or NewAPI supplier keys can drive automatic account multipliers', 409);
         }
         if (!key.enabled || key.removed_at || key.status !== 'active') {
-          throw httpError('the Sub2API supplier key is not currently active', 409);
+          throw httpError('the supplier key is not currently active', 409);
         }
         const fixedCosts = await client.query(`
           SELECT 1
@@ -3804,8 +3806,115 @@ export class PostgresRepository {
         costMode:linked ? 'probe_multiplier' : '',
         probeStatus:key.last_check_status || 'pending',
         probeCheckedAt:key.last_check_at || null,
+        adapterType:key.detected_adapter_type || key.adapter_type,
       };
     });
+  }
+
+  async getAlertNotificationSettings({ includeCiphertext = false } = {}) {
+    const result = await this.pool.query(`
+      SELECT enabled,qq_number,onebot_endpoint,access_token_ciphertext,updated_by,updated_at
+      FROM ${this.schema}.alert_notification_settings WHERE id=1`);
+    const row = result.rows[0] || {};
+    const settings = {
+      enabled:Boolean(row.enabled),
+      qqNumber:row.qq_number || '',
+      onebotEndpoint:row.onebot_endpoint || '',
+      accessTokenConfigured:Boolean(row.access_token_ciphertext),
+      updatedBy:row.updated_by || '',
+      updatedAt:row.updated_at || null,
+    };
+    if (includeCiphertext) settings.accessTokenCiphertext = row.access_token_ciphertext || '';
+    return settings;
+  }
+
+  async updateAlertNotificationSettings(input, accessTokenCiphertext, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.alert_notification_settings SET
+          enabled=$1,qq_number=$2,onebot_endpoint=$3,
+          access_token_ciphertext=CASE WHEN $4::text IS NULL THEN access_token_ciphertext ELSE $4 END,
+          updated_by=$5,updated_at=NOW()
+        WHERE id=1
+        RETURNING enabled,qq_number,onebot_endpoint,access_token_ciphertext,updated_by,updated_at`,
+      [input.enabled,input.qqNumber,input.onebotEndpoint,accessTokenCiphertext ?? null,actor]);
+      const row = result.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_alert_notification_settings','alert_notification_settings','singleton',$2::jsonb)`,
+      [actor,JSON.stringify({
+        enabled:Boolean(row.enabled),
+        qqNumber:row.qq_number,
+        onebotEndpoint:row.onebot_endpoint,
+        accessTokenConfigured:Boolean(row.access_token_ciphertext),
+      })]);
+      return {
+        enabled:Boolean(row.enabled),
+        qqNumber:row.qq_number || '',
+        onebotEndpoint:row.onebot_endpoint || '',
+        accessTokenConfigured:Boolean(row.access_token_ciphertext),
+        updatedBy:row.updated_by || '',
+        updatedAt:row.updated_at || null,
+      };
+    });
+  }
+
+  async listPendingSupplierAlertDeliveries(limit = 20) {
+    const result = await this.pool.query(`
+      SELECT e.id,e.severity,e.title,e.message,e.details,e.last_seen_at,
+             c.name AS connection_name,s.name AS supplier_name,
+             MD5(CONCAT_WS('|',e.severity,e.title,e.message,e.details::text)) AS payload_hash
+      FROM ${this.schema}.supplier_alert_events e
+      JOIN ${this.schema}.supplier_connections c ON c.id=e.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN ${this.schema}.supplier_alert_deliveries d
+        ON d.alert_event_id=e.id AND d.channel='qq_onebot'
+      WHERE e.status='open' AND (
+        d.alert_event_id IS NULL
+        OR d.last_payload_hash IS DISTINCT FROM MD5(CONCAT_WS('|',e.severity,e.title,e.message,e.details::text))
+        OR (d.status='failed' AND d.next_attempt_at<=NOW())
+      )
+      ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+               e.last_seen_at,e.id
+      LIMIT $1`, [limit]);
+    return result.rows.map((row) => ({
+      id:Number(row.id),
+      severity:row.severity,
+      title:row.title,
+      message:row.message,
+      details:row.details || {},
+      lastSeenAt:row.last_seen_at,
+      connectionName:row.connection_name || '',
+      supplierName:row.supplier_name || '',
+      payloadHash:row.payload_hash,
+    }));
+  }
+
+  async recordSupplierAlertDelivery(alertId, payloadHash, { delivered, error = '' }) {
+    await this.pool.query(`
+      INSERT INTO ${this.schema}.supplier_alert_deliveries(
+        alert_event_id,channel,status,last_payload_hash,attempt_count,last_attempt_at,next_attempt_at,
+        delivered_at,last_error)
+      VALUES($1,'qq_onebot',$3,$2,1,NOW(),
+        CASE WHEN $3='delivered' THEN NOW() ELSE NOW()+INTERVAL '30 seconds' END,
+        CASE WHEN $3='delivered' THEN NOW() ELSE NULL END,$4)
+      ON CONFLICT(alert_event_id,channel) DO UPDATE SET
+        status=EXCLUDED.status,
+        attempt_count=CASE
+          WHEN supplier_alert_deliveries.last_payload_hash=EXCLUDED.last_payload_hash
+            THEN supplier_alert_deliveries.attempt_count+1
+          ELSE 1
+        END,
+        last_payload_hash=EXCLUDED.last_payload_hash,
+        last_attempt_at=NOW(),
+        next_attempt_at=CASE WHEN EXCLUDED.status='delivered' THEN NOW()
+          ELSE NOW()+LEAST(
+            INTERVAL '1 hour',
+            POWER(2,LEAST(supplier_alert_deliveries.attempt_count,7))*INTERVAL '30 seconds'
+          ) END,
+        delivered_at=CASE WHEN EXCLUDED.status='delivered' THEN NOW() ELSE supplier_alert_deliveries.delivered_at END,
+        last_error=EXCLUDED.last_error,
+        updated_at=NOW()`,
+    [alertId,payloadHash,delivered?'delivered':'failed',String(error || '').slice(0,1000)]);
   }
 
   async acknowledgeSupplierAlert(alertId, actor='admin') {

@@ -304,6 +304,29 @@ export function normalizeSupplierAccountLink(input) {
   };
 }
 
+export function normalizeAlertNotificationSettings(input) {
+  const enabled = input.enabled === undefined ? false : booleanValue(input.enabled, 'enabled');
+  const qqNumber = textValue(input.qqNumber, 'qqNumber', { required: false, max: 20 });
+  const onebotEndpoint = textValue(input.onebotEndpoint, 'onebotEndpoint', { required: false, max: 1000 });
+  const accessToken = textValue(input.accessToken, 'accessToken', { required: false, max: 16384 });
+  const clearAccessToken = input.clearAccessToken === undefined
+    ? false
+    : booleanValue(input.clearAccessToken, 'clearAccessToken');
+  if (qqNumber && !/^\d{5,12}$/.test(qqNumber)) throw badRequest('qqNumber must contain 5 to 12 digits');
+  if (onebotEndpoint) {
+    let parsed;
+    try { parsed = new URL(onebotEndpoint); }
+    catch { throw badRequest('invalid onebotEndpoint'); }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw badRequest('invalid onebotEndpoint');
+    }
+  }
+  if (enabled && (!qqNumber || !onebotEndpoint)) {
+    throw badRequest('enabled QQ alerts require qqNumber and onebotEndpoint');
+  }
+  return { enabled, qqNumber, onebotEndpoint, accessToken, clearAccessToken };
+}
+
 export function normalizeAccountCostArchive(input) {
   return {
     cutoffAt: dateValue(input.cutoffAt, 'cutoffAt'),

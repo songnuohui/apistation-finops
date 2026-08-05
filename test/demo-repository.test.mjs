@@ -209,6 +209,17 @@ test('demo supplier connections support create, edit, sync, account links, and a
   assert.equal((await repository.getSupplierConnectionDetails(1)).connection.openAlertCount, 0);
 });
 
+test('NewAPI supplier keys are available for account cost linking', async () => {
+  const repository = new DemoRepository(config);
+  repository.supplierConnections[0].adapterType = 'newapi';
+  repository.supplierConnections[0].detectedAdapterType = 'newapi';
+  const catalog = await repository.listPurchaseCatalog();
+  assert.equal(catalog.supplierKeys[0].adapterType, 'newapi');
+  const result = await repository.setSupplierKeyAccountLink(catalog.supplierKeys[0].id, 2742, true);
+  assert.equal(result.adapterType, 'newapi');
+  assert.equal(result.costMode, 'probe_multiplier');
+});
+
 test('supplier quality overview exposes connection scores, samples, models, and targets', async () => {
   const repository = new DemoRepository(config);
   const overview = await repository.listSupplierQualityOverview();

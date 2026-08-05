@@ -17,7 +17,7 @@ import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
-  normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget,
+  normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -36,6 +36,7 @@ import {
 } from './services/sub2api-auth-service.mjs';
 import { SyncService } from './services/sync-service.mjs';
 import { SupplierMonitorService } from './services/supplier-monitor-service.mjs';
+import { QqAlertNotificationService } from './services/qq-alert-notification-service.mjs';
 import { normalizeSupplierBaseUrl } from './services/supplier-adapters.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -46,6 +47,7 @@ const finopsPool=createFinopsPool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
+const qqAlertNotificationService=new QqAlertNotificationService(repository,config);
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const pendingLogins=new PendingLoginStore();
@@ -323,6 +325,22 @@ async function api(request,res,url){
   if(request.method==='POST'&&supplierAlertAck){
     return json(res,200,await repository.acknowledgeSupplierAlert(Number(supplierAlertAck[1]),auth.actor));
   }
+  if(request.method==='GET'&&url.pathname==='/api/alert-notification-settings'){
+    return json(res,200,await repository.getAlertNotificationSettings());
+  }
+  if(request.method==='PATCH'&&url.pathname==='/api/alert-notification-settings'){
+    const input=normalizeAlertNotificationSettings(await body(request));
+    const accessTokenCiphertext=input.clearAccessToken
+      ? ''
+      : input.accessToken
+        ? config.demoMode?'':qqAlertNotificationService.encryptAccessToken(input.accessToken)
+        : undefined;
+    return json(res,200,await repository.updateAlertNotificationSettings(input,accessTokenCiphertext,auth.actor));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/alert-notification-settings/test'){
+    if(config.demoMode)return json(res,200,{ok:true,demo:true});
+    return json(res,200,await qqAlertNotificationService.test());
+  }
   if(request.method==='GET'&&url.pathname==='/api/funds')return json(res,200,await cached('funds',config.listCacheTtlSeconds,()=>repository.listCashTransactions({...range(),...page(),search:searchTerm(url.searchParams),scope:cashScope(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/non-cash-balance-credits')return json(res,200,await cached('non-cash-balance-credits',config.listCacheTtlSeconds,()=>repository.listNonCashBalanceCredits({...range(),...page()})));
   if(request.method==='GET'&&url.pathname==='/api/runtime'){
@@ -409,14 +427,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications']],
   );
-  if(migration.rowCount < 19)throw new Error('required FinOps migrations through 020_supplier_quality_monitoring are not applied');
+  if(migration.rowCount < 20)throw new Error('required FinOps migrations through 021_qq_alert_notifications are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };
@@ -462,8 +480,9 @@ async function start(){
   if(!config.demoMode)await assertDistinctDatabases(sourcePool,finopsPool);
   if(syncService&&config.syncEnabled){await syncService.validateSourceSchema();syncService.start();}
   supplierMonitorService?.start();
+  qqAlertNotificationService.start();
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();supplierMonitorService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();supplierMonitorService?.stop();qqAlertNotificationService.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

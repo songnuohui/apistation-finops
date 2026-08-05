@@ -8,6 +8,7 @@ import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
+  normalizeAlertNotificationSettings,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -208,4 +209,28 @@ test('supplier quality targets require a selected model and bounded probe costs'
   assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: '', intervalSeconds: 900 }), /missing field: model/);
   assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: 'gpt-4o-mini', intervalSeconds: 59 }), /invalid intervalSeconds/);
   assert.throws(() => normalizeSupplierQualityTarget({ keyId: 9, model: 'gpt-4o-mini', maxOutputTokens: 33 }), /invalid maxOutputTokens/);
+});
+
+test('QQ alert settings require a numeric recipient and a safe HTTP OneBot endpoint', () => {
+  assert.deepEqual(normalizeAlertNotificationSettings({
+    enabled: 'true',
+    qqNumber: '123456789',
+    onebotEndpoint: 'http://127.0.0.1:3000',
+    accessToken: 'secret',
+  }), {
+    enabled: true,
+    qqNumber: '123456789',
+    onebotEndpoint: 'http://127.0.0.1:3000',
+    accessToken: 'secret',
+    clearAccessToken: false,
+  });
+  assert.throws(() => normalizeAlertNotificationSettings({
+    enabled: true, qqNumber: 'not-qq', onebotEndpoint: 'http://127.0.0.1:3000',
+  }), /qqNumber/);
+  assert.throws(() => normalizeAlertNotificationSettings({
+    enabled: true, qqNumber: '123456789', onebotEndpoint: 'ftp://127.0.0.1',
+  }), /onebotEndpoint/);
+  assert.throws(() => normalizeAlertNotificationSettings({
+    enabled: true, qqNumber: '', onebotEndpoint: '',
+  }), /require qqNumber and onebotEndpoint/);
 });

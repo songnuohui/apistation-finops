@@ -700,7 +700,7 @@ test('current-day multiplier correction replaces every open version from local m
   assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
 });
 
-test('linking an active Sub2API supplier key creates a key-bound automatic cost rule', async () => {
+for (const adapterType of ['sub2api', 'newapi']) test(`linking an active ${adapterType} supplier key creates a key-bound automatic cost rule`, async () => {
   const queries = [];
   const client = {
     async query(text, params = []) {
@@ -710,8 +710,8 @@ test('linking an active Sub2API supplier key creates a key-bound automatic cost 
           rows: [{
             id: '77', connection_id: '9', external_key_id: '596', name: 'upstream-key', masked_key: 'sk-...test',
             status: 'active', removed_at: null, last_check_status: 'ok',
-            last_check_at: '2026-08-04T08:00:00.000Z', adapter_type: 'sub2api',
-            detected_adapter_type: 'sub2api', enabled: true, supplier_name: 'Provider A',
+            last_check_at: '2026-08-04T08:00:00.000Z', adapter_type: adapterType,
+            detected_adapter_type: adapterType, enabled: true, supplier_name: 'Provider A',
           }],
           rowCount: 1,
         };
@@ -750,6 +750,7 @@ test('linking an active Sub2API supplier key creates a key-bound automatic cost 
 
   assert.equal(result.connectionId, 9);
   assert.equal(result.costMode, 'probe_multiplier');
+  assert.equal(result.adapterType, adapterType);
   const linkInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_account_links'));
   assert.deepEqual(linkInsert.params, [77, 8, 'finance@example.com']);
   const ruleInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
