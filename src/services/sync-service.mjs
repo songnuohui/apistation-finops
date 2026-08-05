@@ -727,6 +727,24 @@ export class SyncService {
     const refreshStartedAt = new Date();
     for (;;) {
       const pending = await client.query(`
+        WITH pending_usage AS MATERIALIZED (
+          SELECT f.*
+          FROM ${this.schema}.fact_usage_events f
+          LEFT JOIN ${this.schema}.fact_usage_cost_snapshots current_snapshot
+            ON current_snapshot.source_usage_id=f.source_usage_id
+          WHERE current_snapshot.source_usage_id IS NULL
+            OR (
+              $2::boolean
+              AND current_snapshot.finalized=FALSE
+              AND current_snapshot.frozen_at < $5
+              AND f.occurred_at >= (
+                date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
+                - (($4::int - 1) * INTERVAL '1 day')
+              )
+            )
+          ORDER BY f.occurred_at,f.source_usage_id
+          LIMIT $1
+        )
         SELECT
           f.source_usage_id,f.source_account_id,f.source_user_id,f.source_group_id,f.model,
           f.occurred_at,f.user_charge_cny,f.standard_cost_usd_reference,
@@ -768,7 +786,7 @@ export class SyncService {
           observation.timezone AS observed_timezone,
           observation.snapshot_data->>'peak_start' AS observed_peak_start,
           observation.snapshot_data->>'peak_end' AS observed_peak_end
-        FROM ${this.schema}.fact_usage_events f
+        FROM pending_usage f
         LEFT JOIN ${this.schema}.dim_accounts account
           ON account.source_account_id=f.source_account_id
         LEFT JOIN ${this.schema}.cost_profiles account_profile
@@ -815,27 +833,8 @@ export class SyncService {
           ) DESC,o.id DESC
           LIMIT 1
         ) observation ON TRUE
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM ${this.schema}.fact_usage_cost_snapshots snapshot
-          WHERE snapshot.source_usage_id=f.source_usage_id
-        )
-        OR (
-          $2::boolean
-          AND EXISTS (
-            SELECT 1
-            FROM ${this.schema}.fact_usage_cost_snapshots snapshot
-            WHERE snapshot.source_usage_id=f.source_usage_id
-              AND snapshot.finalized=FALSE
-              AND snapshot.frozen_at < $5
-              AND f.occurred_at >= (
-                date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
-                - (($4::int - 1) * INTERVAL '1 day')
-              )
-          )
-        )
         ORDER BY f.occurred_at,f.source_usage_id
-        LIMIT $1`, [
+        `, [
         COST_SNAPSHOT_BATCH_SIZE,
         refreshOpenDay,
         this.config.timezone || 'UTC',

@@ -2,7 +2,7 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
-function createPool(connectionString, applicationName, max) {
+function createPool(connectionString, applicationName, max, statementTimeoutMs) {
   if (!connectionString) return null;
   return new Pool({
     connectionString,
@@ -10,17 +10,27 @@ function createPool(connectionString, applicationName, max) {
     min: 0,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    statement_timeout: 10_000,
+    statement_timeout: statementTimeoutMs,
     application_name: applicationName,
   });
 }
 
 export function createSourcePool(config) {
-  return createPool(config.sourceDatabaseUrl, 'apistation-finops-source-reader', 3);
+  return createPool(
+    config.sourceDatabaseUrl,
+    'apistation-finops-source-reader',
+    3,
+    config.sourceStatementTimeoutMs ?? 10_000,
+  );
 }
 
 export function createFinopsPool(config) {
-  return createPool(config.finopsDatabaseUrl, 'apistation-finops', 5);
+  return createPool(
+    config.finopsDatabaseUrl,
+    'apistation-finops',
+    5,
+    config.finopsStatementTimeoutMs ?? 30_000,
+  );
 }
 
 export async function assertDistinctDatabases(sourcePool, finopsPool) {

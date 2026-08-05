@@ -7,7 +7,9 @@ import {
   USAGE_COST_SNAPSHOT_OPEN_DAYS,
 } from '../src/services/sync-service.mjs';
 import { loadConfig } from '../src/config.mjs';
-import { assertDistinctDatabases } from '../src/db.mjs';
+import {
+  assertDistinctDatabases, createFinopsPool, createSourcePool,
+} from '../src/db.mjs';
 
 test('cash refund uses the paid-to-credited ratio', () => {
   assert.equal(refundCashAmount('100', '88', '25').toFixed(2), '22.00');
@@ -106,6 +108,25 @@ test('database isolation rejects source and FinOps connections to the same datab
     { query: async () => ({ rows: [{ database_name: 'apistation_finops', role_name: 'writer' }] }) },
   );
   assert.equal(result.finops.database_name, 'apistation_finops');
+});
+
+test('source and FinOps pools keep independent statement timeout boundaries', async () => {
+  const config = loadConfig({
+    NODE_ENV: 'development',
+    AUTH_DISABLED: 'true',
+    SOURCE_DATABASE_URL: 'postgres://source',
+    FINOPS_DATABASE_URL: 'postgres://finops',
+  });
+  const sourcePool = createSourcePool(config);
+  const finopsPool = createFinopsPool(config);
+  try {
+    assert.equal(config.sourceStatementTimeoutMs, 10_000);
+    assert.equal(config.finopsStatementTimeoutMs, 30_000);
+    assert.equal(sourcePool.options.statement_timeout, 10_000);
+    assert.equal(finopsPool.options.statement_timeout, 30_000);
+  } finally {
+    await Promise.all([sourcePool.end(), finopsPool.end()]);
+  }
 });
 
 test('user subscriptions are opt-in and not required for metered billing', async () => {
@@ -392,6 +413,9 @@ test('cost snapshots prefer a fresh read-only probe, fall back to request multip
   assert.equal(row(4)[20], 'priced');
   assert.equal(row(4)[21], '35');
   const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
+  assert.match(selection.text, /WITH pending_usage AS MATERIALIZED/);
+  assert.match(selection.text, /LEFT JOIN "finops"\.fact_usage_cost_snapshots current_snapshot/);
+  assert.doesNotMatch(selection.text, /WHERE NOT EXISTS/);
   assert.match(selection.text, /SELECT o\.id,o\.status,o\.source_kind,o\.resolved_rate_multiplier,o\.effective_rate_multiplier/);
   assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
   assert.doesNotMatch(selection.text, /COALESCE\(o\.observed_at,o\.received_at,o\.last_attempt_at,o\.captured_at\)/);

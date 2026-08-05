@@ -166,6 +166,8 @@ export function loadConfig(env = process.env) {
     port: intValue(env.PORT, 8090, { min: 1, max: 65535 }),
     sourceDatabaseUrl,
     finopsDatabaseUrl,
+    sourceStatementTimeoutMs: intValue(env.SOURCE_STATEMENT_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
+    finopsStatementTimeoutMs: intValue(env.FINOPS_STATEMENT_TIMEOUT_MS, 30_000, { min: 5_000, max: 120_000 }),
     demoMode: sourceDatabaseUrl === '' && finopsDatabaseUrl === '',
     finopsSchema: schemaName(env.FINOPS_SCHEMA, 'finops'),
     sourceSchema: schemaName(env.SOURCE_SCHEMA, 'public'),
