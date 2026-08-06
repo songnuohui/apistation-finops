@@ -238,6 +238,7 @@ export class DemoRepository {
       accessTokenCiphertext:'',updatedBy:'',updatedAt:null,
     };
     this.supplierAlertDeliveries = new Map();
+    this.accountProfitGuardPolicies = new Map();
     this.accountCostPeriods = this.accounts.map((account, index) => {
       const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
       const effectiveTo = account.expiresAt
@@ -1233,6 +1234,43 @@ export class DemoRepository {
       probeCheckedAt: match.key.lastCheckAt || null,
       adapterType: match.connection.detectedAdapterType || match.connection.adapterType,
     };
+  }
+
+  async getAccountProfitGuard(accountId) {
+    const policy = this.accountProfitGuardPolicies.get(Number(accountId)) || {
+      enabled: false, minimumMargin: 0, allowEmptyGroups: false,
+      lastEvaluatedAt: null, lastActionAt: null, lastError: '',
+    };
+    const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
+    const match = account?.supplierKeyId ? this.findSupplierKey(account.supplierKeyId) : null;
+    return {
+      accountId: Number(accountId),
+      policy: { ...policy },
+      supplier: match ? {
+        keyId: Number(account.supplierKeyId),
+        keyName: match.key.name || match.key.maskedKey || '',
+        supplierName: match.connection.supplierName || '',
+        connectionName: match.connection.name || '',
+        upstreamMultiplier: finiteNumber(match.key.rateMultiplier),
+        removed: match.key.status !== 'active',
+      } : null,
+      events: [],
+    };
+  }
+
+  async upsertAccountProfitGuard(accountId, input) {
+    const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
+    if (!account) throw Object.assign(new Error('account not found'), { statusCode: 404 });
+    const policy = {
+      enabled: Boolean(input.enabled),
+      minimumMargin: Number(input.minimumMargin || 0),
+      allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      lastEvaluatedAt: null,
+      lastActionAt: null,
+      lastError: '',
+    };
+    this.accountProfitGuardPolicies.set(Number(accountId), policy);
+    return { accountId: Number(accountId), ...policy };
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

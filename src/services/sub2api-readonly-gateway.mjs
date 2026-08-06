@@ -21,10 +21,10 @@ export class Sub2ApiReadonlyGateway {
     this.cache.clear();
   }
 
-  async request(pathname, { method = 'GET', body, cacheKey = pathname, ttlMs = 30_000 } = {}) {
+  async request(pathname, { method = 'GET', body, cacheKey = pathname, ttlMs = 30_000, cache = true } = {}) {
     if (!this.accessToken) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
     const now = Date.now();
-    const existing = this.cache.get(cacheKey);
+    const existing = cache && method === 'GET' ? this.cache.get(cacheKey) : null;
     if (existing && existing.expiresAt > now) return existing.payload;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
@@ -42,16 +42,53 @@ export class Sub2ApiReadonlyGateway {
       let raw = null;
       try { raw = await response.json(); } catch { throw new Error('sub2api returned invalid JSON'); }
       if (!response.ok || (Object.hasOwn(raw, 'code') && raw.code !== 0)) {
-        throw Object.assign(new Error('sub2api read-only API request failed'), {
+        const error = Object.assign(new Error('sub2api administrator API request failed'), {
           statusCode: response.status >= 500 ? 503 : response.status,
         });
+        if (error.statusCode === 401 || error.statusCode === 403) this.clearAccessToken();
+        throw error;
       }
       const payload = Object.hasOwn(raw, 'data') ? raw.data : raw;
-      this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
+      if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
       return payload;
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  invalidate(...prefixes) {
+    if (!prefixes.length) return this.cache.clear();
+    for (const key of this.cache.keys()) {
+      if (prefixes.some((prefix) => String(key).startsWith(prefix))) this.cache.delete(key);
+    }
+  }
+
+  async getAccount(accountId) {
+    const payload = await this.request(`/api/v1/admin/accounts/${Number(accountId)}`, {
+      cacheKey: `account:${Number(accountId)}`,
+      ttlMs: 5_000,
+    });
+    return payload?.account || payload;
+  }
+
+  async listGroups() {
+    return this.request('/api/v1/admin/groups/all?include_inactive=true', {
+      cacheKey: 'groups:all',
+      ttlMs: 10_000,
+    });
+  }
+
+  async updateAccountGroups(accountId, groupIds) {
+    const payload = await this.request(`/api/v1/admin/accounts/${Number(accountId)}`, {
+      method: 'PUT',
+      body: {
+        group_ids: [...new Set(groupIds.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))],
+        confirm_mixed_channel_risk: true,
+      },
+      cache: false,
+    });
+    this.invalidate(`account:${Number(accountId)}`, 'accounts:', 'groups:');
+    return payload?.account || payload;
   }
 
   dashboardSnapshot(params = {}) {

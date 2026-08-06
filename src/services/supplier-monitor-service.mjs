@@ -33,6 +33,7 @@ export class SupplierMonitorService {
     this.running = new Map();
     this.timer = null;
     this.cycleRunning = false;
+    this.profitGuardService = null;
   }
 
   status() {
@@ -88,6 +89,10 @@ export class SupplierMonitorService {
     const task = this.#sync(id, connection, throwOnError).finally(() => this.running.delete(id));
     this.running.set(id, task);
     return task;
+  }
+
+  setProfitGuardService(service) {
+    this.profitGuardService = service || null;
   }
 
   async listSupplierKeyModels(keyId) {
@@ -257,6 +262,15 @@ export class SupplierMonitorService {
       delete sanitizedSnapshot.sessionCookie;
       delete sanitizedSnapshot.userId;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
+      if (this.profitGuardService) {
+        try {
+          await this.profitGuardService.evaluateSupplierConnection(connectionId);
+        } catch (error) {
+          // Profit protection must never turn a successful inventory sync into
+          // a supplier-sync failure. The policy records its own error state.
+          console.warn(`[supplier-monitor] profit guard failed for ${connectionId}:`, error?.message || error);
+        }
+      }
       if (passiveObservations.length && this.repository.recordSupplierQualityObservations) {
         try {
           await this.repository.recordSupplierQualityObservations(connectionId, passiveObservations);

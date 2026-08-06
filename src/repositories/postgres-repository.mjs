@@ -1171,7 +1171,7 @@ export class PostgresRepository {
       LEFT JOIN ${this.schema}.supplier_account_links supplier_link
         ON supplier_link.source_account_id=a.source_account_id
       LEFT JOIN ${this.schema}.supplier_keys linked_key
-        ON linked_key.id=supplier_link.supplier_key_id
+        ON linked_key.id=supplier_link.supplier_key_id AND linked_key.removed_at IS NULL
       LEFT JOIN ${this.schema}.supplier_connections linked_connection
         ON linked_connection.id=linked_key.connection_id
       LEFT JOIN ${this.schema}.suppliers linked_supplier
@@ -3620,6 +3620,20 @@ export class PostgresRepository {
         message:`${key.name || key.masked_key} 已不在供应商返回的密钥列表中`,
       });
 
+      for (const key of removed) {
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts a
+          SET supplier='',purchase_batch='',synced_at=NOW()
+          FROM ${this.schema}.supplier_account_links l
+          WHERE l.supplier_key_id=$1 AND l.source_account_id=a.source_account_id`, [key.id]);
+        await client.query(`
+          UPDATE ${this.schema}.account_profit_guard_policies
+          SET enabled=FALSE,last_error='upstream supplier key was removed',updated_at=NOW()
+          WHERE source_account_id IN (
+            SELECT source_account_id FROM ${this.schema}.supplier_account_links WHERE supplier_key_id=$1
+          )`, [key.id]);
+      }
+
       if (snapshot.balance !== null && snapshot.balance !== undefined) {
         await client.query(`INSERT INTO ${this.schema}.supplier_balance_snapshots(connection_id,balance,currency)
           VALUES($1,$2,$3)`, [connectionId,snapshot.balance,snapshot.balanceCurrency]);
@@ -3646,7 +3660,7 @@ export class PostgresRepository {
       this.pool.query(`SELECT id,external_key_id,name,masked_key,status,group_id,group_name,rate_multiplier,
         quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,last_check_status,
         last_check_method,last_check_at,last_check_error,first_seen_at,last_seen_at,removed_at
-        FROM ${this.schema}.supplier_keys WHERE connection_id=$1
+        FROM ${this.schema}.supplier_keys WHERE connection_id=$1 AND removed_at IS NULL
         ORDER BY (removed_at IS NULL) DESC,(last_check_status='failed') DESC,name,id`, [connectionId]),
       this.pool.query(`SELECT balance,currency,observed_at FROM ${this.schema}.supplier_balance_snapshots
         WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 60`, [connectionId]),
@@ -3661,7 +3675,8 @@ export class PostgresRepository {
       this.pool.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name
         FROM ${this.schema}.supplier_account_links l
         LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
-        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id WHERE k.connection_id=$1`, [connectionId]),
+        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id AND k.removed_at IS NULL
+        WHERE k.connection_id=$1`, [connectionId]),
       this.pool.query(`SELECT source_account_id AS id,name,platform,status FROM ${this.schema}.dim_accounts
         WHERE source_deleted_at IS NULL ORDER BY name,source_account_id LIMIT 5000`),
     ]);
@@ -3805,6 +3820,190 @@ export class PostgresRepository {
         adapterType:key.detected_adapter_type || key.adapter_type,
       };
     });
+  }
+
+  async listProfitGuardCandidates(connectionId) {
+    const result = await this.pool.query(`
+      SELECT p.source_account_id,a.name AS account_name,a.platform,
+             l.supplier_key_id,k.name AS key_name,k.masked_key,
+             c.id AS connection_id,c.name AS connection_name,s.name AS supplier_name,
+             COALESCE(ob.effective_rate_multiplier,ob.resolved_rate_multiplier,k.rate_multiplier) AS upstream_multiplier,
+             ob.observed_at AS multiplier_observed_at,
+             p.minimum_margin,p.allow_empty_groups
+      FROM ${this.schema}.account_profit_guard_policies p
+      JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=p.source_account_id
+      JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
+      LEFT JOIN LATERAL (
+        SELECT o.effective_rate_multiplier,o.resolved_rate_multiplier,o.observed_at
+        FROM ${this.schema}.account_rate_observations o
+        WHERE o.source_account_id=p.source_account_id AND o.supplier_key_id=k.id
+          AND (o.fresh_until IS NULL OR o.fresh_until > NOW())
+        ORDER BY COALESCE(o.observed_at,o.received_at,o.last_attempt_at,o.captured_at) DESC,o.id DESC
+        LIMIT 1
+      ) ob ON TRUE
+      WHERE p.enabled AND c.id=$1 AND c.enabled
+        AND k.removed_at IS NULL AND k.status='active'
+        AND a.source_deleted_at IS NULL
+      ORDER BY p.source_account_id`, [connectionId]);
+    return result.rows.map((row) => ({
+      accountId: Number(row.source_account_id),
+      accountName: row.account_name || '',
+      platform: row.platform || '',
+      supplierKeyId: Number(row.supplier_key_id),
+      supplierKeyName: row.key_name || row.masked_key || '',
+      connectionId: Number(row.connection_id),
+      connectionName: row.connection_name || '',
+      supplierName: row.supplier_name || '',
+      upstreamMultiplier: nullableNumber(row.upstream_multiplier),
+      multiplierObservedAt: row.multiplier_observed_at || null,
+      minimumMargin: Number(row.minimum_margin || 0),
+      allowEmptyGroups: Boolean(row.allow_empty_groups),
+    }));
+  }
+
+  async getAccountProfitGuard(accountId) {
+    const [policyResult, eventsResult] = await Promise.all([
+      this.pool.query(`
+        SELECT p.*,l.supplier_key_id,k.name AS key_name,k.masked_key,k.rate_multiplier,
+               k.removed_at,k.status AS key_status,s.name AS supplier_name,c.name AS connection_name
+        FROM ${this.schema}.account_profit_guard_policies p
+        LEFT JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=p.source_account_id
+        LEFT JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+        LEFT JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        LEFT JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE p.source_account_id=$1`, [accountId]),
+      this.pool.query(`
+        SELECT id,supplier_key_id,source_group_id,action,upstream_multiplier,
+               group_multiplier,minimum_margin,before_group_ids,after_group_ids,reason,applied_at
+        FROM ${this.schema}.account_profit_guard_events
+        WHERE source_account_id=$1 ORDER BY applied_at DESC,id DESC LIMIT 50`, [accountId]),
+    ]);
+    const row = policyResult.rows[0] || null;
+    return {
+      accountId: Number(accountId),
+      policy: row ? {
+        enabled: Boolean(row.enabled),
+        minimumMargin: Number(row.minimum_margin || 0),
+        allowEmptyGroups: Boolean(row.allow_empty_groups),
+        lastEvaluatedAt: row.last_evaluated_at || null,
+        lastActionAt: row.last_action_at || null,
+        lastError: row.last_error || '',
+      } : {
+        enabled: false, minimumMargin: 0, allowEmptyGroups: false,
+        lastEvaluatedAt: null, lastActionAt: null, lastError: '',
+      },
+      supplier: row && row.supplier_key_id ? {
+        keyId: Number(row.supplier_key_id),
+        keyName: row.key_name || row.masked_key || '',
+        supplierName: row.supplier_name || '',
+        connectionName: row.connection_name || '',
+        upstreamMultiplier: nullableNumber(row.rate_multiplier),
+        removed: Boolean(row.removed_at) || row.key_status !== 'active',
+      } : null,
+      events: eventsResult.rows.map((event) => ({
+        id: Number(event.id),
+        supplierKeyId: event.supplier_key_id ? Number(event.supplier_key_id) : null,
+        groupId: Number(event.source_group_id),
+        action: event.action,
+        upstreamMultiplier: nullableNumber(event.upstream_multiplier),
+        groupMultiplier: nullableNumber(event.group_multiplier),
+        minimumMargin: nullableNumber(event.minimum_margin),
+        beforeGroupIds: event.before_group_ids || [],
+        afterGroupIds: event.after_group_ids || [],
+        reason: event.reason || '',
+        appliedAt: event.applied_at,
+      })),
+    };
+  }
+
+  async upsertAccountProfitGuard(accountId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const account = await client.query(`
+        SELECT source_account_id FROM ${this.schema}.dim_accounts
+        WHERE source_account_id=$1 AND source_deleted_at IS NULL`, [accountId]);
+      if (!account.rowCount) throw httpError('account not found', 404);
+      const result = await client.query(`
+        INSERT INTO ${this.schema}.account_profit_guard_policies(
+          source_account_id,enabled,minimum_margin,allow_empty_groups,created_by,updated_by)
+        VALUES($1,$2,$3,$4,$5,$5)
+        ON CONFLICT(source_account_id) DO UPDATE SET
+          enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+          allow_empty_groups=EXCLUDED.allow_empty_groups,updated_by=EXCLUDED.updated_by,
+          updated_at=NOW()
+        RETURNING *`, [
+        accountId, Boolean(input.enabled), input.minimumMargin, Boolean(input.allowEmptyGroups), actor,
+      ]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update','account_profit_guard_policy',$2,$3::jsonb)`,
+      [actor, String(accountId), JSON.stringify(input)]);
+      const row = result.rows[0];
+      return {
+        accountId: Number(row.source_account_id),
+        enabled: Boolean(row.enabled),
+        minimumMargin: Number(row.minimum_margin),
+        allowEmptyGroups: Boolean(row.allow_empty_groups),
+        lastEvaluatedAt: row.last_evaluated_at || null,
+        lastActionAt: row.last_action_at || null,
+        lastError: row.last_error || '',
+      };
+    });
+  }
+
+  async recordProfitGuardEvaluation(candidate, details = {}) {
+    return inTransaction(this.pool, async (client) => {
+      await client.query(`
+        UPDATE ${this.schema}.account_profit_guard_policies
+        SET last_evaluated_at=NOW(),last_error='',updated_at=NOW()
+        WHERE source_account_id=$1`, [candidate.accountId]);
+      if (!details.action) return;
+      const beforeIds = details.beforeGroupIds || [];
+      const afterIds = details.afterGroupIds || [];
+      await client.query(`
+        INSERT INTO ${this.schema}.account_profit_guard_events(
+          source_account_id,supplier_key_id,source_group_id,action,upstream_multiplier,
+          group_multiplier,minimum_margin,before_group_ids,after_group_ids,reason)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10)`, [
+        candidate.accountId,candidate.supplierKeyId,details.groupId,details.action,
+        details.upstreamMultiplier,details.groupMultiplier,candidate.minimumMargin,
+        JSON.stringify(beforeIds),JSON.stringify(afterIds),details.reason,
+      ]);
+      await client.query(`
+        UPDATE ${this.schema}.account_profit_guard_policies
+        SET last_action_at=NOW(),updated_at=NOW()
+        WHERE source_account_id=$1`, [candidate.accountId]);
+      await client.query(`
+        INSERT INTO ${this.schema}.supplier_alert_events(
+          connection_id,supplier_key_id,dedupe_key,alert_type,severity,title,message,details)
+        VALUES($1,$2,$3,'account_profit_guard','critical',$4,$5,$6::jsonb)
+        ON CONFLICT(connection_id,dedupe_key) DO UPDATE SET
+          supplier_key_id=EXCLUDED.supplier_key_id,status='open',severity='critical',
+          title=EXCLUDED.title,message=EXCLUDED.message,details=EXCLUDED.details,
+          last_seen_at=NOW(),occurrence_count=supplier_alert_events.occurrence_count+1,
+          resolved_at=NULL`, [
+        candidate.connectionId,candidate.supplierKeyId,
+        `profit-guard:${candidate.accountId}:${details.groupId}:${details.action}`,
+        details.action === 'remove_group' ? '已自动移除低利润销售分组' : '利润保护无法移除分组',
+        `${candidate.accountName || `账号 ${candidate.accountId}`}：${details.reason}`,
+        JSON.stringify({
+          accountId: candidate.accountId, accountName: candidate.accountName,
+          supplierKeyId: candidate.supplierKeyId, supplier: candidate.supplierName,
+          upstreamMultiplier: details.upstreamMultiplier, groupId: details.groupId,
+          groupName: details.groupName || '', groupMultiplier: details.groupMultiplier,
+          minimumMargin: candidate.minimumMargin, beforeGroupIds: beforeIds, afterGroupIds: afterIds,
+          action: details.action,
+        }),
+      ]);
+    });
+  }
+
+  async recordProfitGuardError(accountId, message) {
+    await this.pool.query(`
+      UPDATE ${this.schema}.account_profit_guard_policies
+      SET last_evaluated_at=NOW(),last_error=$2,updated_at=NOW()
+      WHERE source_account_id=$1`, [accountId, String(message || '').slice(0, 1000)]);
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

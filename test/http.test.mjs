@@ -10,6 +10,7 @@ import {
   normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
   mergeSupplierCredentials,
   normalizeAlertNotificationSettings,
+  normalizeAccountProfitGuard,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -255,4 +256,11 @@ test('QQ alert settings require a numeric recipient and a safe HTTP OneBot endpo
   assert.throws(() => normalizeAlertNotificationSettings({
     enabled: true, qqNumber: '', onebotEndpoint: '',
   }), /require qqNumber and onebotEndpoint/);
+});
+
+test('profit guard settings use a fractional margin and reject unsafe thresholds', () => {
+  assert.deepEqual(normalizeAccountProfitGuard({
+    enabled: true, minimumMargin: '0.2', allowEmptyGroups: true,
+  }), { enabled: true, minimumMargin: 0.2, allowEmptyGroups: true });
+  assert.throws(() => normalizeAccountProfitGuard({ minimumMargin: '1' }), /between 0 and 1/);
 });

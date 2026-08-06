@@ -19,6 +19,7 @@ import {
   normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
   hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
+  normalizeAccountProfitGuard,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -27,6 +28,7 @@ import { PendingLoginStore } from './services/pending-login-store.mjs';
 import { ResponseCacheService } from './services/response-cache-service.mjs';
 import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
 import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs';
+import { AccountProfitGuardService } from './services/account-profit-guard-service.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -53,7 +55,9 @@ const qqAlertNotificationService=new QqAlertNotificationService(repository,confi
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
+const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
 const pendingLogins=new PendingLoginStore();
+supplierMonitorService?.setProfitGuardService(accountProfitGuardService);
 syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
 syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
@@ -248,6 +252,27 @@ async function api(request,res,url){
     return json(res,200,await repository.listAccountCostRuleHistory({
       accountId:Number(accountRuleHistory[1]),...page(),
     }));
+  }
+  const accountProfitGuard=/^\/api\/accounts\/(\d+)\/profit-guard$/.exec(url.pathname);
+  if(request.method==='GET'&&accountProfitGuard){
+    return json(res,200,await repository.getAccountProfitGuard(Number(accountProfitGuard[1])));
+  }
+  if(request.method==='PATCH'&&accountProfitGuard){
+    const accountId=Number(accountProfitGuard[1]);
+    const policy=await repository.upsertAccountProfitGuard(accountId,normalizeAccountProfitGuard(await body(request)),auth.actor);
+    if (policy.enabled && !config.demoMode) {
+      try {
+        const account = await repository.getAccountProfitGuard(accountId);
+        if (account.supplier?.keyId) {
+          await accountProfitGuardService.evaluateSupplierConnection(
+            (await repository.getSupplierKeyContext(account.supplier.keyId)).connection.id,
+          );
+        }
+      } catch (error) {
+        await repository.recordProfitGuardError(accountId,error?.message || error);
+      }
+    }
+    return json(res,200,await repository.getAccountProfitGuard(accountId));
   }
   if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await cached('accounts',config.listCacheTtlSeconds,()=>repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
@@ -467,14 +492,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard']],
   );
-  if(migration.rowCount < 22)throw new Error('required FinOps migrations through 023_incremental_cost_repricing are not applied');
+  if(migration.rowCount < 23)throw new Error('required FinOps migrations through 024_account_profit_guard are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };

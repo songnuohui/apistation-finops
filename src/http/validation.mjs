@@ -348,6 +348,20 @@ export function normalizeAlertNotificationSettings(input) {
   return { enabled, qqNumber, onebotEndpoint, accessToken, clearAccessToken };
 }
 
+export function normalizeAccountProfitGuard(input) {
+  const rawMargin = input.minimumMargin === undefined || input.minimumMargin === ''
+    ? 0
+    : Number(input.minimumMargin);
+  if (!Number.isFinite(rawMargin) || rawMargin < 0 || rawMargin >= 1) {
+    throw badRequest('minimumMargin must be between 0 and 1');
+  }
+  return {
+    enabled: Boolean(input.enabled),
+    minimumMargin: rawMargin,
+    allowEmptyGroups: Boolean(input.allowEmptyGroups),
+  };
+}
+
 export function normalizeAccountCostArchive(input) {
   return {
     cutoffAt: dateValue(input.cutoffAt, 'cutoffAt'),
