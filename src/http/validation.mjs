@@ -14,6 +14,7 @@ const DIRECTIONS = new Set(['in', 'out']);
 const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_compatible', 'custom']);
 const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'api_key']);
 const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
+const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier']);
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -355,9 +356,20 @@ export function normalizeAccountProfitGuard(input) {
   if (!Number.isFinite(rawMargin) || rawMargin < 0 || rawMargin >= 1) {
     throw badRequest('minimumMargin must be between 0 and 1');
   }
+  const thresholdMode = optionalEnum(input.thresholdMode, 'thresholdMode', PROFIT_GUARD_THRESHOLD_MODES) || 'margin';
+  const minimumSaleMultiplier = optionalDecimal(
+    input.minimumSaleMultiplier,
+    'minimumSaleMultiplier',
+    { min: 0, allowZero: true },
+  );
+  if (thresholdMode === 'minimum_sale_multiplier' && minimumSaleMultiplier === null) {
+    throw badRequest('minimumSaleMultiplier is required for minimum_sale_multiplier');
+  }
   return {
     enabled: Boolean(input.enabled),
     minimumMargin: rawMargin,
+    thresholdMode,
+    minimumSaleMultiplier: thresholdMode === 'minimum_sale_multiplier' ? Number(minimumSaleMultiplier) : null,
     allowEmptyGroups: input.allowEmptyGroups === undefined ? true : Boolean(input.allowEmptyGroups),
   };
 }

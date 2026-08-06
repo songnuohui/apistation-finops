@@ -18,7 +18,6 @@ const editor = ref<AnyRecord | null>(null);
 const periodEditor = ref<AnyRecord | null>(null);
 const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
-const profitGuardLoading = ref(false);
 let searchTimer: number | undefined;
 
 const rows = computed(() => accounts.value.items || []);
@@ -69,9 +68,6 @@ function makeEditor(account: AnyRecord) {
     purchaseBatch: account.purchaseBatch || '',
     changeStrategy: 'future_only',
     tagsText: Array.isArray(account.tags) ? account.tags.join(',') : '',
-    profitGuardEnabled: false,
-    profitGuardMinimumMarginPercent: 0,
-    profitGuardAllowEmptyGroups: true,
   };
 }
 
@@ -98,16 +94,6 @@ async function load() {
 
 function openEditor(account: AnyRecord) {
   editor.value = makeEditor(account);
-  profitGuardLoading.value = true;
-  get(`/accounts/${account.id}/profit-guard`).then((result) => {
-    if (!editor.value || Number(editor.value.id) !== Number(account.id)) return;
-    const policy = result.policy || {};
-    editor.value.profitGuardEnabled = Boolean(policy.enabled);
-    editor.value.profitGuardMinimumMarginPercent = Number(policy.minimumMargin || 0) * 100;
-    editor.value.profitGuardAllowEmptyGroups = Boolean(policy.allowEmptyGroups);
-  }).catch((error: any) => notify(error.message)).finally(() => {
-    profitGuardLoading.value = false;
-  });
 }
 
 function openPeriodEditor(account: AnyRecord, period: AnyRecord | null = null) {
@@ -162,11 +148,6 @@ async function saveEditor() {
       supplier: current.supplier || '',
       purchaseBatch: current.purchaseBatch || '',
       tags: tags(current.tagsText || ''),
-    });
-    await send(`/accounts/${current.id}/profit-guard`, 'PATCH', {
-      enabled: Boolean(current.profitGuardEnabled),
-      minimumMargin: Number(current.profitGuardMinimumMarginPercent || 0) / 100,
-      allowEmptyGroups: Boolean(current.profitGuardAllowEmptyGroups),
     });
     if (oldKeyId && (current.costMode !== 'probe_multiplier' || Number(oldKeyId) !== Number(current.supplierKeyId))) {
       await send(`/supplier-keys/${oldKeyId}/account-link`, 'PATCH', { accountId: Number(current.id), linked: false });
@@ -281,14 +262,6 @@ onMounted(load);
         <label v-if="editor.costMode !== 'probe_multiplier'">供应商<select v-model="editor.supplier"><option value="">不选择</option><option v-for="supplier in catalog.suppliers" :key="supplier" :value="supplier">{{ supplier }}</option></select></label>
         <label v-if="editor.costMode === 'fixed_purchase'">采购批次<select v-model="editor.purchaseBatch"><option value="">不选择</option><option v-for="batch in supplierBatches" :key="`${batch.supplier}-${batch.purchaseBatch}`" :value="batch.purchaseBatch">{{ batch.supplier }} · {{ batch.purchaseBatch }}</option></select></label>
         <label class="full-field">账号标签<input v-model="editor.tagsText" placeholder="多个标签用逗号分隔" /></label>
-      </div>
-      <div class="profit-guard-box">
-        <div class="section-label">账号利润控制</div>
-        <label class="toggle-field full-field"><input v-model="editor.profitGuardEnabled" type="checkbox" :disabled="profitGuardLoading" /><span><strong>自动移除低利润销售分组</strong><small>上游倍率上涨后，按当前分组倍率和最低毛利率自动保护账号利润。</small></span></label>
-        <div class="form-grid compact-grid">
-          <label>最低毛利率 (%)<input v-model="editor.profitGuardMinimumMarginPercent" type="number" min="0" max="99.99" step="0.1" :disabled="!editor.profitGuardEnabled" /></label>
-          <label class="toggle-field"><input v-model="editor.profitGuardAllowEmptyGroups" type="checkbox" :disabled="!editor.profitGuardEnabled" /><span><strong>允许移除最后一个分组</strong><small>关闭时只告警，不会让账号完全失去销售分组。</small></span></label>
-        </div>
       </div>
       <div class="form-note">这里不填写销售倍率。销售价格由 sub2api / newapi 的实际消费记录决定；本页只配置进货倍率、供应商密钥或固定采购成本。</div>
       <footer><button class="secondary-button" @click="editor = null">取消</button><button class="primary-button" :disabled="saving" @click="saveEditor"><Check :size="16" />保存成本规则</button></footer>

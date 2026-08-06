@@ -261,9 +261,22 @@ test('QQ alert settings require a numeric recipient and a safe HTTP OneBot endpo
 test('profit guard settings use a fractional margin and reject unsafe thresholds', () => {
   assert.deepEqual(normalizeAccountProfitGuard({
     enabled: true, minimumMargin: '0.2', allowEmptyGroups: true,
-  }), { enabled: true, minimumMargin: 0.2, allowEmptyGroups: true });
-  assert.deepEqual(normalizeAccountProfitGuard({ enabled: true }), {
-    enabled: true, minimumMargin: 0, allowEmptyGroups: true,
+  }), {
+    enabled: true, minimumMargin: 0.2, thresholdMode: 'margin',
+    minimumSaleMultiplier: null, allowEmptyGroups: true,
   });
+  assert.deepEqual(normalizeAccountProfitGuard({ enabled: true }), {
+    enabled: true, minimumMargin: 0, thresholdMode: 'margin',
+    minimumSaleMultiplier: null, allowEmptyGroups: true,
+  });
+  assert.deepEqual(normalizeAccountProfitGuard({
+    enabled: true, thresholdMode: 'minimum_sale_multiplier', minimumSaleMultiplier: '0.125',
+  }), {
+    enabled: true, minimumMargin: 0, thresholdMode: 'minimum_sale_multiplier',
+    minimumSaleMultiplier: 0.125, allowEmptyGroups: true,
+  });
+  assert.throws(() => normalizeAccountProfitGuard({
+    thresholdMode: 'minimum_sale_multiplier',
+  }), /minimumSaleMultiplier/);
   assert.throws(() => normalizeAccountProfitGuard({ minimumMargin: '1' }), /between 0 and 1/);
 });

@@ -1238,7 +1238,7 @@ export class DemoRepository {
 
   async getAccountProfitGuard(accountId) {
     const policy = this.accountProfitGuardPolicies.get(Number(accountId)) || {
-      enabled: false, minimumMargin: 0, allowEmptyGroups: true,
+      enabled: false, minimumMargin: 0, thresholdMode: 'margin', minimumSaleMultiplier: null, allowEmptyGroups: true,
       lastEvaluatedAt: null, lastActionAt: null, lastError: '',
     };
     const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
@@ -1264,6 +1264,10 @@ export class DemoRepository {
     const policy = {
       enabled: Boolean(input.enabled),
       minimumMargin: Number(input.minimumMargin || 0),
+      thresholdMode: input.thresholdMode || 'margin',
+      minimumSaleMultiplier: input.minimumSaleMultiplier === null || input.minimumSaleMultiplier === undefined
+        ? null
+        : Number(input.minimumSaleMultiplier),
       allowEmptyGroups: Boolean(input.allowEmptyGroups),
       lastEvaluatedAt: null,
       lastActionAt: null,

@@ -431,6 +431,7 @@ export function supplierQualityScore(metrics, options = {}) {
     comparableSupplierCount: options.comparableSupplierCount ?? (options.bestRateMultiplier ? 2 : 0),
     rateSource: options.rateSource || '',
     targetFailures: options.targetFailures || 0,
+    now: options.now ?? Date.now(),
   });
   return result;
 }

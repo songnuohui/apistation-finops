@@ -207,6 +207,13 @@ test('QQ alert delivery remains FinOps-owned and stores only encrypted gateway t
   assert.doesNotMatch(migration, /\bqq_password\b|\baccess_token\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('profit guard threshold migration remains FinOps-owned', () => {
+  const migration = read('migrations/026_profit_guard_threshold_modes.sql');
+  assert.match(migration, /account_profit_guard_policies/);
+  assert.match(migration, /minimum_sale_multiplier/);
+  assert.doesNotMatch(migration, /\b(?:public|sub2api)\./i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

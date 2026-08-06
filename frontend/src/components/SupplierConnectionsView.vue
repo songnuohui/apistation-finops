@@ -31,6 +31,8 @@ const targetModels = ref<string[]>([]);
 const targetModelsLoading = ref(false);
 const qqEditor = ref<AnyRecord | null>(null);
 const qqSaving = ref(false);
+const profitGuardEditor = ref<AnyRecord | null>(null);
+const profitGuardSaving = ref(false);
 let searchTimer: number | undefined;
 
 const adapterLabels: Record<string, string> = {
@@ -72,6 +74,14 @@ const qualityModeLabels: Record<string, string> = {
 const visibleKeys = computed(() => (detail.value?.keys || []).filter((item: AnyRecord) => item.status === 'active' && !item.removedAt));
 const activeKeys = computed(() => visibleKeys.value);
 const openAlerts = computed(() => (detail.value?.alerts || []).filter((item: AnyRecord) => item.status === 'open'));
+const calculatedMinimumSaleMultiplier = computed(() => {
+  const current = profitGuardEditor.value;
+  if (!current || current.thresholdMode !== 'margin') return null;
+  const upstream = Number(current.upstreamMultiplier);
+  const margin = Number(current.minimumMarginPercent) / 100;
+  if (!Number.isFinite(upstream) || upstream < 0 || !Number.isFinite(margin) || margin < 0 || margin >= 1) return null;
+  return upstream / (1 - margin);
+});
 const availableAccounts = computed(() => {
   if (!detail.value || !linkKey.value) return [];
   const currentKeyId = Number(linkKey.value.id);
@@ -143,6 +153,19 @@ function quotaText(key: AnyRecord) {
   if (key.quotaRemaining !== null && key.quotaRemaining !== undefined) return `余 ${amount(key.quotaRemaining, key.quotaCurrency)}`;
   if (key.quotaUsed !== null && key.quotaUsed !== undefined) return `已用 ${amount(key.quotaUsed, key.quotaCurrency)}`;
   return '未提供额度';
+}
+
+function multiplierText(value: any) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${parsed.toFixed(4).replace(/\.?0+$/, '')}x` : '--';
+}
+
+function profitGuardHint(policy: AnyRecord | null | undefined) {
+  if (!policy?.enabled) return '未启用利润保护';
+  if (policy.thresholdMode === 'minimum_sale_multiplier') {
+    return `最低售价 ${multiplierText(policy.minimumSaleMultiplier)}`;
+  }
+  return `最低毛利 ${(Number(policy.minimumMargin || 0) * 100).toFixed(1).replace(/\.0$/, '')}%`;
 }
 
 function connectionHint(item: AnyRecord) {
@@ -338,6 +361,55 @@ async function unlinkAccount(keyId: number, accountId: number) {
     await Promise.all([loadConnections(), openDetails(connectionId, 'keys')]);
   } catch (error: any) {
     notify(error.message);
+  }
+}
+
+async function openProfitGuardEditor(key: AnyRecord, link: AnyRecord) {
+  profitGuardSaving.value = true;
+  try {
+    const result = await get(`/accounts/${link.accountId}/profit-guard`);
+    const policy = result.policy || {};
+    const supplier = result.supplier || {};
+    profitGuardEditor.value = {
+      keyId: Number(key.id),
+      keyName: key.name || key.maskedKey || `密钥 #${key.id}`,
+      accountId: Number(link.accountId),
+      accountName: link.accountName || `账号 #${link.accountId}`,
+      upstreamMultiplier: supplier.upstreamMultiplier ?? key.rateMultiplier ?? null,
+      enabled: Boolean(policy.enabled),
+      thresholdMode: policy.thresholdMode || 'margin',
+      minimumMarginPercent: Number(policy.minimumMargin || 0) * 100,
+      minimumSaleMultiplier: policy.minimumSaleMultiplier ?? '',
+      allowEmptyGroups: policy.allowEmptyGroups ?? true,
+    };
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    profitGuardSaving.value = false;
+  }
+}
+
+async function saveProfitGuard() {
+  if (!profitGuardEditor.value || !detail.value) return;
+  const current = profitGuardEditor.value;
+  profitGuardSaving.value = true;
+  try {
+    await send(`/accounts/${current.accountId}/profit-guard`, 'PATCH', {
+      enabled: Boolean(current.enabled),
+      thresholdMode: current.thresholdMode,
+      minimumMargin: Number(current.minimumMarginPercent || 0) / 100,
+      minimumSaleMultiplier: current.thresholdMode === 'minimum_sale_multiplier'
+        ? Number(current.minimumSaleMultiplier)
+        : null,
+      allowEmptyGroups: Boolean(current.allowEmptyGroups),
+    });
+    profitGuardEditor.value = null;
+    notify('账号利润保护已保存');
+    await openDetails(Number(detail.value.connection.id), 'keys');
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    profitGuardSaving.value = false;
   }
 }
 
@@ -658,7 +730,12 @@ onMounted(async () => {
                     <td><span class="status-pill" :class="statusClass(key.lastCheckStatus)">{{ statusLabel(key.lastCheckStatus || 'pending') }}</span><small>{{ key.lastCheckMethod || '等待巡检' }} · {{ dateTime(key.lastCheckAt) }}</small><small v-if="key.lastCheckError" class="error-text">{{ key.lastCheckError }}</small></td>
                     <td>
                       <div class="account-links">
-                        <span v-for="link in key.accountLinks" :key="link.accountId">{{ link.accountName || `账号 #${link.accountId}` }}<button title="解除关联" @click="unlinkAccount(key.id, link.accountId)"><X :size="13" /></button></span>
+                        <span v-for="link in key.accountLinks" :key="link.accountId">
+                          {{ link.accountName || `账号 #${link.accountId}` }}
+                          <small :class="{ 'profit-guard-on': link.profitGuard?.enabled }">{{ profitGuardHint(link.profitGuard) }}</small>
+                          <button title="配置账号利润保护" @click="openProfitGuardEditor(key, link)"><Settings2 :size="13" /></button>
+                          <button title="解除关联" @click="unlinkAccount(key.id, link.accountId)"><X :size="13" /></button>
+                        </span>
                         <small v-if="!key.accountLinks?.length">尚未关联本地账号</small>
                       </div>
                       <button v-if="!key.removedAt" class="small-button link-account-button" @click="openLinkPicker(key)"><Link2 :size="14" />关联账号</button>
@@ -724,6 +801,50 @@ onMounted(async () => {
         <header><div><h2>关联本地账号</h2><p>{{ linkKey.name || linkKey.maskedKey }} · {{ linkKey.groupName || '未分组' }}</p></div><button class="icon-button" @click="linkKey = null"><X :size="19" /></button></header>
         <label class="search-box full-search"><Link2 :size="17" /><input v-model="accountSearch" placeholder="搜索账号、平台或 ID" /></label>
         <div class="table-wrap compact-table"><table><thead><tr><th>本地账号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="account in availableAccounts" :key="account.id"><td><strong>{{ account.name || `账号 #${account.id}` }}</strong><small>ID {{ account.id }}</small></td><td>{{ account.platform || '--' }}</td><td><span class="status-pill success">可用</span></td><td><button class="small-button" @click="linkAccount(account.id)"><Link2 :size="14" />关联</button></td></tr><tr v-if="!availableAccounts.length"><td colspan="4" class="table-empty">没有可关联的本地账号</td></tr></tbody></table></div>
+      </section>
+    </div>
+
+    <div v-if="profitGuardEditor" class="modal-layer nested-modal" @click.self="profitGuardEditor = null">
+      <section class="modal form-modal profit-guard-modal">
+        <header>
+          <div>
+            <h2>账号利润保护</h2>
+            <p>{{ profitGuardEditor.keyName }} · {{ profitGuardEditor.accountName }}</p>
+          </div>
+          <button class="icon-button" @click="profitGuardEditor = null"><X :size="19" /></button>
+        </header>
+        <div class="form-grid">
+          <label class="toggle-field full-field">
+            <input v-model="profitGuardEditor.enabled" type="checkbox" />
+            <span><strong>自动将账号移出亏损分组</strong><small>只更新该账号的分组归属，不会删除分组或影响其他账号。</small></span>
+          </label>
+          <label>保护方式
+            <select v-model="profitGuardEditor.thresholdMode" :disabled="!profitGuardEditor.enabled">
+              <option value="margin">最低毛利率</option>
+              <option value="minimum_sale_multiplier">最低售卖倍率</option>
+            </select>
+          </label>
+          <label>当前上游倍率<input :value="multiplierText(profitGuardEditor.upstreamMultiplier)" readonly /></label>
+          <label v-if="profitGuardEditor.thresholdMode === 'margin'">最低毛利率 (%)
+            <input v-model="profitGuardEditor.minimumMarginPercent" type="number" min="0" max="99.99" step="0.1" :disabled="!profitGuardEditor.enabled" />
+          </label>
+          <label v-else>最低售卖倍率
+            <input v-model="profitGuardEditor.minimumSaleMultiplier" type="number" min="0" step="0.0001" :disabled="!profitGuardEditor.enabled" />
+          </label>
+          <label class="toggle-field">
+            <input v-model="profitGuardEditor.allowEmptyGroups" type="checkbox" :disabled="!profitGuardEditor.enabled" />
+            <span><strong>允许移出最后一个分组</strong><small>关闭时只产生告警，账号仍保留在最后一个分组。</small></span>
+          </label>
+        </div>
+        <div v-if="profitGuardEditor.thresholdMode === 'margin'" class="form-note">
+          按当前上游倍率 {{ multiplierText(profitGuardEditor.upstreamMultiplier) }} 和最低毛利率计算，最低售卖倍率为
+          <strong>{{ calculatedMinimumSaleMultiplier === null ? '--' : multiplierText(calculatedMinimumSaleMultiplier) }}</strong>。
+        </div>
+        <div v-else class="form-note">售价倍率低于该值的分组会自动从这个账号移除；售价不高于上游成本的分组始终会被移除。</div>
+        <footer>
+          <button class="secondary-button" @click="profitGuardEditor = null">取消</button>
+          <button class="primary-button" :disabled="profitGuardSaving" @click="saveProfitGuard"><Check :size="16" />保存利润保护</button>
+        </footer>
       </section>
     </div>
 

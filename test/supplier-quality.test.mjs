@@ -46,7 +46,7 @@ test('supplier quality scoring applies availability gates and confidence risk ad
     ttftP95Ms: 1_500,
     rateMultiplier: null,
     lastSuccessAt: now.toISOString(),
-  });
+  }, { now: now.getTime() });
   assert.equal(result.priceScore, null);
   assert.equal(result.rawOverallScore, 59);
   assert.ok(result.riskAdjustedScore < result.rawOverallScore);

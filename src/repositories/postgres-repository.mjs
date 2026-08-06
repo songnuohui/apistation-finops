@@ -3728,9 +3728,12 @@ export class PostgresRepository {
         last_seen_at,occurrence_count,acknowledged_at,acknowledged_by,resolved_at
         FROM ${this.schema}.supplier_alert_events WHERE connection_id=$1
         ORDER BY (status='open') DESC,last_seen_at DESC,id DESC LIMIT 100`, [connectionId]),
-      this.pool.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name
+      this.pool.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name,
+        p.enabled AS profit_guard_enabled,p.minimum_margin,p.threshold_mode,p.minimum_sale_multiplier,
+        p.allow_empty_groups,p.last_evaluated_at,p.last_action_at,p.last_error
         FROM ${this.schema}.supplier_account_links l
         LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
+        LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
         JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id AND k.removed_at IS NULL
         WHERE k.connection_id=$1`, [connectionId]),
       this.pool.query(`SELECT source_account_id AS id,name,platform,status FROM ${this.schema}.dim_accounts
@@ -3739,7 +3742,20 @@ export class PostgresRepository {
     const linksByKey = new Map();
     for (const row of links.rows) {
       if (!linksByKey.has(String(row.supplier_key_id))) linksByKey.set(String(row.supplier_key_id), []);
-      linksByKey.get(String(row.supplier_key_id)).push({ accountId:Number(row.source_account_id),accountName:row.account_name || '' });
+      linksByKey.get(String(row.supplier_key_id)).push({
+        accountId:Number(row.source_account_id),
+        accountName:row.account_name || '',
+        profitGuard: row.profit_guard_enabled === null || row.profit_guard_enabled === undefined ? null : {
+          enabled: Boolean(row.profit_guard_enabled),
+          minimumMargin: Number(row.minimum_margin || 0),
+          thresholdMode: row.threshold_mode || 'margin',
+          minimumSaleMultiplier: nullableNumber(row.minimum_sale_multiplier),
+          allowEmptyGroups: Boolean(row.allow_empty_groups),
+          lastEvaluatedAt: row.last_evaluated_at || null,
+          lastActionAt: row.last_action_at || null,
+          lastError: row.last_error || '',
+        },
+      });
     }
     return {
       connection,
@@ -3885,7 +3901,7 @@ export class PostgresRepository {
              c.id AS connection_id,c.name AS connection_name,s.name AS supplier_name,
              COALESCE(ob.effective_rate_multiplier,ob.resolved_rate_multiplier,k.rate_multiplier) AS upstream_multiplier,
              ob.observed_at AS multiplier_observed_at,
-             p.minimum_margin,p.allow_empty_groups
+             p.minimum_margin,p.threshold_mode,p.minimum_sale_multiplier,p.allow_empty_groups
       FROM ${this.schema}.account_profit_guard_policies p
       JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=p.source_account_id
       JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
@@ -3916,6 +3932,8 @@ export class PostgresRepository {
       upstreamMultiplier: nullableNumber(row.upstream_multiplier),
       multiplierObservedAt: row.multiplier_observed_at || null,
       minimumMargin: Number(row.minimum_margin || 0),
+      thresholdMode: row.threshold_mode || 'margin',
+      minimumSaleMultiplier: nullableNumber(row.minimum_sale_multiplier),
       allowEmptyGroups: Boolean(row.allow_empty_groups),
     }));
   }
@@ -3933,7 +3951,8 @@ export class PostgresRepository {
         WHERE p.source_account_id=$1`, [accountId]),
       this.pool.query(`
         SELECT id,supplier_key_id,source_group_id,action,upstream_multiplier,
-               group_multiplier,minimum_margin,before_group_ids,after_group_ids,reason,applied_at
+               group_multiplier,minimum_margin,threshold_mode,minimum_sale_multiplier,
+               before_group_ids,after_group_ids,reason,applied_at
         FROM ${this.schema}.account_profit_guard_events
         WHERE source_account_id=$1 ORDER BY applied_at DESC,id DESC LIMIT 50`, [accountId]),
     ]);
@@ -3943,12 +3962,14 @@ export class PostgresRepository {
       policy: row ? {
         enabled: Boolean(row.enabled),
         minimumMargin: Number(row.minimum_margin || 0),
+        thresholdMode: row.threshold_mode || 'margin',
+        minimumSaleMultiplier: nullableNumber(row.minimum_sale_multiplier),
         allowEmptyGroups: Boolean(row.allow_empty_groups),
         lastEvaluatedAt: row.last_evaluated_at || null,
         lastActionAt: row.last_action_at || null,
         lastError: row.last_error || '',
       } : {
-        enabled: false, minimumMargin: 0, allowEmptyGroups: true,
+        enabled: false, minimumMargin: 0, thresholdMode: 'margin', minimumSaleMultiplier: null, allowEmptyGroups: true,
         lastEvaluatedAt: null, lastActionAt: null, lastError: '',
       },
       supplier: row && row.supplier_key_id ? {
@@ -3967,6 +3988,8 @@ export class PostgresRepository {
         upstreamMultiplier: nullableNumber(event.upstream_multiplier),
         groupMultiplier: nullableNumber(event.group_multiplier),
         minimumMargin: nullableNumber(event.minimum_margin),
+        thresholdMode: event.threshold_mode || 'margin',
+        minimumSaleMultiplier: nullableNumber(event.minimum_sale_multiplier),
         beforeGroupIds: event.before_group_ids || [],
         afterGroupIds: event.after_group_ids || [],
         reason: event.reason || '',
@@ -3983,14 +4006,17 @@ export class PostgresRepository {
       if (!account.rowCount) throw httpError('account not found', 404);
       const result = await client.query(`
         INSERT INTO ${this.schema}.account_profit_guard_policies(
-          source_account_id,enabled,minimum_margin,allow_empty_groups,created_by,updated_by)
-        VALUES($1,$2,$3,$4,$5,$5)
+          source_account_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+          allow_empty_groups,created_by,updated_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$7)
         ON CONFLICT(source_account_id) DO UPDATE SET
           enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+          threshold_mode=EXCLUDED.threshold_mode,minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
           allow_empty_groups=EXCLUDED.allow_empty_groups,updated_by=EXCLUDED.updated_by,
           updated_at=NOW()
         RETURNING *`, [
-        accountId, Boolean(input.enabled), input.minimumMargin, Boolean(input.allowEmptyGroups), actor,
+        accountId, Boolean(input.enabled), input.minimumMargin, input.thresholdMode,
+        input.minimumSaleMultiplier, Boolean(input.allowEmptyGroups), actor,
       ]);
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'update','account_profit_guard_policy',$2,$3::jsonb)`,
@@ -4000,6 +4026,8 @@ export class PostgresRepository {
         accountId: Number(row.source_account_id),
         enabled: Boolean(row.enabled),
         minimumMargin: Number(row.minimum_margin),
+        thresholdMode: row.threshold_mode || 'margin',
+        minimumSaleMultiplier: nullableNumber(row.minimum_sale_multiplier),
         allowEmptyGroups: Boolean(row.allow_empty_groups),
         lastEvaluatedAt: row.last_evaluated_at || null,
         lastActionAt: row.last_action_at || null,
@@ -4020,10 +4048,12 @@ export class PostgresRepository {
       await client.query(`
         INSERT INTO ${this.schema}.account_profit_guard_events(
           source_account_id,supplier_key_id,source_group_id,action,upstream_multiplier,
-          group_multiplier,minimum_margin,before_group_ids,after_group_ids,reason)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10)`, [
+          group_multiplier,minimum_margin,threshold_mode,minimum_sale_multiplier,
+          before_group_ids,after_group_ids,reason)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12)`, [
         candidate.accountId,candidate.supplierKeyId,details.groupId,details.action,
         details.upstreamMultiplier,details.groupMultiplier,candidate.minimumMargin,
+        candidate.thresholdMode,candidate.minimumSaleMultiplier,
         JSON.stringify(beforeIds),JSON.stringify(afterIds),details.reason,
       ]);
       await client.query(`

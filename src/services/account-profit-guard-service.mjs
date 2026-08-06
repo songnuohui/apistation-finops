@@ -21,10 +21,35 @@ function groupMultiplier(group) {
   return number(group?.rate_multiplier ?? group?.rateMultiplier);
 }
 
-export function groupShouldBeRemoved(upstreamMultiplier, groupRateMultiplier, minimumMargin) {
+function removalReason({ upstreamMultiplier, groupRateMultiplier, minimumMargin, thresholdMode, minimumSaleMultiplier }) {
+  if (groupRateMultiplier !== null && groupRateMultiplier <= upstreamMultiplier) {
+    return `分组售价倍率 ${groupRateMultiplier}x 不高于上游成本倍率 ${upstreamMultiplier}x`;
+  }
+  if (thresholdMode === 'minimum_sale_multiplier') {
+    return `分组售价倍率 ${groupRateMultiplier}x 低于最低售卖倍率 ${minimumSaleMultiplier}x（上游成本倍率 ${upstreamMultiplier}x）`;
+  }
+  return `上游成本倍率 ${upstreamMultiplier}x 导致预计毛利率低于 ${minimumMargin * 100}%`;
+}
+
+export function minimumSaleMultiplierForMargin(upstreamMultiplier, minimumMargin) {
+  if (upstreamMultiplier === null || minimumMargin === null || minimumMargin < 0 || minimumMargin >= 1) return null;
+  return upstreamMultiplier / (1 - minimumMargin);
+}
+
+export function groupShouldBeRemoved(
+  upstreamMultiplier,
+  groupRateMultiplier,
+  minimumMargin,
+  thresholdMode = 'margin',
+  minimumSaleMultiplier = null,
+) {
   if (upstreamMultiplier === null || groupRateMultiplier === null || groupRateMultiplier <= 0) return false;
+  if (groupRateMultiplier <= upstreamMultiplier) return true;
+  if (thresholdMode === 'minimum_sale_multiplier') {
+    return minimumSaleMultiplier !== null && groupRateMultiplier < minimumSaleMultiplier;
+  }
   const margin = 1 - upstreamMultiplier / groupRateMultiplier;
-  return groupRateMultiplier <= upstreamMultiplier || margin < minimumMargin;
+  return margin < minimumMargin;
 }
 
 export class AccountProfitGuardService {
@@ -67,7 +92,13 @@ export class AccountProfitGuardService {
     }
     const removable = beforeGroupIds.filter((id) => {
       const group = groupsById.get(id);
-      return groupShouldBeRemoved(upstream, groupMultiplier(group), candidate.minimumMargin);
+      return groupShouldBeRemoved(
+        upstream,
+        groupMultiplier(group),
+        candidate.minimumMargin,
+        candidate.thresholdMode,
+        candidate.minimumSaleMultiplier,
+      );
     });
     if (!removable.length) {
       await this.repository.recordProfitGuardEvaluation(candidate);
@@ -83,9 +114,17 @@ export class AccountProfitGuardService {
           groupName: group?.name || '',
           upstreamMultiplier: upstream,
           groupMultiplier: groupMultiplier(group),
+          thresholdMode: candidate.thresholdMode,
+          minimumSaleMultiplier: candidate.minimumSaleMultiplier,
           beforeGroupIds,
           afterGroupIds: beforeGroupIds,
-          reason: `上游成本倍率 ${upstream}x 已不满足分组 ${group?.name || id} 的最低毛利率 ${candidate.minimumMargin * 100}%；为避免账号完全失去销售分组，未执行移除`,
+          reason: `${removalReason({
+            upstreamMultiplier: upstream,
+            groupRateMultiplier: groupMultiplier(group),
+            minimumMargin: candidate.minimumMargin,
+            thresholdMode: candidate.thresholdMode,
+            minimumSaleMultiplier: candidate.minimumSaleMultiplier,
+          })}；为避免账号完全失去销售分组，未执行移除`,
         });
       }
       return { changed: false, blocked: true };
@@ -104,9 +143,17 @@ export class AccountProfitGuardService {
         groupName: group?.name || '',
         upstreamMultiplier: upstream,
         groupMultiplier: groupMultiplier(group),
+        thresholdMode: candidate.thresholdMode,
+        minimumSaleMultiplier: candidate.minimumSaleMultiplier,
         beforeGroupIds: latestGroupIds,
         afterGroupIds,
-        reason: `上游成本倍率 ${upstream}x 导致预计毛利率低于 ${candidate.minimumMargin * 100}%`,
+        reason: removalReason({
+          upstreamMultiplier: upstream,
+          groupRateMultiplier: groupMultiplier(group),
+          minimumMargin: candidate.minimumMargin,
+          thresholdMode: candidate.thresholdMode,
+          minimumSaleMultiplier: candidate.minimumSaleMultiplier,
+        }),
       });
     }
     return { changed: true, beforeGroupIds: latestGroupIds, afterGroupIds, removed: removable };
