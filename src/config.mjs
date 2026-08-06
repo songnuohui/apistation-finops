@@ -202,7 +202,7 @@ export function loadConfig(env = process.env) {
     supplierCredentialsKey,
     supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
     supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 3, { min: 3, max: 3600 }),
-    supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 10_000, { min: 2_000, max: 30_000 }),
+    supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 30_000, { min: 2_000, max: 30_000 }),
     supplierMaxResponseBytes: intValue(env.SUPPLIER_MAX_RESPONSE_BYTES, 1_048_576, { min: 65_536, max: 5_242_880 }),
     qqAlertDeliveryIntervalSeconds: intValue(env.QQ_ALERT_DELIVERY_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
     qqAlertRequestTimeoutMs: intValue(env.QQ_ALERT_REQUEST_TIMEOUT_MS, 5_000, { min: 1_000, max: 30_000 }),
