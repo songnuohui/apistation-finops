@@ -7,6 +7,11 @@ import {
   ShieldCheck, Users, WalletCards, X,
 } from 'lucide-vue-next';
 import { get, query, send } from './api';
+import SupplierConnectionsView from './components/SupplierConnectionsView.vue';
+import AccountCostsView from './components/AccountCostsView.vue';
+import SupplierQualityView from './components/SupplierQualityView.vue';
+import UsageView from './components/UsageView.vue';
+import UserFinanceView from './components/UserFinanceView.vue';
 
 type AnyRecord = Record<string, any>;
 
@@ -31,6 +36,11 @@ const quality = ref<AnyRecord>({});
 const detail = ref<AnyRecord | null>(null);
 const accountEditor = ref<AnyRecord | null>(null);
 const supplierEditor = ref<AnyRecord | null>(null);
+const supplierRefreshToken = ref(0);
+const accountRefreshToken = ref(0);
+const userRefreshToken = ref(0);
+const usageRefreshToken = ref(0);
+const qualityRefreshToken = ref(0);
 const activeUsageTab = ref<'users' | 'models' | 'events'>('users');
 const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
@@ -130,11 +140,11 @@ async function loadPage() {
   loading.value = true;
   try {
     if (page.value === 'overview') await loadOverview();
-    else if (page.value === 'users') await loadUsers();
-    else if (page.value === 'usage') await loadUsage();
-    else if (page.value === 'accounts') await loadAccounts();
-    else if (page.value === 'suppliers') await loadSuppliers();
-    else if (page.value === 'supplier-quality') await loadQuality();
+    else if (page.value === 'users') userRefreshToken.value += 1;
+    else if (page.value === 'usage') usageRefreshToken.value += 1;
+    else if (page.value === 'accounts') accountRefreshToken.value += 1;
+    else if (page.value === 'suppliers') supplierRefreshToken.value += 1;
+    else if (page.value === 'supplier-quality') qualityRefreshToken.value += 1;
   } finally { loading.value = false; }
 }
 
@@ -232,13 +242,11 @@ async function logout() {
 }
 
 watch(page, () => { search.value = ''; loadPage(); });
-watch([range, activeUsageTab], () => { if (page.value === 'usage' || page.value === 'overview') loadPage(); });
+watch(range, () => { if (['usage', 'users', 'accounts', 'overview'].includes(page.value)) loadPage(); });
 watch(search, () => {
   const timer = window.setTimeout(() => {
     if (page.value === 'users') loadUsers();
     if (page.value === 'usage') loadUsage();
-    if (page.value === 'accounts') loadAccounts();
-    if (page.value === 'suppliers') loadSuppliers();
   }, 280);
   return () => window.clearTimeout(timer);
 });
@@ -356,7 +364,8 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <div v-else-if="page === 'users'" class="page-view">
+        <UserFinanceView v-else-if="page === 'users'" :refresh-token="userRefreshToken" :range="range" @toast="showToast" />
+        <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索邮箱、用户名或标签" :loading="loading" />
           <section class="panel table-panel">
             <div class="panel-head"><div><h2>用户消费汇总</h2><p>支持按照实际消费、成本和毛利排序</p></div><Users :size="20" class="head-icon" /></div>
@@ -366,7 +375,8 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <div v-else-if="page === 'usage'" class="page-view">
+        <UsageView v-else-if="page === 'usage'" :refresh-token="usageRefreshToken" :range="range" @toast="showToast" />
+        <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索模型或消费记录" :loading="loading" />
           <div class="tabs"><button v-for="tab in [['users','用户消费汇总'],['models','模型消费汇总'],['events','请求明细']]" :key="tab[0]" :class="{ active: activeUsageTab === tab[0] }" @click="activeUsageTab = tab[0]">{{ tab[1] }}</button></div>
           <section class="panel table-panel">
@@ -380,25 +390,10 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <div v-else-if="page === 'accounts'" class="page-view">
-          <Toolbar v-model="search" placeholder="搜索账号、平台或供应商" :loading="loading" />
-          <section class="panel table-panel">
-            <div class="panel-head"><div><h2>账号成本台账</h2><p>供应商密钥关联后自动读取上游倍率，也可以手动选择成本模式</p></div><WalletCards :size="20" class="head-icon" /></div>
-            <DataTable :columns="['账号','平台 / 供应商','成本模式','销售额','总成本','毛利','状态','操作']" :rows="accountRows" :empty="loading">
-              <template #row="{ row }"><td><strong>{{ row.name }}</strong><small>ID {{ row.id }}</small></td><td>{{ row.platform }}<small>{{ row.supplier || '未关联供应商' }}</small></td><td><span class="status-pill" :class="statusClass(row.costMode)">{{ row.costMode || '未配置' }}</span><small>{{ row.purchaseBatch || '未关联采购批次' }}</small></td><td class="number">{{ formatCny(row.userChargeCny) }}</td><td class="number">{{ formatCny(row.bookedCostCny || row.effectiveCostCny) }}</td><td class="number positive">{{ formatCny(row.bookedProfitCny || row.grossProfitCny) }}</td><td><span class="status-pill" :class="statusClass(row.costCoverageStatus)">{{ row.costCoverageStatus || '待检查' }}</span></td><td><button class="small-button" @click="openAccount(row)"><Settings2 :size="15" />编辑成本</button></td></template>
-            </DataTable>
-          </section>
-        </div>
-        <div v-else-if="page === 'suppliers'" class="page-view">
-          <Toolbar v-model="search" placeholder="搜索供应商连接" :loading="loading"><template #actions><button class="primary-button" @click="openSupplier"><ServerCog :size="16" />添加连接</button></template></Toolbar>
-          <section class="panel table-panel">
-            <div class="panel-head"><div><h2>供应商连接</h2><p>只保存加密凭据和脱敏密钥，关联后可用于成本和评分</p></div><DatabaseZap :size="20" class="head-icon" /></div>
-            <DataTable :columns="['连接名称','类型','余额','密钥','状态','最近同步','操作']" :rows="supplierRows" :empty="loading">
-              <template #row="{ row }"><td><strong>{{ row.connection?.name || row.name }}</strong><small>{{ row.connection?.supplierName || row.supplierName }}</small></td><td>{{ row.connection?.detectedAdapterType || row.connection?.adapterType || '--' }}</td><td class="number">{{ row.connection?.balance === null || row.connection?.balance === undefined ? '--' : `${row.connection.balance} ${row.connection.balanceCurrency || 'USD'}` }}</td><td>{{ row.connection?.activeKeyCount ?? row.connection?.keyCount ?? '--' }} / {{ row.connection?.keyCount ?? '--' }}</td><td><span class="status-pill" :class="statusClass(row.connection?.connectionStatus)">{{ row.connection?.connectionStatus || '--' }}</span><small v-if="row.connection?.lastError">{{ row.connection.lastError }}</small></td><td>{{ dateTime(row.connection?.lastSyncAt) }}</td><td><button class="small-button" @click="showToast('连接详情和密钥关联沿用现有供应商接口')"><FileText :size="15" />查看详情</button></td></template>
-            </DataTable>
-          </section>
-        </div>
-        <div v-else-if="page === 'supplier-quality'" class="page-view">
+        <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" @toast="showToast" />
+        <SupplierConnectionsView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken" @toast="showToast" />
+        <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" @toast="showToast" />
+        <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">
             <div class="panel-head"><div><h2>供应商质量评分</h2><p>鼠标停在列名旁的问号上查看评分含义；点击列名排序</p></div><ShieldCheck :size="20" class="head-icon" /></div>
