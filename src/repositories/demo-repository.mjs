@@ -994,7 +994,7 @@ export class DemoRepository {
     const detail = copySupplierDetail(this.supplierDetail(connectionId));
     return {
       connection,
-      keys: detail.keys,
+      keys: detail.keys.filter((key) => !key.removedAt && key.status === 'active'),
       balances: detail.balances,
       checks: detail.checks,
       alerts: detail.alerts,
@@ -1238,7 +1238,7 @@ export class DemoRepository {
 
   async getAccountProfitGuard(accountId) {
     const policy = this.accountProfitGuardPolicies.get(Number(accountId)) || {
-      enabled: false, minimumMargin: 0, allowEmptyGroups: false,
+      enabled: false, minimumMargin: 0, allowEmptyGroups: true,
       lastEvaluatedAt: null, lastActionAt: null, lastError: '',
     };
     const account = this.accounts.find((item) => Number(item.id) === Number(accountId));

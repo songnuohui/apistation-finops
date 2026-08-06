@@ -59,7 +59,7 @@ export class AccountProfitGuardService {
       await this.repository.recordProfitGuardEvaluation(candidate);
       return { changed: false, reason: 'upstream multiplier unavailable' };
     }
-    const account = await this.gateway.getAccount(candidate.accountId);
+    const account = await this.gateway.getAccount(candidate.accountId, { fresh: true });
     const beforeGroupIds = [...new Set(groupIdsFromAccount(account))];
     if (!beforeGroupIds.length) {
       await this.repository.recordProfitGuardEvaluation(candidate);
@@ -90,7 +90,7 @@ export class AccountProfitGuardService {
       }
       return { changed: false, blocked: true };
     }
-    const current = await this.gateway.getAccount(candidate.accountId);
+    const current = await this.gateway.getAccount(candidate.accountId, { fresh: true });
     const latestGroupIds = [...new Set(groupIdsFromAccount(current))];
     if (latestGroupIds.join(',') !== beforeGroupIds.join(',')) {
       afterGroupIds = latestGroupIds.filter((id) => !removable.includes(id));
@@ -112,4 +112,3 @@ export class AccountProfitGuardService {
     return { changed: true, beforeGroupIds: latestGroupIds, afterGroupIds, removed: removable };
   }
 }
-

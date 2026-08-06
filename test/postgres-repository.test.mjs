@@ -97,6 +97,67 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
 });
 
+test('removed supplier keys detach local account links and stop future automatic pricing', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT c.*,s.name AS supplier_name')) {
+        return {
+          rows: [{
+            id: '9',
+            supplier_name: 'Provider A',
+            inventory_interval_seconds: 600,
+            low_balance_threshold: null,
+            balance_currency: 'USD',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT * FROM "finops".supplier_keys')) {
+        return {
+          rows: [{
+            id: '77',
+            external_key_id: '596',
+            name: 'upstream-key',
+            masked_key: 'sk-...test',
+            status: 'active',
+            removed_at: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('FROM "finops".supplier_account_links l') && text.includes('FOR UPDATE OF l')) {
+        return {
+          rows: [{ source_account_id: '42', account_name: 'account-a' }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+
+  await repository.recordSupplierSyncSuccess(9, {
+    adapterType: 'sub2api',
+    identity: '',
+    balance: null,
+    balanceCurrency: 'USD',
+    keys: [],
+  }, []);
+
+  const statements = queries.map((query) => query.text);
+  assert.ok(statements.some((text) => text.includes('UPDATE "finops".account_cost_rules')));
+  assert.ok(statements.some((text) => text.includes('UPDATE "finops".account_rate_observations')));
+  assert.ok(statements.some((text) => text.includes('DELETE FROM "finops".supplier_account_links')));
+  assert.ok(queries.some((query) => (
+    query.text.includes('INSERT INTO "finops".supplier_alert_events')
+    && query.params.includes('account_supplier_key_removed')
+  )));
+});
+
 test('fixed allocation strategies are rendered as SQL string literals', () => {
   const standard = allocatedCostSql("'standard_cost_weight'", 'cost', 'standard', 'total_standard', 'tokens', 'total_tokens', 'requests', 'total_requests');
   const token = allocatedCostSql("'token_weight'", 'cost', 'standard', 'total_standard', 'tokens', 'total_tokens', 'requests', 'total_requests');
@@ -153,7 +214,7 @@ test('supplier quality overview loads model, key, and usage data for cross-suppl
           { id: '80', connection_id: '8', name: 'key-b', masked_key: 'sk-b', group_name: 'default', status: 'active', removed_at: null, rate_multiplier: '0.16' },
         ] };
       }
-      if (text.includes('SELECT id,connection_id,supplier_key_id')) {
+      if (text.includes('FROM "finops".supplier_quality_targets')) {
         return { rows: [
           { id: '1', connection_id: '7', supplier_key_id: '70', model: 'gpt-4o-mini', enabled: true, last_status: 'ok', last_probe_at: observedAt },
           { id: '2', connection_id: '8', supplier_key_id: '80', model: 'gpt-4o-mini', enabled: true, last_status: 'ok', last_probe_at: observedAt },

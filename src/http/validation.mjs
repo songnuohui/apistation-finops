@@ -358,7 +358,7 @@ export function normalizeAccountProfitGuard(input) {
   return {
     enabled: Boolean(input.enabled),
     minimumMargin: rawMargin,
-    allowEmptyGroups: Boolean(input.allowEmptyGroups),
+    allowEmptyGroups: input.allowEmptyGroups === undefined ? true : Boolean(input.allowEmptyGroups),
   };
 }
 

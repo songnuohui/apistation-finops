@@ -3054,7 +3054,7 @@ export class PostgresRepository {
       SELECT DISTINCT k.external_key_id
       FROM ${this.schema}.supplier_account_links l
       JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
-      WHERE k.connection_id=$1`, [connectionId]);
+      WHERE k.connection_id=$1 AND k.removed_at IS NULL AND k.status='active'`, [connectionId]);
     return result.rows.map((row) => String(row.external_key_id));
   }
 
@@ -3121,7 +3121,7 @@ export class PostgresRepository {
       JOIN ${this.schema}.supplier_connections c ON c.id=t.connection_id
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
       JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
-      WHERE t.connection_id=$1
+      WHERE t.connection_id=$1 AND k.removed_at IS NULL AND k.status='active'
       ORDER BY t.enabled DESC,t.next_probe_at,t.id`, [connectionId]);
     return { items: result.rows.map((row) => this.qualityTarget(row)) };
   }
@@ -3139,7 +3139,7 @@ export class PostgresRepository {
       JOIN ${this.schema}.supplier_connections c ON c.id=t.connection_id
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
       JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
-      WHERE t.id=$1`, [targetId]);
+      WHERE t.id=$1 AND k.removed_at IS NULL AND k.status='active'`, [targetId]);
     if (!result.rowCount) throw httpError('supplier quality target not found', 404);
     return this.qualityTarget(result.rows[0], { includeCiphertext });
   }
@@ -3151,7 +3151,7 @@ export class PostgresRepository {
       FROM ${this.schema}.supplier_keys k
       JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
-      WHERE k.id=$1`, [keyId]);
+      WHERE k.id=$1 AND k.removed_at IS NULL AND k.status='active'`, [keyId]);
     if (!result.rowCount) throw httpError('supplier key not found', 404);
     return {
       keyId: Number(result.rows[0].supplier_key_id),
@@ -3389,16 +3389,20 @@ export class PostgresRepository {
       this.pool.query(`
         SELECT id,connection_id,name,masked_key,group_name,status,removed_at,rate_multiplier,
                last_check_status,last_check_at
-         FROM ${this.schema}.supplier_keys`),
+         FROM ${this.schema}.supplier_keys
+         WHERE removed_at IS NULL AND status='active'`),
       this.pool.query(`
-        SELECT id,connection_id,supplier_key_id,model,enabled,last_status,last_probe_at
-        FROM ${this.schema}.supplier_quality_targets`),
+        SELECT t.id,t.connection_id,t.supplier_key_id,t.model,t.enabled,t.last_status,t.last_probe_at
+        FROM ${this.schema}.supplier_quality_targets t
+        JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
+        WHERE k.removed_at IS NULL AND k.status='active'`),
       this.pool.query(`
         SELECT k.connection_id,k.id AS supplier_key_id,f.model,SUM(f.user_charge_cny) AS amount
          FROM ${this.schema}.fact_usage_events f
          JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=f.source_account_id
          JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
          WHERE f.occurred_at>=$1 AND f.occurred_at<$2 AND NULLIF(BTRIM(f.model),'') IS NOT NULL
+           AND k.removed_at IS NULL AND k.status='active'
          GROUP BY k.connection_id,k.id,f.model`, [windowStart, windowEnd]),
     ]);
     const connectionRows = new Map(connectionsResult.rows.map((row) => [Number(row.id), row]));
@@ -3569,7 +3573,10 @@ export class PostgresRepository {
           keyId:key.id,dedupeKey:`key:${key.id}:portal_status`,type:'key_status_changed',title:'密钥状态异常',
           message:`${item.name || item.maskedKey} 当前状态：${item.status}`,details:{ previous:previous.status,current:item.status },
         });
-        if (item.status === 'active') await resolveAlert(`key:${key.id}:portal_status`);
+        if (item.status === 'active') {
+          await resolveAlert(`key:${key.id}:portal_status`);
+          await resolveAlert(`key:${key.id}:removed`);
+        }
 
         const check = checks.find((candidate) => candidate.externalId === item.externalId);
         if (check) {
@@ -3609,7 +3616,13 @@ export class PostgresRepository {
         }
       }
 
-      const removed = previousResult.rows.filter((row) => !seen.includes(row.external_key_id) && !row.removed_at);
+      const explicitlyRemoved = new Set(snapshot.keys
+        .filter((item) => ['removed', 'deleted'].includes(String(item.status || '').toLowerCase()))
+        .map((item) => String(item.externalId)));
+      const removed = previousResult.rows.filter((row) => (
+        !row.removed_at
+        && (!seen.includes(row.external_key_id) || explicitlyRemoved.has(String(row.external_key_id)))
+      ));
       if (seen.length) await client.query(`UPDATE ${this.schema}.supplier_keys
         SET removed_at=NOW(),status='removed',updated_at=NOW()
         WHERE connection_id=$1 AND NOT (external_key_id=ANY($2::text[])) AND removed_at IS NULL`, [connectionId,seen]);
@@ -3621,17 +3634,59 @@ export class PostgresRepository {
       });
 
       for (const key of removed) {
-        await client.query(`
-          UPDATE ${this.schema}.dim_accounts a
-          SET supplier='',purchase_batch='',synced_at=NOW()
+        const linkedAccounts = await client.query(`
+          SELECT l.source_account_id,a.name AS account_name
           FROM ${this.schema}.supplier_account_links l
-          WHERE l.supplier_key_id=$1 AND l.source_account_id=a.source_account_id`, [key.id]);
+          LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
+          WHERE l.supplier_key_id=$1
+          FOR UPDATE OF l`, [key.id]);
+        await client.query(`
+          UPDATE ${this.schema}.supplier_quality_targets
+          SET enabled=FALSE,last_status='disabled',last_error='supplier key was removed',updated_at=NOW()
+          WHERE supplier_key_id=$1`, [key.id]);
+        const accountIds = linkedAccounts.rows.map((row) => Number(row.source_account_id));
+        if (!accountIds.length) continue;
+
+        // Keep historical usage/cost snapshots intact, but stop using a removed
+        // supplier key for all future account costing and monitoring.
+        await client.query(`
+          UPDATE ${this.schema}.account_cost_rules
+          SET effective_to=NOW(),status='superseded',updated_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[]) AND supplier_key_id=$2
+            AND status='active' AND effective_to IS NULL`, [accountIds, key.id]);
+        await client.query(`
+          UPDATE ${this.schema}.account_rate_observations
+          SET fresh_until=LEAST(COALESCE(fresh_until,NOW()),NOW())
+          WHERE source_account_id=ANY($1::bigint[]) AND supplier_key_id=$2
+            AND fresh_until>NOW()`, [accountIds, key.id]);
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts
+          SET supplier='',purchase_batch='',synced_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
         await client.query(`
           UPDATE ${this.schema}.account_profit_guard_policies
           SET enabled=FALSE,last_error='upstream supplier key was removed',updated_at=NOW()
-          WHERE source_account_id IN (
-            SELECT source_account_id FROM ${this.schema}.supplier_account_links WHERE supplier_key_id=$1
-          )`, [key.id]);
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
+        await client.query(`
+          DELETE FROM ${this.schema}.supplier_account_links
+          WHERE supplier_key_id=$1 AND source_account_id=ANY($2::bigint[])`, [key.id, accountIds]);
+
+        for (const account of linkedAccounts.rows) {
+          await alert({
+            keyId: key.id,
+            dedupeKey: `account:${account.source_account_id}:supplier-key:${key.id}:removed`,
+            type: 'account_supplier_key_removed',
+            severity: 'critical',
+            title: '\u4e0a\u6e38\u5bc6\u94a5\u5df2\u79fb\u9664\uff0c\u8d26\u53f7\u5df2\u89e3\u9664\u4f9b\u5e94\u5546\u5173\u8054',
+            message: `${account.account_name || `\u8d26\u53f7 ${account.source_account_id}`} \u5df2\u4ece\u4f9b\u5e94\u5546\u5bc6\u94a5\u6240\u5728\u7684\u6210\u672c\u89c4\u5219\u4e2d\u89e3\u9664\uff0c\u672a\u6765\u6d88\u8d39\u9700\u8981\u91cd\u65b0\u914d\u7f6e\u6210\u672c`,
+            details: {
+              accountId: Number(account.source_account_id),
+              accountName: account.account_name || '',
+              supplierKeyId: Number(key.id),
+              supplierKeyName: key.name || key.masked_key || '',
+            },
+          });
+        }
       }
 
       if (snapshot.balance !== null && snapshot.balance !== undefined) {
@@ -3667,7 +3722,8 @@ export class PostgresRepository {
       this.pool.query(`SELECT c.id,c.supplier_key_id,k.name AS key_name,k.masked_key,c.status,c.method,c.http_status,
         c.latency_ms,c.error_code,c.error_message,c.checked_at
         FROM ${this.schema}.supplier_key_checks c JOIN ${this.schema}.supplier_keys k ON k.id=c.supplier_key_id
-        WHERE k.connection_id=$1 ORDER BY c.checked_at DESC,c.id DESC LIMIT 100`, [connectionId]),
+        WHERE k.connection_id=$1 AND k.removed_at IS NULL AND k.status='active'
+        ORDER BY c.checked_at DESC,c.id DESC LIMIT 100`, [connectionId]),
       this.pool.query(`SELECT id,supplier_key_id,alert_type,severity,status,title,message,details,first_seen_at,
         last_seen_at,occurrence_count,acknowledged_at,acknowledged_by,resolved_at
         FROM ${this.schema}.supplier_alert_events WHERE connection_id=$1
@@ -3892,7 +3948,7 @@ export class PostgresRepository {
         lastActionAt: row.last_action_at || null,
         lastError: row.last_error || '',
       } : {
-        enabled: false, minimumMargin: 0, allowEmptyGroups: false,
+        enabled: false, minimumMargin: 0, allowEmptyGroups: true,
         lastEvaluatedAt: null, lastActionAt: null, lastError: '',
       },
       supplier: row && row.supplier_key_id ? {

@@ -262,5 +262,8 @@ test('profit guard settings use a fractional margin and reject unsafe thresholds
   assert.deepEqual(normalizeAccountProfitGuard({
     enabled: true, minimumMargin: '0.2', allowEmptyGroups: true,
   }), { enabled: true, minimumMargin: 0.2, allowEmptyGroups: true });
+  assert.deepEqual(normalizeAccountProfitGuard({ enabled: true }), {
+    enabled: true, minimumMargin: 0, allowEmptyGroups: true,
+  });
   assert.throws(() => normalizeAccountProfitGuard({ minimumMargin: '1' }), /between 0 and 1/);
 });

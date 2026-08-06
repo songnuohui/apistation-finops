@@ -11,6 +11,7 @@ test('profit guard removes a group when the required margin is no longer availab
 
 test('profit guard re-reads the account and sends only group_ids on a safe update', async () => {
   const calls = [];
+  const readOptions = [];
   const repository = {
     async recordProfitGuardEvaluation(candidate, details) {
       calls.push({ kind: 'record', candidate, details });
@@ -20,7 +21,8 @@ test('profit guard re-reads the account and sends only group_ids on a safe updat
     },
   };
   const gateway = {
-    async getAccount() {
+    async getAccount(_accountId, options) {
+      readOptions.push(options);
       return { group_ids: [10, 20] };
     },
     async updateAccountGroups(accountId, groupIds) {
@@ -39,6 +41,7 @@ test('profit guard re-reads the account and sends only group_ids on a safe updat
   assert.deepEqual(calls.find((item) => item.kind === 'update'), {
     kind: 'update', accountId: 8, groupIds: [20],
   });
+  assert.deepEqual(readOptions, [{ fresh: true }, { fresh: true }]);
   assert.equal(calls.filter((item) => item.kind === 'record').length, 1);
 });
 

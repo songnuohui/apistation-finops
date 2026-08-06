@@ -69,14 +69,15 @@ const qualityModeLabels: Record<string, string> = {
   hybrid: '混合',
 };
 
-const activeKeys = computed(() => (detail.value?.keys || []).filter((item: AnyRecord) => item.status === 'active' && !item.removedAt));
+const visibleKeys = computed(() => (detail.value?.keys || []).filter((item: AnyRecord) => item.status === 'active' && !item.removedAt));
+const activeKeys = computed(() => visibleKeys.value);
 const openAlerts = computed(() => (detail.value?.alerts || []).filter((item: AnyRecord) => item.status === 'open'));
 const availableAccounts = computed(() => {
   if (!detail.value || !linkKey.value) return [];
   const currentKeyId = Number(linkKey.value.id);
   const linkedElsewhere = new Set<number>();
   const linkedHere = new Set<number>((linkKey.value.accountLinks || []).map((item: AnyRecord) => Number(item.accountId)));
-  for (const key of detail.value.keys || []) {
+  for (const key of visibleKeys.value) {
     if (Number(key.id) === currentKeyId) continue;
     for (const link of key.accountLinks || []) linkedElsewhere.add(Number(link.accountId));
   }
@@ -632,12 +633,12 @@ onMounted(async () => {
           </div>
           <div class="supplier-metrics">
             <div><span>当前余额</span><strong>{{ amount(detail.connection.balance, detail.connection.balanceCurrency) }}</strong><small>{{ detail.connection.lowBalanceThreshold === null ? '未设置低余额阈值' : `阈值 ${amount(detail.connection.lowBalanceThreshold, detail.connection.balanceCurrency)}` }}</small></div>
-            <div><span>可用密钥</span><strong>{{ activeKeys.length }} / {{ detail.keys.length }}</strong><small>{{ detail.connection.failedKeyCount ? `${detail.connection.failedKeyCount} 个巡检失败` : '未发现巡检异常' }}</small></div>
+            <div><span>可用密钥</span><strong>{{ activeKeys.length }} / {{ visibleKeys.length }}</strong><small>{{ detail.connection.failedKeyCount ? `${detail.connection.failedKeyCount} 个巡检失败` : '未发现巡检异常' }}</small></div>
             <div><span>待处理告警</span><strong>{{ openAlerts.length }}</strong><small>{{ openAlerts.length ? '请查看并处理告警' : '当前没有开放告警' }}</small></div>
             <div><span>下次同步</span><strong>{{ detail.connection.enabled ? dateTime(detail.connection.nextSyncAt) : '已停用' }}</strong><small>每 {{ detail.connection.inventoryIntervalSeconds }} 秒读取一次</small></div>
           </div>
           <div class="detail-tabs">
-            <button :class="{ active: detailTab === 'keys' }" @click="detailTab = 'keys'">API 密钥 <small>{{ detail.keys.length }}</small></button>
+            <button :class="{ active: detailTab === 'keys' }" @click="detailTab = 'keys'">API 密钥 <small>{{ visibleKeys.length }}</small></button>
             <button :class="{ active: detailTab === 'quality' }" @click="detailTab = 'quality'">质量评分 <small>{{ detail.quality?.metrics?.sampleCount || 0 }}</small></button>
             <button :class="{ active: detailTab === 'balances' }" @click="detailTab = 'balances'">余额历史 <small>{{ detail.balances.length }}</small></button>
             <button :class="{ active: detailTab === 'checks' }" @click="detailTab = 'checks'">巡检记录 <small>{{ detail.checks.length }}</small></button>
@@ -649,7 +650,7 @@ onMounted(async () => {
             <div class="table-wrap compact-table">
               <table><thead><tr><th>密钥</th><th>状态</th><th>分组 / 倍率</th><th>额度</th><th>最近巡检</th><th>本地账号</th></tr></thead>
                 <tbody>
-                  <tr v-for="key in detail.keys" :key="key.id">
+                  <tr v-for="key in visibleKeys" :key="key.id">
                     <td><strong>{{ key.name || key.maskedKey || `密钥 #${key.id}` }}</strong><small>{{ key.maskedKey || key.externalId || '--' }} · ID {{ key.externalId || '--' }}</small></td>
                     <td><span class="status-pill" :class="statusClass(key.removedAt ? 'removed' : key.status)">{{ statusLabel(key.removedAt ? 'removed' : key.status) }}</span></td>
                     <td><strong>{{ key.groupName || '未分组' }}</strong><small>{{ key.rateMultiplier === null || key.rateMultiplier === undefined ? '未提供倍率' : `${key.rateMultiplier}x` }}</small></td>
@@ -663,7 +664,7 @@ onMounted(async () => {
                       <button v-if="!key.removedAt" class="small-button link-account-button" @click="openLinkPicker(key)"><Link2 :size="14" />关联账号</button>
                     </td>
                   </tr>
-                  <tr v-if="!detail.keys.length"><td colspan="6" class="table-empty">本次同步没有返回密钥数据</td></tr>
+                  <tr v-if="!visibleKeys.length"><td colspan="6" class="table-empty">本次同步没有返回可用密钥</td></tr>
                 </tbody>
               </table>
             </div>

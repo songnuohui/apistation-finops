@@ -63,10 +63,11 @@ export class Sub2ApiReadonlyGateway {
     }
   }
 
-  async getAccount(accountId) {
+  async getAccount(accountId, { fresh = false } = {}) {
     const payload = await this.request(`/api/v1/admin/accounts/${Number(accountId)}`, {
       cacheKey: `account:${Number(accountId)}`,
       ttlMs: 5_000,
+      cache: !fresh,
     });
     return payload?.account || payload;
   }

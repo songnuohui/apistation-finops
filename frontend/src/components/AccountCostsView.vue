@@ -71,7 +71,7 @@ function makeEditor(account: AnyRecord) {
     tagsText: Array.isArray(account.tags) ? account.tags.join(',') : '',
     profitGuardEnabled: false,
     profitGuardMinimumMarginPercent: 0,
-    profitGuardAllowEmptyGroups: false,
+    profitGuardAllowEmptyGroups: true,
   };
 }
 
