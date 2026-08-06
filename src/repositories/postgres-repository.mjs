@@ -3525,7 +3525,7 @@ export class PostgresRepository {
             connection_id,external_key_id,name,masked_key,key_fingerprint,status,group_id,group_name,
             rate_multiplier,quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,
             source_data,last_seen_at,removed_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW(),
+           VALUES($1,$2,$3,$4,$5,$6::text,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW(),
              CASE WHEN $6::text IN ('removed','deleted') THEN NOW() ELSE NULL END)
           ON CONFLICT(connection_id,external_key_id) DO UPDATE SET
             name=EXCLUDED.name,masked_key=EXCLUDED.masked_key,

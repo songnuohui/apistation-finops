@@ -31,6 +31,72 @@ test('cost allocation respects standard, token, and no-allocation rules', () => 
   assert.match(standard, /cost\*tokens\/total_tokens/);
 });
 
+test('supplier key sync pins the status parameter to text in every SQL context', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT c.*,s.name AS supplier_name')) {
+        return {
+          rows: [{
+            id: '9',
+            supplier_name: 'Provider A',
+            inventory_interval_seconds: 600,
+            low_balance_threshold: null,
+            balance_currency: 'USD',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT * FROM "finops".supplier_keys')) return { rows: [], rowCount: 0 };
+      if (text.includes('INSERT INTO "finops".supplier_keys')) {
+        return {
+          rows: [{
+            id: '77',
+            external_key_id: '596',
+            name: 'upstream-key',
+            status: 'active',
+            rate_multiplier: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+
+  await repository.recordSupplierSyncSuccess(9, {
+    adapterType: 'sub2api',
+    identity: '',
+    balance: null,
+    balanceCurrency: 'USD',
+    keys: [{
+      externalId: '596',
+      name: 'upstream-key',
+      maskedKey: 'sk-...test',
+      keyFingerprint: 'fingerprint',
+      status: 'active',
+      groupId: '',
+      groupName: '',
+      rateMultiplier: null,
+      quotaTotal: null,
+      quotaUsed: null,
+      quotaRemaining: null,
+      quotaCurrency: 'USD',
+      expiresAt: null,
+      lastUsedAt: null,
+      sourceData: {},
+    }],
+  }, []);
+
+  const keyInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_keys'));
+  assert.match(keyInsert.text, /VALUES\(\$1,\$2,\$3,\$4,\$5,\$6::text,\$7/);
+  assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
+});
+
 test('fixed allocation strategies are rendered as SQL string literals', () => {
   const standard = allocatedCostSql("'standard_cost_weight'", 'cost', 'standard', 'total_standard', 'tokens', 'total_tokens', 'requests', 'total_requests');
   const token = allocatedCostSql("'token_weight'", 'cost', 'standard', 'total_standard', 'tokens', 'total_tokens', 'requests', 'total_requests');
