@@ -17,7 +17,8 @@ const router = useRouter();
 
 const search = ref('');
 const loading = ref(false);
-const items = ref<AnyRecord[]>([]);
+const connectionItems = ref<AnyRecord[]>([]);
+const showUnconfiguredProfitGuard = ref(false);
 const editor = ref<AnyRecord | null>(null);
 const editorSaving = ref(false);
 const detail = ref<AnyRecord | null>(null);
@@ -78,6 +79,11 @@ const qualityModeLabels: Record<string, string> = {
 const visibleKeys = computed(() => (detail.value?.keys || []).filter((item: AnyRecord) => item.status === 'active' && !item.removedAt));
 const activeKeys = computed(() => visibleKeys.value);
 const openAlerts = computed(() => (detail.value?.alerts || []).filter((item: AnyRecord) => item.status === 'open'));
+const unconfiguredProfitGuardCount = computed(() => connectionItems.value
+  .filter((item) => !item.profitGuardEnabled).length);
+const items = computed(() => showUnconfiguredProfitGuard.value
+  ? connectionItems.value.filter((item) => !item.profitGuardEnabled)
+  : connectionItems.value);
 const calculatedMinimumSaleMultiplier = computed(() => {
   const current = profitGuardEditor.value;
   if (!current || current.thresholdMode !== 'margin') return null;
@@ -183,7 +189,7 @@ async function loadConnections() {
   loading.value = true;
   try {
     const result = await get(`/supplier-connections?${query({ search: search.value })}`);
-    items.value = result.items || [];
+    connectionItems.value = result.items || [];
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -699,6 +705,7 @@ onMounted(async () => {
         <input v-model="search" placeholder="搜索供应商、连接名称或站点地址" />
       </label>
       <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
+      <button class="secondary-button profit-guard-filter" :class="{ active: showUnconfiguredProfitGuard }" title="显示未启用统一利润保护的供应商连接" @click="showUnconfiguredProfitGuard = !showUnconfiguredProfitGuard"><AlertTriangle :size="16" />未配置利润控制 <span v-if="unconfiguredProfitGuardCount" class="filter-count">{{ unconfiguredProfitGuardCount }}</span></button>
       <button class="secondary-button" @click="openServiceAuthSettings"><KeyRound :size="16" />Sub2API 自动认证</button>
       <button class="secondary-button" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
@@ -725,6 +732,7 @@ onMounted(async () => {
                 </button>
                 <small>{{ item.name || '默认连接' }} · {{ adapterLabel(item.detectedAdapterType || item.adapterType) }} · {{ authLabel(item.authMode) }}</small>
                 <small class="supplier-url">{{ item.baseUrl || '--' }}</small>
+                <small :class="{ 'profit-guard-on': item.profitGuardEnabled, 'profit-guard-missing': !item.profitGuardEnabled }">利润保护：{{ item.profitGuardEnabled ? '已启用' : item.profitGuardConfigured ? '已关闭' : '未配置' }}</small>
               </td>
               <td>
                 <span class="status-pill" :class="statusClass(item.connectionStatus)">{{ statusLabel(item.connectionStatus) }}</span>

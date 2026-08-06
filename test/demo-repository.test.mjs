@@ -239,6 +239,9 @@ test('supplier profit guard defaults apply to existing and newly linked accounts
   assert.equal(inherited.policy.enabled, true);
   assert.equal(inherited.policy.minimumMargin, 0.3);
   assert.equal((await repository.getSupplierProfitGuardDefault(1)).configured, true);
+  const connection = (await repository.listSupplierConnections()).items.find((item) => item.id === 1);
+  assert.equal(connection.profitGuardConfigured, true);
+  assert.equal(connection.profitGuardEnabled, true);
 });
 
 test('supplier quality overview exposes connection scores, samples, models, and targets', async () => {

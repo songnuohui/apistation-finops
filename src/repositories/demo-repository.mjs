@@ -782,14 +782,26 @@ export class DemoRepository {
     return {
       items: this.supplierConnections
         .filter((item) => `${item.supplierName} ${item.name} ${item.baseUrl}`.toLowerCase().includes(term))
-        .map((item) => copySupplierConnection(item)),
+        .map((item) => {
+          const policy = this.supplierProfitGuardDefaults.get(Number(item.id));
+          return {
+            ...copySupplierConnection(item),
+            profitGuardConfigured: Boolean(policy),
+            profitGuardEnabled: Boolean(policy?.enabled),
+          };
+        }),
     };
   }
 
   async getSupplierConnection(connectionId, { includeCiphertext = false } = {}) {
     const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
     if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
-    return copySupplierConnection(connection, { includeCiphertext });
+    const policy = this.supplierProfitGuardDefaults.get(Number(connectionId));
+    return {
+      ...copySupplierConnection(connection, { includeCiphertext }),
+      profitGuardConfigured: Boolean(policy),
+      profitGuardEnabled: Boolean(policy?.enabled),
+    };
   }
 
   supplierDetail(connectionId) {

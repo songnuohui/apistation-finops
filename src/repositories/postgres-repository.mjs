@@ -52,6 +52,8 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     activeKeyCount: Number(row.active_key_count || 0),
     failedKeyCount: Number(row.failed_key_count || 0),
     openAlertCount: Number(row.open_alert_count || 0),
+    profitGuardConfigured: Boolean(row.profit_guard_configured),
+    profitGuardEnabled: Boolean(row.profit_guard_enabled),
     updatedAt: row.updated_at || null,
   };
   if (includeCiphertext) result.credentialsCiphertext = row.credentials_ciphertext || '';
@@ -2932,9 +2934,13 @@ export class PostgresRepository {
              COALESCE(keys.key_count,0)::int AS key_count,
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
-             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count
-      FROM ${this.schema}.supplier_connections c
-      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count,
+             (profit_guard.connection_id IS NOT NULL) AS profit_guard_configured,
+             COALESCE(profit_guard.enabled,FALSE) AS profit_guard_enabled
+       FROM ${this.schema}.supplier_connections c
+       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+       LEFT JOIN ${this.schema}.supplier_profit_guard_defaults profit_guard
+         ON profit_guard.connection_id=c.id
       LEFT JOIN LATERAL (
         SELECT balance FROM ${this.schema}.supplier_balance_snapshots
         WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
@@ -2961,9 +2967,13 @@ export class PostgresRepository {
              COALESCE(keys.key_count,0)::int AS key_count,
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
-             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count
-      FROM ${this.schema}.supplier_connections c
-      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+             COALESCE(alerts.open_alert_count,0)::int AS open_alert_count,
+             (profit_guard.connection_id IS NOT NULL) AS profit_guard_configured,
+             COALESCE(profit_guard.enabled,FALSE) AS profit_guard_enabled
+       FROM ${this.schema}.supplier_connections c
+       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+       LEFT JOIN ${this.schema}.supplier_profit_guard_defaults profit_guard
+         ON profit_guard.connection_id=c.id
       LEFT JOIN LATERAL (
         SELECT balance FROM ${this.schema}.supplier_balance_snapshots
         WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
