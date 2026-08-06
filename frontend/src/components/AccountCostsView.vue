@@ -231,6 +231,7 @@ onMounted(load);
   <div class="page-view account-cost-view">
     <div class="toolbar-row">
       <label class="search-box"><WalletCards :size="17" /><input v-model="search" placeholder="搜索账号、平台或供应商" /></label>
+      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
     </div>
     <section class="panel table-panel">

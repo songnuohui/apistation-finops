@@ -12,6 +12,7 @@ import AccountCostsView from './components/AccountCostsView.vue';
 import SupplierQualityView from './components/SupplierQualityView.vue';
 import UsageView from './components/UsageView.vue';
 import UserFinanceView from './components/UserFinanceView.vue';
+import OverviewView from './components/OverviewView.vue';
 
 type AnyRecord = Record<string, any>;
 
@@ -38,6 +39,7 @@ const accountEditor = ref<AnyRecord | null>(null);
 const supplierEditor = ref<AnyRecord | null>(null);
 const supplierRefreshToken = ref(0);
 const accountRefreshToken = ref(0);
+const overviewRefreshToken = ref(0);
 const userRefreshToken = ref(0);
 const usageRefreshToken = ref(0);
 const qualityRefreshToken = ref(0);
@@ -46,7 +48,6 @@ const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
 const qualitySort = ref('riskAdjustedScore');
 const qualityDirection = ref<'asc' | 'desc'>('desc');
-let runtimeTimer: number | undefined;
 
 const nav = [
   { id: 'overview', label: '经营总览', icon: LayoutDashboard, group: '经营分析' },
@@ -139,7 +140,7 @@ async function loadQuality() {
 async function loadPage() {
   loading.value = true;
   try {
-    if (page.value === 'overview') await loadOverview();
+    if (page.value === 'overview') overviewRefreshToken.value += 1;
     else if (page.value === 'users') userRefreshToken.value += 1;
     else if (page.value === 'usage') usageRefreshToken.value += 1;
     else if (page.value === 'accounts') accountRefreshToken.value += 1;
@@ -253,11 +254,7 @@ watch(search, () => {
 onMounted(async () => {
   await loadSession();
   await loadPage();
-  runtimeTimer = window.setInterval(() => {
-    if (page.value === 'overview') loadRuntime();
-  }, 3_000);
 });
-onUnmounted(() => { if (runtimeTimer) window.clearInterval(runtimeTimer); });
 
 const overviewSummary = computed(() => overview.value.summary || {});
 const operations = computed(() => overviewSummary.value.operations || {});
@@ -317,7 +314,8 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
       </header>
       <section class="page-content">
         <div v-if="toast" class="toast">{{ toast }}</div>
-        <div v-if="page === 'overview'" class="page-view">
+        <OverviewView v-if="page === 'overview'" :refresh-token="overviewRefreshToken" :range="range" @toast="showToast" />
+        <div v-else-if="false" class="page-view">
           <div class="metric-grid">
             <Metric title="充值净额" :value="formatCny(Number(cash.rechargeReceived || 0) - Number(cash.refunds || 0))" :hint="`充值 ${formatCny(cash.rechargeReceived)} · 退款 ${formatCny(cash.refunds)}`" />
             <Metric title="赠送金额" :value="formatCny(overview.totals?.giftBalanceCreditCny)" :hint="`${compact(overview.totals?.giftBalanceCreditCount)} 笔非现金入账`" tone="good" />

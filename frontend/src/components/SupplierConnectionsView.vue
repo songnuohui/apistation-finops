@@ -505,6 +505,7 @@ onMounted(async () => {
         <ServerCog :size="17" />
         <input v-model="search" placeholder="搜索供应商、连接名称或站点地址" />
       </label>
+      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       <button class="secondary-button" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>

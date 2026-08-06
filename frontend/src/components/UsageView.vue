@@ -45,7 +45,7 @@ onMounted(load);
 
 <template>
   <div class="page-view usage-view">
-    <div class="toolbar-row"><label class="search-box"><Search :size="17" /><input v-model="search" :placeholder="tab === 'events' ? '搜索请求 ID、用户、账号或模型' : '搜索用户或模型'" /></label><span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span></div>
+    <div class="toolbar-row"><label class="search-box"><Search :size="17" /><input v-model="search" :placeholder="tab === 'events' ? '搜索请求 ID、用户、账号或模型' : '搜索用户或模型'" /></label><button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span></div>
     <div class="tabs"><button :class="{ active: tab === 'users' }" @click="tab = 'users'">用户消费汇总</button><button :class="{ active: tab === 'models' }" @click="tab = 'models'">模型消费汇总</button><button :class="{ active: tab === 'events' }" @click="tab = 'events'">请求明细</button></div>
     <section class="panel table-panel">
       <div class="panel-head"><div><h2>{{ tab === 'users' ? '用户消费汇总' : tab === 'models' ? '模型消费汇总' : '请求明细' }}</h2><p>销售额来自实际消费记录，成本使用 FinOps 成本快照</p></div><FileText :size="20" class="head-icon" /></div>

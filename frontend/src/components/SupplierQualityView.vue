@@ -104,6 +104,7 @@ onMounted(load);
       <label><span>监控模式</span><select v-model="mode"><option value="all">全部模式</option><option value="off">关闭</option><option value="passive">被动监控</option><option value="active">主动探测</option><option value="hybrid">混合监控</option></select></label>
       <label><span>连接状态</span><select v-model="status"><option value="all">全部状态</option><option value="ok">正常</option><option value="warning">需关注</option><option value="pending">待同步</option><option value="failed">失败</option><option value="disabled">已停用</option><option value="unsupported">不支持</option></select></label>
       <label><span>评分状态</span><select v-model="scoreScope"><option value="all">全部评分</option><option value="scored">已有评分</option><option value="unscored">暂无评分</option></select></label>
+      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
     </div>
     <section class="panel table-panel">
