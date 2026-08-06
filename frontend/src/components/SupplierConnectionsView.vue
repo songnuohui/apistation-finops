@@ -35,6 +35,8 @@ const serviceAuthEditor = ref<AnyRecord | null>(null);
 const serviceAuthSaving = ref(false);
 const profitGuardEditor = ref<AnyRecord | null>(null);
 const profitGuardSaving = ref(false);
+const supplierProfitGuardEditor = ref<AnyRecord | null>(null);
+const supplierProfitGuardSaving = ref(false);
 let searchTimer: number | undefined;
 
 const adapterLabels: Record<string, string> = {
@@ -333,6 +335,7 @@ async function closeDetails() {
   detail.value = null;
   linkKey.value = null;
   targetEditor.value = null;
+  supplierProfitGuardEditor.value = null;
   if (route.query.connection) await router.replace('/suppliers');
 }
 
@@ -412,6 +415,52 @@ async function saveProfitGuard() {
     notify(error.message);
   } finally {
     profitGuardSaving.value = false;
+  }
+}
+
+async function openSupplierProfitGuardEditor() {
+  if (!detail.value) return;
+  supplierProfitGuardSaving.value = true;
+  try {
+    const policy = await get(`/supplier-connections/${detail.value.connection.id}/profit-guard-default`);
+    supplierProfitGuardEditor.value = {
+      ...policy,
+      minimumMarginPercent: Number(policy.minimumMargin || 0) * 100,
+      minimumSaleMultiplier: policy.minimumSaleMultiplier ?? '',
+    };
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    supplierProfitGuardSaving.value = false;
+  }
+}
+
+async function saveSupplierProfitGuard() {
+  if (!detail.value || !supplierProfitGuardEditor.value) return;
+  const current = supplierProfitGuardEditor.value;
+  supplierProfitGuardSaving.value = true;
+  try {
+    const result = await send(`/supplier-connections/${detail.value.connection.id}/profit-guard-default`, 'PATCH', {
+      enabled: Boolean(current.enabled),
+      thresholdMode: current.thresholdMode,
+      minimumMargin: Number(current.minimumMarginPercent || 0) / 100,
+      minimumSaleMultiplier: current.thresholdMode === 'minimum_sale_multiplier'
+        ? Number(current.minimumSaleMultiplier)
+        : null,
+      allowEmptyGroups: Boolean(current.allowEmptyGroups),
+    });
+    supplierProfitGuardEditor.value = null;
+    const evaluationNote = result.evaluation?.error
+      ? '；规则已保存，等待管理员认证后自动执行'
+      : result.evaluation?.changed
+        ? `；已移除 ${result.evaluation.changed} 个账号中的亏损分组`
+        : '';
+    notify(`统一利润保护已应用到 ${result.appliedAccountCount || 0} 个关联账号${evaluationNote}`);
+    await openDetails(Number(detail.value.connection.id), 'keys');
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    supplierProfitGuardSaving.value = false;
   }
 }
 
@@ -787,7 +836,7 @@ onMounted(async () => {
           </div>
 
           <section v-if="detailTab === 'keys'" class="detail-section">
-            <div class="detail-section-head"><div><h3>API 密钥库存</h3><p>仅展示上游返回的脱敏标识；账号关联后自动使用该密钥的上游倍率。</p></div></div>
+            <div class="detail-section-head"><div><h3>API 密钥库存</h3><p>仅展示上游返回的脱敏标识；账号关联后自动使用该密钥的上游倍率。</p></div><button class="secondary-button" @click="openSupplierProfitGuardEditor"><Settings2 :size="16" />统一利润保护</button></div>
             <div class="table-wrap compact-table">
               <table><thead><tr><th>密钥</th><th>状态</th><th>分组 / 倍率</th><th>额度</th><th>最近巡检</th><th>本地账号</th></tr></thead>
                 <tbody>
@@ -913,6 +962,48 @@ onMounted(async () => {
         <footer>
           <button class="secondary-button" @click="profitGuardEditor = null">取消</button>
           <button class="primary-button" :disabled="profitGuardSaving" @click="saveProfitGuard"><Check :size="16" />保存利润保护</button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="supplierProfitGuardEditor" class="modal-layer nested-modal" @click.self="supplierProfitGuardEditor = null">
+      <section class="modal form-modal profit-guard-modal">
+        <header>
+          <div>
+            <h2>供应商统一利润保护</h2>
+            <p>{{ detail?.connection?.supplierName }} · {{ detail?.connection?.name }}</p>
+          </div>
+          <button class="icon-button" @click="supplierProfitGuardEditor = null"><X :size="19" /></button>
+        </header>
+        <div class="form-grid">
+          <label class="toggle-field full-field">
+            <input v-model="supplierProfitGuardEditor.enabled" type="checkbox" />
+            <span><strong>统一启用利润保护</strong><small>保存后覆盖该供应商当前所有已关联账号；以后新关联账号也会自动继承。</small></span>
+          </label>
+          <label>保护方式
+            <select v-model="supplierProfitGuardEditor.thresholdMode" :disabled="!supplierProfitGuardEditor.enabled">
+              <option value="margin">最低毛利率</option>
+              <option value="minimum_sale_multiplier">最低售卖倍率</option>
+            </select>
+          </label>
+          <label v-if="supplierProfitGuardEditor.thresholdMode === 'margin'">最低毛利率 (%)
+            <input v-model="supplierProfitGuardEditor.minimumMarginPercent" type="number" min="0" max="99.99" step="0.1" :disabled="!supplierProfitGuardEditor.enabled" />
+          </label>
+          <label v-else>最低售卖倍率
+            <input v-model="supplierProfitGuardEditor.minimumSaleMultiplier" type="number" min="0" step="0.0001" :disabled="!supplierProfitGuardEditor.enabled" />
+          </label>
+          <label class="toggle-field full-field">
+            <input v-model="supplierProfitGuardEditor.allowEmptyGroups" type="checkbox" :disabled="!supplierProfitGuardEditor.enabled" />
+            <span><strong>允许移出最后一个分组</strong><small>关闭时，账号只会告警并保留最后一个亏损分组。</small></span>
+          </label>
+        </div>
+        <div v-if="supplierProfitGuardEditor.thresholdMode === 'margin'" class="form-note">
+          该规则会按每个密钥各自的当前上游倍率计算最低售卖倍率；保存时立即覆盖当前关联账号。
+        </div>
+        <div v-else class="form-note">售卖倍率低于该值的分组会从对应账号移除；售卖倍率不高于上游成本的分组始终会被移除。</div>
+        <footer>
+          <button class="secondary-button" @click="supplierProfitGuardEditor = null">取消</button>
+          <button class="primary-button" :disabled="supplierProfitGuardSaving" @click="saveSupplierProfitGuard"><Check :size="16" />保存并批量应用</button>
         </footer>
       </section>
     </div>

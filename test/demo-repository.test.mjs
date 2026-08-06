@@ -220,6 +220,27 @@ test('NewAPI supplier keys are available for account cost linking', async () => 
   assert.equal(result.costMode, 'probe_multiplier');
 });
 
+test('supplier profit guard defaults apply to existing and newly linked accounts', async () => {
+  const repository = new DemoRepository(config);
+  const applied = await repository.upsertSupplierProfitGuardDefault(1, {
+    enabled: true,
+    minimumMargin: 0.3,
+    thresholdMode: 'margin',
+    minimumSaleMultiplier: null,
+    allowEmptyGroups: true,
+  }, 'finance@example.com');
+  assert.equal(applied.appliedAccountCount, 1);
+  assert.equal((await repository.getAccountProfitGuard(2745)).policy.minimumMargin, 0.3);
+
+  const detail = await repository.getSupplierConnectionDetails(1);
+  const unlinkedKey = detail.keys.find((key) => !key.accountLinks.length);
+  await repository.setSupplierKeyAccountLink(unlinkedKey.id, 2742, true);
+  const inherited = await repository.getAccountProfitGuard(2742);
+  assert.equal(inherited.policy.enabled, true);
+  assert.equal(inherited.policy.minimumMargin, 0.3);
+  assert.equal((await repository.getSupplierProfitGuardDefault(1)).configured, true);
+});
+
 test('supplier quality overview exposes connection scores, samples, models, and targets', async () => {
   const repository = new DemoRepository(config);
   const overview = await repository.listSupplierQualityOverview();

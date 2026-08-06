@@ -3867,6 +3867,28 @@ export class PostgresRepository {
           SET cost_profile_id=NULL,supplier=$2,purchase_batch=$3,synced_at=NOW()
           WHERE source_account_id=$1`,
         [accountId,key.supplier_name,supplierKeyPurchaseBatch(key)]);
+        const defaultPolicy = await client.query(`
+          SELECT enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,allow_empty_groups
+          FROM ${this.schema}.supplier_profit_guard_defaults
+          WHERE connection_id=$1`, [key.connection_id]);
+        if (defaultPolicy.rowCount) {
+          const policy = defaultPolicy.rows[0];
+          await client.query(`
+            INSERT INTO ${this.schema}.account_profit_guard_policies(
+              source_account_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+              allow_empty_groups,created_by,updated_by)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$7)
+            ON CONFLICT(source_account_id) DO UPDATE SET
+              enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+              threshold_mode=EXCLUDED.threshold_mode,
+              minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
+              allow_empty_groups=EXCLUDED.allow_empty_groups,last_error='',
+              updated_by=EXCLUDED.updated_by,updated_at=NOW()`,
+          [
+            accountId, Boolean(policy.enabled), policy.minimum_margin, policy.threshold_mode,
+            policy.minimum_sale_multiplier, Boolean(policy.allow_empty_groups), actor,
+          ]);
+        }
       } else {
         await client.query(`
           DELETE FROM ${this.schema}.supplier_account_links
@@ -3906,6 +3928,94 @@ export class PostgresRepository {
         probeStatus:key.last_check_status || 'pending',
         probeCheckedAt:key.last_check_at || null,
         adapterType:key.detected_adapter_type || key.adapter_type,
+      };
+    });
+  }
+
+  async getSupplierProfitGuardDefault(connectionId) {
+    await this.getSupplierConnection(connectionId);
+    const result = await this.pool.query(`
+      SELECT connection_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+             allow_empty_groups,updated_by,updated_at
+      FROM ${this.schema}.supplier_profit_guard_defaults
+      WHERE connection_id=$1`, [connectionId]);
+    const row = result.rows[0];
+    return {
+      connectionId:Number(connectionId),
+      configured:Boolean(row),
+      enabled:Boolean(row?.enabled),
+      minimumMargin:Number(row?.minimum_margin || 0),
+      thresholdMode:row?.threshold_mode || 'margin',
+      minimumSaleMultiplier:nullableNumber(row?.minimum_sale_multiplier),
+      allowEmptyGroups:row?.allow_empty_groups === undefined ? true : Boolean(row.allow_empty_groups),
+      updatedBy:row?.updated_by || '',
+      updatedAt:row?.updated_at || null,
+    };
+  }
+
+  async upsertSupplierProfitGuardDefault(connectionId, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const connection = await client.query(`
+        SELECT id FROM ${this.schema}.supplier_connections WHERE id=$1 FOR UPDATE`, [connectionId]);
+      if (!connection.rowCount) throw httpError('supplier connection not found', 404);
+      const policyResult = await client.query(`
+        INSERT INTO ${this.schema}.supplier_profit_guard_defaults(
+          connection_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+          allow_empty_groups,created_by,updated_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$7)
+        ON CONFLICT(connection_id) DO UPDATE SET
+          enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+          threshold_mode=EXCLUDED.threshold_mode,
+          minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
+          allow_empty_groups=EXCLUDED.allow_empty_groups,
+          updated_by=EXCLUDED.updated_by,updated_at=NOW()
+        RETURNING connection_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+                  allow_empty_groups,updated_by,updated_at`,
+      [
+        connectionId, Boolean(input.enabled), input.minimumMargin, input.thresholdMode,
+        input.minimumSaleMultiplier, Boolean(input.allowEmptyGroups), actor,
+      ]);
+      const applied = await client.query(`
+        INSERT INTO ${this.schema}.account_profit_guard_policies(
+          source_account_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+          allow_empty_groups,created_by,updated_by)
+        SELECT l.source_account_id,$2,$3,$4,$5,$6,$7,$7
+        FROM ${this.schema}.supplier_account_links l
+        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+        WHERE k.connection_id=$1
+        ON CONFLICT(source_account_id) DO UPDATE SET
+          enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+          threshold_mode=EXCLUDED.threshold_mode,
+          minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
+          allow_empty_groups=EXCLUDED.allow_empty_groups,last_error='',
+          updated_by=EXCLUDED.updated_by,updated_at=NOW()
+        RETURNING source_account_id`,
+      [
+        connectionId, Boolean(input.enabled), input.minimumMargin, input.thresholdMode,
+        input.minimumSaleMultiplier, Boolean(input.allowEmptyGroups), actor,
+      ]);
+      const row = policyResult.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'upsert_supplier_profit_guard_default','supplier_connection',$2,$3::jsonb)`,
+      [actor,String(connectionId),JSON.stringify({
+        enabled:Boolean(row.enabled),
+        minimumMargin:Number(row.minimum_margin || 0),
+        thresholdMode:row.threshold_mode,
+        minimumSaleMultiplier:nullableNumber(row.minimum_sale_multiplier),
+        allowEmptyGroups:Boolean(row.allow_empty_groups),
+        appliedAccountCount:applied.rowCount,
+      })]);
+      return {
+        connectionId:Number(row.connection_id),
+        configured:true,
+        enabled:Boolean(row.enabled),
+        minimumMargin:Number(row.minimum_margin || 0),
+        thresholdMode:row.threshold_mode || 'margin',
+        minimumSaleMultiplier:nullableNumber(row.minimum_sale_multiplier),
+        allowEmptyGroups:Boolean(row.allow_empty_groups),
+        updatedBy:row.updated_by || '',
+        updatedAt:row.updated_at || null,
+        appliedAccountCount:applied.rowCount,
       };
     });
   }

@@ -894,6 +894,7 @@ for (const adapterType of ['sub2api', 'newapi']) test(`linking an active ${adapt
         return { rows: [], rowCount: 0 };
       }
       if (text.includes('FROM "finops".account_cost_periods')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".supplier_profit_guard_defaults')) return { rows: [], rowCount: 0 };
       if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
         return {
           rows: [{

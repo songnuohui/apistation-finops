@@ -243,6 +243,7 @@ export class DemoRepository {
     };
     this.supplierAlertDeliveries = new Map();
     this.accountProfitGuardPolicies = new Map();
+    this.supplierProfitGuardDefaults = new Map();
     this.accountCostPeriods = this.accounts.map((account, index) => {
       const effectiveFrom = new Date(Date.now() - 30 * 86_400_000).toISOString();
       const effectiveTo = account.expiresAt
@@ -996,6 +997,12 @@ export class DemoRepository {
   async getSupplierConnectionDetails(connectionId) {
     const connection = await this.getSupplierConnection(connectionId);
     const detail = copySupplierDetail(this.supplierDetail(connectionId));
+    for (const key of detail.keys) {
+      key.accountLinks = key.accountLinks.map((link) => {
+        const policy = this.accountProfitGuardPolicies.get(Number(link.accountId));
+        return policy ? { ...link, profitGuard: policy } : link;
+      });
+    }
     return {
       connection,
       keys: detail.keys.filter((key) => !key.removedAt && key.status === 'active'),
@@ -1198,6 +1205,8 @@ export class DemoRepository {
         }
       }
       match.key.accountLinks.push({ accountId: account.id, accountName: account.name });
+      const defaultPolicy = this.supplierProfitGuardDefaults.get(Number(match.connection.id));
+      if (defaultPolicy) this.accountProfitGuardPolicies.set(Number(accountId), { ...defaultPolicy });
       account.costMode = 'probe_multiplier';
       account.costType = 'probe_multiplier';
       account.supplier = match.connection.supplierName;
@@ -1237,6 +1246,52 @@ export class DemoRepository {
       probeStatus: match.key.lastCheckStatus || 'pending',
       probeCheckedAt: match.key.lastCheckAt || null,
       adapterType: match.connection.detectedAdapterType || match.connection.adapterType,
+    };
+  }
+
+  async getSupplierProfitGuardDefault(connectionId) {
+    await this.getSupplierConnection(connectionId);
+    const policy = this.supplierProfitGuardDefaults.get(Number(connectionId));
+    return {
+      connectionId: Number(connectionId),
+      configured: Boolean(policy),
+      enabled: Boolean(policy?.enabled),
+      minimumMargin: Number(policy?.minimumMargin || 0),
+      thresholdMode: policy?.thresholdMode || 'margin',
+      minimumSaleMultiplier: policy?.minimumSaleMultiplier ?? null,
+      allowEmptyGroups: policy?.allowEmptyGroups ?? true,
+      updatedBy: policy?.updatedBy || '',
+      updatedAt: policy?.updatedAt || null,
+    };
+  }
+
+  async upsertSupplierProfitGuardDefault(connectionId, input, actor = 'admin') {
+    const connection = await this.getSupplierConnection(connectionId);
+    const policy = {
+      enabled: Boolean(input.enabled),
+      minimumMargin: Number(input.minimumMargin || 0),
+      thresholdMode: input.thresholdMode || 'margin',
+      minimumSaleMultiplier: input.minimumSaleMultiplier === null || input.minimumSaleMultiplier === undefined
+        ? null
+        : Number(input.minimumSaleMultiplier),
+      allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      lastEvaluatedAt: null,
+      lastActionAt: null,
+      lastError: '',
+      updatedBy: actor,
+      updatedAt: new Date().toISOString(),
+    };
+    this.supplierProfitGuardDefaults.set(Number(connectionId), policy);
+    const accounts = this.supplierDetail(connectionId).keys
+      .flatMap((key) => key.accountLinks || [])
+      .map((link) => Number(link.accountId))
+      .filter(Number.isSafeInteger);
+    for (const accountId of accounts) this.accountProfitGuardPolicies.set(accountId, { ...policy });
+    return {
+      connectionId: Number(connection.id),
+      configured: true,
+      ...policy,
+      appliedAccountCount: accounts.length,
     };
   }
 
