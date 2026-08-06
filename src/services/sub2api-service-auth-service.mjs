@@ -1,4 +1,8 @@
-import { completeSub2ApiAdministratorTwoFactor, loginSub2ApiAdministrator } from './sub2api-auth-service.mjs';
+import {
+  completeSub2ApiAdministratorTwoFactor,
+  listSub2ApiAdminGroups,
+  loginSub2ApiAdministrator,
+} from './sub2api-auth-service.mjs';
 import { SupplierCredentialVault, totpCode } from './supplier-credentials.mjs';
 
 function authError(message, statusCode = 503) {
@@ -21,10 +25,18 @@ function configured(settings) {
   return Boolean(settings?.credentialsCiphertext);
 }
 
+function authMode(settings) {
+  return settings?.authMode === 'api_key' ? 'api_key' : 'password';
+}
+
 export class Sub2ApiServiceAuthService {
   constructor(repository, config, logger = console, {
     login = loginSub2ApiAdministrator,
     completeTwoFactor = completeSub2ApiAdministratorTwoFactor,
+    verifyApiKey = ({ apiKey }, authConfig) => listSub2ApiAdminGroups({
+      accessToken: apiKey,
+      authHeaders: { 'X-API-Key': apiKey },
+    }, authConfig),
     now = () => Date.now(),
   } = {}) {
     this.repository = repository;
@@ -32,6 +44,7 @@ export class Sub2ApiServiceAuthService {
     this.logger = logger;
     this.login = login;
     this.completeTwoFactor = completeTwoFactor;
+    this.verifyApiKey = verifyApiKey;
     this.now = now;
     this.vault = new SupplierCredentialVault(config.supplierCredentialsKey);
     this.settings = null;
@@ -51,6 +64,7 @@ export class Sub2ApiServiceAuthService {
     const settings = this.settings || {};
     return {
       enabled: Boolean(settings.enabled),
+      authMode: authMode(settings),
       email: settings.email || '',
       credentialsConfigured: configured(settings),
       authenticated: Boolean(this.accessToken),
@@ -94,6 +108,17 @@ export class Sub2ApiServiceAuthService {
     return this.refresh({ force });
   }
 
+  async getAuthentication({ force = false } = {}) {
+    const credential = await this.getAccessToken({ force });
+    if (!credential) return null;
+    return {
+      credential,
+      headers: authMode(this.settings) === 'api_key'
+        ? { 'X-API-Key': credential }
+        : { Authorization: `Bearer ${credential}` },
+    };
+  }
+
   async invalidateAccessToken(token = '') {
     if (token && this.accessToken && token !== this.accessToken) return;
     this.accessToken = '';
@@ -118,6 +143,23 @@ export class Sub2ApiServiceAuthService {
     if (!this.vault.available) throw authError('service credential encryption is not configured');
     try {
       const credentials = this.vault.decrypt(settings.credentialsCiphertext);
+      const mode = authMode(settings);
+      const now = this.now();
+      if (mode === 'api_key') {
+        const apiKey = String(credentials.apiKey || '').trim();
+        if (!apiKey) throw authError('Sub2API administrator API Key is required', 400);
+        await this.verifyApiKey({ apiKey }, this.config);
+        this.accessToken = apiKey;
+        this.tokenExpiresAt = null;
+        this.nextRefreshAt = now + this.config.sub2apiServiceAuthRefreshSeconds * 1000;
+        await this.repository.recordSub2ApiServiceAuthResult({
+          lastAuthenticatedAt: new Date(now).toISOString(),
+          tokenExpiresAt: null,
+          lastError: '',
+        });
+        this.settings = await this.repository.getSub2ApiServiceAuthSettings({ includeCiphertext: true });
+        return this.accessToken;
+      }
       const email = String(credentials.email || settings.email || '').trim();
       const password = String(credentials.password || '');
       if (!email || !password) throw authError('Sub2API service account email and password are required', 400);
@@ -129,7 +171,6 @@ export class Sub2ApiServiceAuthService {
       }
       this.accessToken = String(result.accessToken || '').trim();
       if (!this.accessToken) throw authError('Sub2API service account did not issue an access token');
-      const now = this.now();
       this.tokenExpiresAt = tokenExpiry(this.accessToken)
         || new Date(now + this.config.sub2apiServiceAuthRefreshSeconds * 1000 * 2);
       const refreshAt = Math.min(
@@ -156,20 +197,30 @@ export class Sub2ApiServiceAuthService {
 
   async updateSettings(input, actor = 'admin') {
     const current = await this.repository.getSub2ApiServiceAuthSettings({ includeCiphertext: true });
+    const mode = input.authMode === 'api_key' ? 'api_key' : 'password';
     let existing = {};
-    if (current.credentialsCiphertext) {
+    if (current.credentialsCiphertext && authMode(current) === mode) {
       if (!this.vault.available) throw authError('service credential encryption is not configured');
       existing = this.vault.decrypt(current.credentialsCiphertext);
     }
-    const credentials = input.clearCredentials ? {} : {
-      ...existing,
-      email: String(input.email || existing.email || '').trim(),
-      password: input.password || existing.password || '',
-      totpSecret: input.totpSecret || existing.totpSecret || '',
-    };
-    const hasCredentials = Boolean(credentials.email && credentials.password);
+    const credentials = input.clearCredentials ? {} : mode === 'api_key'
+      ? { apiKey: input.apiKey || existing.apiKey || '' }
+      : {
+        ...existing,
+        email: String(input.email || existing.email || '').trim(),
+        password: input.password || existing.password || '',
+        totpSecret: input.totpSecret || existing.totpSecret || '',
+      };
+    const hasCredentials = mode === 'api_key'
+      ? Boolean(credentials.apiKey)
+      : Boolean(credentials.email && credentials.password);
     if (input.enabled && !hasCredentials) {
-      throw authError('enabled Sub2API service authentication requires email and password', 400);
+      throw authError(
+        mode === 'api_key'
+          ? 'enabled Sub2API service authentication requires an administrator API Key'
+          : 'enabled Sub2API service authentication requires email and password',
+        400,
+      );
     }
     const ciphertext = input.clearCredentials
       ? ''
@@ -178,7 +229,8 @@ export class Sub2ApiServiceAuthService {
         : current.credentialsCiphertext || '';
     await this.repository.updateSub2ApiServiceAuthSettings({
       enabled: Boolean(input.enabled),
-      email: credentials.email || '',
+      authMode: mode,
+      email: mode === 'password' ? credentials.email || '' : '',
     }, ciphertext, actor);
     await this.invalidateAccessToken();
     await this.loadSettings();

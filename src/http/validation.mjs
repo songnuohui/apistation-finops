@@ -15,6 +15,7 @@ const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_com
 const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'api_key']);
 const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
 const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier']);
+const SUB2API_SERVICE_AUTH_MODES = new Set(['password', 'api_key']);
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -352,9 +353,11 @@ export function normalizeAlertNotificationSettings(input) {
 export function normalizeSub2ApiServiceAuthSettings(input) {
   return {
     enabled: input.enabled === undefined ? false : booleanValue(input.enabled, 'enabled'),
+    authMode: optionalEnum(input.authMode, 'authMode', SUB2API_SERVICE_AUTH_MODES) || 'password',
     email: textValue(input.email, 'email', { required: false, max: 255 }),
     password: textValue(input.password, 'password', { required: false, max: 8192 }),
     totpSecret: textValue(input.totpSecret, 'totpSecret', { required: false, max: 256 }),
+    apiKey: textValue(input.apiKey, 'apiKey', { required: false, max: 16384 }),
     clearCredentials: input.clearCredentials === undefined
       ? false
       : booleanValue(input.clearCredentials, 'clearCredentials'),

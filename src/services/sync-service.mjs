@@ -213,7 +213,10 @@ export class SyncService {
   }
 
   setSub2ApiAccessTokenProvider(provider) {
-    this.sub2ApiAccessTokenProvider = provider && typeof provider.getAccessToken === 'function' ? provider : null;
+    this.sub2ApiAccessTokenProvider = provider && (
+      typeof provider.getAccessToken === 'function'
+      || typeof provider.getAuthentication === 'function'
+    ) ? provider : null;
   }
 
   clearSub2ApiAccessToken() {
@@ -221,16 +224,24 @@ export class SyncService {
   }
 
   async withSub2ApiAccessToken(reader) {
-    const serviceToken = this.sub2ApiAccessTokenProvider ? await this.sub2ApiAccessTokenProvider.getAccessToken() : '';
+    const serviceAuthentication = this.sub2ApiAccessTokenProvider?.getAuthentication
+      ? await this.sub2ApiAccessTokenProvider.getAuthentication()
+      : null;
+    const serviceToken = serviceAuthentication?.credential
+      || (this.sub2ApiAccessTokenProvider ? await this.sub2ApiAccessTokenProvider.getAccessToken() : '');
     const accessToken = String(serviceToken || this.sub2ApiAccessToken || '').trim();
     if (!accessToken) return null;
     try {
-      return await reader(accessToken);
+      return await reader({ accessToken, authHeaders: serviceAuthentication?.headers || null });
     } catch (error) {
       if ((error?.statusCode === 401 || error?.statusCode === 403) && serviceToken) {
         await this.sub2ApiAccessTokenProvider.invalidateAccessToken(serviceToken);
-        const retryToken = await this.sub2ApiAccessTokenProvider.getAccessToken({ force: true });
-        return reader(retryToken);
+        const retryAuthentication = this.sub2ApiAccessTokenProvider?.getAuthentication
+          ? await this.sub2ApiAccessTokenProvider.getAuthentication({ force: true })
+          : null;
+        const retryToken = retryAuthentication?.credential
+          || await this.sub2ApiAccessTokenProvider.getAccessToken({ force: true });
+        return reader({ accessToken: retryToken, authHeaders: retryAuthentication?.headers || null });
       }
       if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
       throw error;
@@ -240,7 +251,7 @@ export class SyncService {
   async readChannelMonitors() {
     if (!this.channelMonitorReader) return null;
     try {
-      return await this.withSub2ApiAccessToken((accessToken) => this.channelMonitorReader({ accessToken }));
+      return await this.withSub2ApiAccessToken((authentication) => this.channelMonitorReader(authentication));
     } catch (error) {
       this.logger.warn('[monitor] failed to read sub2api channel monitors', error?.code || error?.message || error);
       return null;
@@ -250,7 +261,7 @@ export class SyncService {
   async refreshSourceGroupCatalog() {
     if (!this.sourceGroupCatalogReader || !this.sourceGroupCatalogWriter) return null;
     try {
-      const groups = await this.withSub2ApiAccessToken((accessToken) => this.sourceGroupCatalogReader({ accessToken }));
+      const groups = await this.withSub2ApiAccessToken((authentication) => this.sourceGroupCatalogReader(authentication));
       if (!Array.isArray(groups)) return null;
       await this.sourceGroupCatalogWriter(groups);
       return groups;
@@ -284,7 +295,7 @@ export class SyncService {
     let users = [];
     try {
       if (this.runtimeStatusReader) {
-        const result = await this.withSub2ApiAccessToken((accessToken) => this.runtimeStatusReader({ accessToken }));
+        const result = await this.withSub2ApiAccessToken((authentication) => this.runtimeStatusReader(authentication));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
       }
@@ -364,7 +375,7 @@ export class SyncService {
     let accounts = [];
     if (this.runtimeStatusReader) {
       try {
-        const result = await this.withSub2ApiAccessToken((accessToken) => this.runtimeStatusReader({ accessToken }));
+        const result = await this.withSub2ApiAccessToken((authentication) => this.runtimeStatusReader(authentication));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
       } catch (error) {

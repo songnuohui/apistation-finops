@@ -85,6 +85,18 @@ test('sub2api group catalog keeps only sanitized display fields', async () => {
   }]);
 });
 
+test('sub2api group catalog accepts an administrator API Key through X-API-Key', async () => {
+  await listSub2ApiAdminGroups(
+    { accessToken: 'admin-key', authHeaders: { 'X-API-Key': 'admin-key' } },
+    config,
+    async (_url, options) => {
+      assert.equal(options.headers['X-API-Key'], 'admin-key');
+      assert.equal(options.headers.Authorization, undefined);
+      return json({ code: 0, data: [] });
+    },
+  );
+});
+
 test('sub2api user channel monitor list keeps only public status fields needed by FinOps', async () => {
   const result = await listSub2ApiChannelMonitors(
     { accessToken: 'short-lived-token' },

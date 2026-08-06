@@ -61,6 +61,7 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
 function sub2ApiServiceAuthSettings(row, { includeCiphertext = false } = {}) {
   const result = {
     enabled: Boolean(row?.enabled),
+    authMode: row?.auth_mode || 'password',
     email: row?.email || '',
     credentialsConfigured: Boolean(row?.credentials_ciphertext),
     lastAuthenticatedAt: row?.last_authenticated_at || null,
@@ -4109,7 +4110,7 @@ export class PostgresRepository {
 
   async getSub2ApiServiceAuthSettings({ includeCiphertext = false } = {}) {
     const result = await this.pool.query(`
-      SELECT enabled,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
+      SELECT enabled,auth_mode,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
              last_error,updated_by,updated_at
       FROM ${this.schema}.sub2api_service_auth_settings WHERE id=1`);
     return sub2ApiServiceAuthSettings(result.rows[0], { includeCiphertext });
@@ -4119,17 +4120,18 @@ export class PostgresRepository {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`
         UPDATE ${this.schema}.sub2api_service_auth_settings SET
-          enabled=$1,email=$2,credentials_ciphertext=$3,last_error='',
-          last_authenticated_at=NULL,token_expires_at=NULL,updated_by=$4,updated_at=NOW()
+          enabled=$1,auth_mode=$2,email=$3,credentials_ciphertext=$4,last_error='',
+          last_authenticated_at=NULL,token_expires_at=NULL,updated_by=$5,updated_at=NOW()
         WHERE id=1
-        RETURNING enabled,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
+        RETURNING enabled,auth_mode,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
                   last_error,updated_by,updated_at`,
-      [Boolean(input.enabled), input.email || '', credentialsCiphertext || '', actor]);
+      [Boolean(input.enabled), input.authMode || 'password', input.email || '', credentialsCiphertext || '', actor]);
       const row = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'update_sub2api_service_auth','sub2api_service_auth_settings','singleton',$2::jsonb)`,
       [actor, JSON.stringify({
         enabled: Boolean(row.enabled),
+        authMode: row.auth_mode || 'password',
         email: row.email || '',
         credentialsConfigured: Boolean(row.credentials_ciphertext),
       })]);

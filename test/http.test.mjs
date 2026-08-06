@@ -267,9 +267,22 @@ test('Sub2API service authentication validates credentials without exposing a to
     totpSecret: 'JBSWY3DPEHPK3PXP',
   }), {
     enabled: true,
+    authMode: 'password',
     email: 'finops-service@example.com',
     password: 'service-password',
     totpSecret: 'JBSWY3DPEHPK3PXP',
+    apiKey: '',
+    clearCredentials: false,
+  });
+  assert.deepEqual(normalizeSub2ApiServiceAuthSettings({
+    enabled: true, authMode: 'api_key', apiKey: 'admin-6e01-example',
+  }), {
+    enabled: true,
+    authMode: 'api_key',
+    email: '',
+    password: '',
+    totpSecret: '',
+    apiKey: 'admin-6e01-example',
     clearCredentials: false,
   });
   assert.throws(

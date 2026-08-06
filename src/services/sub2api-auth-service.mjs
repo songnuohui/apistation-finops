@@ -36,6 +36,17 @@ function upstreamHeaders(clientIp) {
   };
 }
 
+function administratorHeaders(accessToken, clientIp = '', authHeaders = null) {
+  const token = String(accessToken || '').trim();
+  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
+  const provided = authHeaders && typeof authHeaders === 'object' ? authHeaders : null;
+  return {
+    Accept: 'application/json',
+    ...(provided && Object.keys(provided).length ? provided : { Authorization: `Bearer ${token}` }),
+    ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
+  };
+}
+
 async function request(baseUrl, pathname, options, timeoutMs, fetchImpl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -116,19 +127,14 @@ function optionalNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export async function listSub2ApiAdminGroups({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+export async function listSub2ApiAdminGroups({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
-  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
   const payload = await request(
     config.sub2apiAuthUrl,
     '/api/v1/admin/groups',
     {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
-      },
+      headers: administratorHeaders(token, clientIp, authHeaders),
     },
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
@@ -165,18 +171,14 @@ function pagedItems(value) {
   return [];
 }
 
-export async function listSub2ApiChannelMonitors({ accessToken }, config, fetchImpl = fetch) {
+export async function listSub2ApiChannelMonitors({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
-  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
   const payload = await request(
     config.sub2apiAuthUrl,
     '/api/v1/channel-monitors',
     {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
+      headers: administratorHeaders(token, clientIp, authHeaders),
     },
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
@@ -203,19 +205,14 @@ export async function listSub2ApiChannelMonitors({ accessToken }, config, fetchI
   });
 }
 
-export async function listSub2ApiAdministratorUserConcurrency({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+export async function listSub2ApiAdministratorUserConcurrency({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
-  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
   const payload = await request(
     config.sub2apiAuthUrl,
     `/api/v1/admin/users?page=1&page_size=${config.sub2apiRuntimePageSize}&status=active&sort_by=current_concurrency&sort_order=desc`,
     {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
-      },
+      headers: administratorHeaders(token, clientIp, authHeaders),
     },
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
@@ -233,19 +230,14 @@ export async function listSub2ApiAdministratorUserConcurrency({ accessToken, cli
   });
 }
 
-export async function getSub2ApiRuntimeQueueStatus({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
+export async function getSub2ApiRuntimeQueueStatus({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
-  if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
   const payload = await request(
     config.sub2apiAuthUrl,
     '/api/v1/admin/risk-control/status',
     {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...(clientIp ? { 'X-Forwarded-For': clientIp } : {}),
-      },
+      headers: administratorHeaders(token, clientIp, authHeaders),
     },
     config.sub2apiAuthTimeoutMs,
     fetchImpl,

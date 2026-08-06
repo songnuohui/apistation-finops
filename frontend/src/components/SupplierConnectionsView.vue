@@ -558,8 +558,10 @@ async function openServiceAuthSettings() {
     const settings = await get('/sub2api-service-auth');
     serviceAuthEditor.value = {
       ...settings,
+      authMode: settings.authMode || 'api_key',
       password: '',
       totpSecret: '',
+      apiKey: '',
       clearCredentials: false,
     };
   } catch (error: any) {
@@ -573,9 +575,11 @@ async function saveServiceAuthSettings(closeAfter = true) {
   try {
     const result = await send('/sub2api-service-auth', 'PATCH', {
       enabled: Boolean(serviceAuthEditor.value.enabled),
+      authMode: serviceAuthEditor.value.authMode || 'api_key',
       email: String(serviceAuthEditor.value.email || '').trim(),
       password: serviceAuthEditor.value.password || '',
       totpSecret: serviceAuthEditor.value.totpSecret || '',
+      apiKey: serviceAuthEditor.value.apiKey || '',
       clearCredentials: Boolean(serviceAuthEditor.value.clearCredentials),
     });
     serviceAuthEditor.value = {
@@ -583,6 +587,7 @@ async function saveServiceAuthSettings(closeAfter = true) {
       ...result,
       password: '',
       totpSecret: '',
+      apiKey: '',
       clearCredentials: false,
     };
     notify(result.authenticated ? 'Sub2API 服务账号已验证' : 'Sub2API 服务账号已保存');
@@ -605,6 +610,7 @@ async function testServiceAuthSettings() {
       ...result,
       password: '',
       totpSecret: '',
+      apiKey: '',
       clearCredentials: false,
     };
     notify('Sub2API 服务账号已验证');
@@ -950,13 +956,15 @@ onMounted(async () => {
           <div><span>更新人</span><strong>{{ serviceAuthEditor.updatedBy || '--' }}</strong><small>{{ dateTime(serviceAuthEditor.updatedAt) }}</small></div>
         </div>
         <div class="form-grid">
-          <label class="toggle-field full-field"><input v-model="serviceAuthEditor.enabled" type="checkbox" /><span><strong>启用独立服务账号</strong><small>供应商同步、分组读取和利润保护均优先使用此账号；前台退出登录不会影响后台任务。</small></span></label>
-          <label class="full-field">管理员邮箱<input v-model="serviceAuthEditor.email" type="email" autocomplete="off" placeholder="service-admin@example.com" /></label>
-          <label>管理员密码<input v-model="serviceAuthEditor.password" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '已配置，留空保持不变' : '首次配置必填'" /></label>
-          <label>TOTP 密钥（可选）<input v-model="serviceAuthEditor.totpSecret" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '留空保持不变' : '账号启用两步验证时填写'" /></label>
+          <label class="toggle-field full-field"><input v-model="serviceAuthEditor.enabled" type="checkbox" /><span><strong>启用独立服务认证</strong><small>供应商同步、分组读取和利润保护均优先使用此认证；前台退出登录不会影响后台任务。</small></span></label>
+          <label class="full-field">认证方式<select v-model="serviceAuthEditor.authMode"><option value="api_key">管理员 API Key（推荐）</option><option value="password">独立管理员账号</option></select></label>
+          <label v-if="serviceAuthEditor.authMode === 'api_key'" class="full-field">管理员 API Key<input v-model="serviceAuthEditor.apiKey" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '已配置，留空保持不变' : '粘贴 admin- 开头的管理员 Key'" /></label>
+          <label v-if="serviceAuthEditor.authMode === 'password'" class="full-field">管理员邮箱<input v-model="serviceAuthEditor.email" type="email" autocomplete="off" placeholder="service-admin@example.com" /></label>
+          <label v-if="serviceAuthEditor.authMode === 'password'">管理员密码<input v-model="serviceAuthEditor.password" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '已配置，留空保持不变' : '首次配置必填'" /></label>
+          <label v-if="serviceAuthEditor.authMode === 'password'">TOTP 密钥（可选）<input v-model="serviceAuthEditor.totpSecret" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '留空保持不变' : '账号启用两步验证时填写'" /></label>
           <label v-if="serviceAuthEditor.credentialsConfigured" class="toggle-field full-field"><input v-model="serviceAuthEditor.clearCredentials" type="checkbox" /><span><strong>清除服务账号凭据</strong><small>清除后会立即停止自动认证与后台分组更新。</small></span></label>
         </div>
-        <div class="form-note">密码和 TOTP 密钥以 FinOps 的 AES-GCM 密钥加密保存；访问 Token 不写入数据库或 Redis。请使用仅供 FinOps 使用的 Sub2API 管理员账号。</div>
+        <div class="form-note">管理员 API Key、密码和 TOTP 密钥均以 FinOps 的 AES-GCM 密钥加密保存；访问 Token 不写入数据库或 Redis。管理员 API Key 具有完整权限，请仅用于 FinOps 并妥善保管。</div>
         <footer><button class="secondary-button" :disabled="serviceAuthSaving" @click="testServiceAuthSettings"><ShieldCheck :size="16" />验证连接</button><button class="primary-button" :disabled="serviceAuthSaving" @click="saveServiceAuthSettings(true)"><Check :size="16" />保存自动认证</button></footer>
       </section>
     </div>

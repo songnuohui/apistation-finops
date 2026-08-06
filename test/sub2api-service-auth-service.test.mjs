@@ -19,6 +19,7 @@ function accessToken(expiresAt) {
 function serviceAuthRepository() {
   const settings = {
     enabled: false,
+    authMode: 'password',
     email: '',
     credentialsCiphertext: '',
     lastAuthenticatedAt: null,
@@ -37,6 +38,7 @@ function serviceAuthRepository() {
     async updateSub2ApiServiceAuthSettings(input, credentialsCiphertext, actor) {
       Object.assign(settings, {
         enabled: Boolean(input.enabled),
+        authMode: input.authMode || 'password',
         email: input.email,
         credentialsCiphertext,
         lastAuthenticatedAt: null,
@@ -108,6 +110,35 @@ test('dedicated Sub2API service authentication completes a TOTP challenge', asyn
   assert.equal(service.status().authenticated, true);
 });
 
+test('administrator API Key is encrypted and used through X-API-Key', async () => {
+  const repository = serviceAuthRepository();
+  const verified = [];
+  const service = new Sub2ApiServiceAuthService(repository, config, console, {
+    now: () => now,
+    verifyApiKey: async ({ apiKey }) => { verified.push(apiKey); },
+  });
+
+  const status = await service.updateSettings({
+    enabled: true,
+    authMode: 'api_key',
+    email: '',
+    password: '',
+    totpSecret: '',
+    apiKey: 'admin-6e01-secret',
+    clearCredentials: false,
+  });
+  const authentication = await service.getAuthentication();
+
+  assert.deepEqual(verified, ['admin-6e01-secret']);
+  assert.equal(repository.settings.credentialsCiphertext.includes('admin-6e01-secret'), false);
+  assert.equal(status.authMode, 'api_key');
+  assert.equal(status.tokenExpiresAt, null);
+  assert.deepEqual(authentication, {
+    credential: 'admin-6e01-secret',
+    headers: { 'X-API-Key': 'admin-6e01-secret' },
+  });
+});
+
 test('Sub2API gateway invalidates and retries a rejected service token once', async () => {
   const invalidated = [];
   const requested = [];
@@ -136,4 +167,19 @@ test('Sub2API gateway invalidates and retries a rejected service token once', as
   assert.deepEqual(requested, ['Bearer expired-token', 'Bearer refreshed-token']);
   assert.deepEqual(invalidated, ['expired-token']);
   assert.equal(tokenCalls, 2);
+});
+
+test('Sub2API gateway sends the administrator API Key without a bearer token', async () => {
+  const gateway = new Sub2ApiReadonlyGateway(config, console, async (_url, options) => {
+    assert.equal(options.headers['X-API-Key'], 'admin-key');
+    assert.equal(options.headers.Authorization, undefined);
+    return new Response(JSON.stringify({ code: 0, data: [{ id: 7 }] }), { status: 200 });
+  });
+  gateway.setAccessTokenProvider({
+    async getAuthentication() {
+      return { credential: 'admin-key', headers: { 'X-API-Key': 'admin-key' } };
+    },
+  });
+
+  assert.deepEqual(await gateway.listGroups(), [{ id: 7 }]);
 });

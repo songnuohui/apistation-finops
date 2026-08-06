@@ -62,12 +62,12 @@ const pendingLogins=new PendingLoginStore();
 supplierMonitorService?.setProfitGuardService(accountProfitGuardService);
 sub2ApiReadonlyGateway.setAccessTokenProvider(sub2ApiServiceAuthService);
 syncService?.setSub2ApiAccessTokenProvider(sub2ApiServiceAuthService);
-syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
-syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
+syncService?.setChannelMonitorReader(({accessToken,authHeaders})=>listSub2ApiChannelMonitors({accessToken,authHeaders},config));
+syncService?.setSourceGroupCatalogReader(({accessToken,authHeaders})=>listSub2ApiAdminGroups({accessToken,authHeaders},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
-syncService?.setRuntimeStatusReader(({accessToken})=>Promise.all([
-  getSub2ApiRuntimeQueueStatus({accessToken},config),
-  listSub2ApiAdministratorUserConcurrency({accessToken},config),
+syncService?.setRuntimeStatusReader(({accessToken,authHeaders})=>Promise.all([
+  getSub2ApiRuntimeQueueStatus({accessToken,authHeaders},config),
+  listSub2ApiAdministratorUserConcurrency({accessToken,authHeaders},config),
 ]).then(([queue, users])=>({queue,users})));
 syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listRuntimeConcurrency());
 syncService?.setReadCacheInvalidator(()=>responseCache.invalidate('runtime'));
@@ -513,14 +513,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key']],
   );
-  if(migration.rowCount < 26)throw new Error('required FinOps migrations through 027_sub2api_service_auth are not applied');
+  if(migration.rowCount < 27)throw new Error('required FinOps migrations through 028_sub2api_service_auth_api_key are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),

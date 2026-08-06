@@ -13,7 +13,10 @@ export class Sub2ApiReadonlyGateway {
   }
 
   setAccessTokenProvider(provider) {
-    this.accessTokenProvider = provider && typeof provider.getAccessToken === 'function' ? provider : null;
+    this.accessTokenProvider = provider && (
+      typeof provider.getAccessToken === 'function'
+      || typeof provider.getAuthentication === 'function'
+    ) ? provider : null;
   }
 
   setAccessToken(token) {
@@ -26,17 +29,32 @@ export class Sub2ApiReadonlyGateway {
     this.cache.clear();
   }
 
-  async token() {
-    const token = this.accessTokenProvider ? await this.accessTokenProvider.getAccessToken() : '';
-    return { token: String(token || this.accessToken || '').trim(), serviceManaged: Boolean(token) };
+  async authentication({ force = false } = {}) {
+    const managed = this.accessTokenProvider?.getAuthentication
+      ? await this.accessTokenProvider.getAuthentication({ force })
+      : null;
+    if (managed?.credential) {
+      return {
+        credential: String(managed.credential).trim(),
+        headers: managed.headers || {},
+        serviceManaged: true,
+      };
+    }
+    const token = this.accessTokenProvider ? await this.accessTokenProvider.getAccessToken({ force }) : '';
+    const credential = String(token || this.accessToken || '').trim();
+    return {
+      credential,
+      headers: { Authorization: `Bearer ${credential}` },
+      serviceManaged: Boolean(token),
+    };
   }
 
   async request(pathname, { method = 'GET', body, cacheKey = pathname, ttlMs = 30_000, cache = true } = {}) {
     const now = Date.now();
     const existing = cache && method === 'GET' ? this.cache.get(cacheKey) : null;
     if (existing && existing.expiresAt > now) return existing.payload;
-    const requestWithToken = async (accessToken) => {
-      if (!accessToken) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
+    const requestWithAuthentication = async (authentication) => {
+      if (!authentication?.credential) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
       try {
@@ -45,7 +63,7 @@ export class Sub2ApiReadonlyGateway {
           signal: controller.signal,
           headers: {
             Accept: 'application/json',
-            Authorization: `Bearer ${accessToken}`,
+            ...authentication.headers,
             ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -62,16 +80,16 @@ export class Sub2ApiReadonlyGateway {
         clearTimeout(timer);
       }
     };
-    const selected = await this.token();
+    const selected = await this.authentication();
     try {
-      const payload = await requestWithToken(selected.token);
+      const payload = await requestWithAuthentication(selected);
       if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
       return payload;
     } catch (error) {
       if ((error?.statusCode === 401 || error?.statusCode === 403) && selected.serviceManaged) {
-        await this.accessTokenProvider.invalidateAccessToken(selected.token);
-        const retryToken = await this.accessTokenProvider.getAccessToken({ force: true });
-        const payload = await requestWithToken(retryToken);
+        await this.accessTokenProvider.invalidateAccessToken(selected.credential);
+        const retryAuthentication = await this.authentication({ force: true });
+        const payload = await requestWithAuthentication(retryAuthentication);
         if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
         return payload;
       }

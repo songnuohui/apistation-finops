@@ -238,7 +238,7 @@ export class DemoRepository {
       accessTokenCiphertext:'',updatedBy:'',updatedAt:null,
     };
     this.sub2ApiServiceAuthSettings = {
-      enabled:false,email:'',credentialsConfigured:false,credentialsCiphertext:'',
+      enabled:false,authMode:'password',email:'',credentialsConfigured:false,credentialsCiphertext:'',
       lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
     };
     this.supplierAlertDeliveries = new Map();
@@ -1290,6 +1290,7 @@ export class DemoRepository {
   async updateSub2ApiServiceAuthSettings(input, credentialsCiphertext, actor = 'admin') {
     Object.assign(this.sub2ApiServiceAuthSettings, {
       enabled:Boolean(input.enabled),
+      authMode:input.authMode || 'password',
       email:input.email || '',
       credentialsCiphertext:credentialsCiphertext || '',
       credentialsConfigured:Boolean(credentialsCiphertext),
