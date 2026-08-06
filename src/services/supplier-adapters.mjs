@@ -658,14 +658,23 @@ function tokenExpiry(token) {
 
 async function sub2ApiSnapshotWithToken(connection, credentials, client, accessToken) {
   if (!accessToken) throw new SupplierAdapterError('authentication_failed', 'supplier login did not return an access token');
+  const optionalRequest = async (pathname) => {
+    try {
+      return await client.request(connection.baseUrl, pathname, { token: accessToken });
+    } catch {
+      return null;
+    }
+  };
   const [profileResult, groupsResult, ratesResult] = await Promise.all([
     client.request(connection.baseUrl, '/api/v1/auth/me', { token: accessToken }),
-    client.request(connection.baseUrl, '/api/v1/groups/available', { token: accessToken }),
-    client.request(connection.baseUrl, '/api/v1/groups/rates', { token: accessToken }),
+    optionalRequest('/api/v1/groups/available'),
+    optionalRequest('/api/v1/groups/rates'),
   ]);
   const profile = unwrap(profileResult.payload) || {};
-  const groups = items(unwrap(groupsResult.payload));
-  const customRates = unwrap(ratesResult.payload) || {};
+  let groups = [];
+  let customRates = {};
+  try { if (groupsResult) groups = items(unwrap(groupsResult.payload)); } catch { groups = []; }
+  try { if (ratesResult) customRates = unwrap(ratesResult.payload) || {}; } catch { customRates = {}; }
   const groupMap = new Map(groups.map((group) => [String(group.id), group]));
   const keys = [];
   let page = 1;
