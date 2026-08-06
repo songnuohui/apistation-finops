@@ -15,13 +15,27 @@
     "backfill": "node scripts/backfill.mjs",
     "sync": "node scripts/sync-once.mjs",
     "copy-icons": "node scripts/copy-icons.mjs",
+    "build:web": "vite build --config frontend/vite.config.ts",
     "test": "node --test",
-    "check": "node --check src/server.mjs && node --test"
+    "check": "node --check src/server.mjs && vue-tsc --noEmit -p frontend/tsconfig.json && node --test"
   },
   "dependencies": {
     "decimal.js": "^10.6.0",
     "lucide-static": "^0.468.0",
     "pg": "^8.16.3",
     "redis": "5.8.2"
+  },
+  "devDependencies": {
+    "@tanstack/vue-virtual": "3.13.0",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@types/node": "^22.15.0",
+    "chart.js": "4.5.0",
+    "lucide-vue-next": "0.468.0",
+    "pinia": "3.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^8.2.0",
+    "vue": "3.5.0",
+    "vue-router": "4.5.0",
+    "vue-tsc": "^3.3.9"
   }
 }

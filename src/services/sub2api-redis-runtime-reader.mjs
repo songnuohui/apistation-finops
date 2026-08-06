@@ -1,6 +1,7 @@
 import { createClient } from 'redis';
 
 const ACTIVE_USER_INDEX = 'concurrency:user:active_index';
+const ACTIVE_ACCOUNT_INDEX = 'concurrency:account:active_index';
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1_000);
@@ -50,6 +51,50 @@ export class Sub2ApiRedisRuntimeReader {
         this.connectPromise = null;
       });
     return this.connectPromise;
+  }
+
+  async listRuntimeConcurrency() {
+    if (!(await this.connect()) || !this.client?.isReady) return [];
+    const timestamp = nowSeconds();
+    try {
+      const [userValues, accountValues] = await Promise.all([
+        this.client.zRangeByScore(ACTIVE_USER_INDEX, timestamp, '+inf'),
+        this.client.zRangeByScore(ACTIVE_ACCOUNT_INDEX, timestamp, '+inf'),
+      ]);
+      const userIds = userValues
+        .map((value) => Number(value))
+        .filter((value) => Number.isSafeInteger(value) && value > 0)
+        .slice(0, this.config.sub2apiRedisRuntimeUserLimit || 500);
+      const accountIds = accountValues
+        .map((value) => Number(value))
+        .filter((value) => Number.isSafeInteger(value) && value > 0)
+        .slice(0, this.config.sub2apiRedisRuntimeAccountLimit || 500);
+      const users = await Promise.all(userIds.map(async (sourceUserId) => ({
+        sourceUserId,
+        currentConcurrency: Number(await this.client.zCount(`concurrency:user:${sourceUserId}`, timestamp, '+inf')) || 0,
+        waitingCount: Math.max(0, Number(
+          typeof this.client.get === 'function'
+            ? await this.client.get(`concurrency:wait:${sourceUserId}`)
+            : 0,
+        ) || 0),
+      })));
+      const accounts = await Promise.all(accountIds.map(async (sourceAccountId) => ({
+        sourceAccountId,
+        currentConcurrency: Number(await this.client.zCount(`concurrency:account:${sourceAccountId}`, timestamp, '+inf')) || 0,
+        waitingCount: Math.max(0, Number(
+          typeof this.client.get === 'function'
+            ? await this.client.get(`wait:account:${sourceAccountId}`)
+            : 0,
+        ) || 0),
+      })));
+      return {
+        users: users.filter((row) => row.currentConcurrency > 0 || row.waitingCount > 0),
+        accounts: accounts.filter((row) => row.currentConcurrency > 0 || row.waitingCount > 0),
+      };
+    } catch (error) {
+      this.logError(error);
+      return { users: [], accounts: [] };
+    }
   }
 
   async listActiveUserConcurrency() {

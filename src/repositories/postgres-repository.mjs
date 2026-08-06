@@ -2333,6 +2333,15 @@ export class PostgresRepository {
       upstreamMultiplier,sourceSellingMultiplier,cnyPerReferenceUnit,effectiveFrom,input.notes || '',actor,changeStrategy,
       supplierKeyId,
     ]);
+    await client.query(`
+      INSERT INTO ${this.schema}.usage_cost_reprice_queue(source_usage_id,reason,queued_at)
+      SELECT snapshot.source_usage_id,'cost_rule_changed',NOW()
+      FROM ${this.schema}.fact_usage_cost_snapshots snapshot
+      WHERE snapshot.source_account_id=$1
+        AND snapshot.finalized=FALSE
+        AND snapshot.occurred_at >= $2
+      ON CONFLICT(source_usage_id) DO UPDATE SET
+        reason=EXCLUDED.reason,queued_at=EXCLUDED.queued_at`, [accountId,effectiveFrom]);
     return result.rows[0];
   }
 
@@ -3904,7 +3913,59 @@ export class PostgresRepository {
     return { id:Number(result.rows[0].id),status:result.rows[0].status,acknowledgedAt:result.rows[0].acknowledged_at,acknowledgedBy:result.rows[0].acknowledged_by };
   }
 
-  async getRuntimeDashboard() {
+  async getRuntimeDashboard(liveRuntime = null) {
+    if (liveRuntime) {
+      const userIds = (liveRuntime.users || []).map((item) => Number(item.sourceUserId)).filter(Boolean);
+      const accountIds = (liveRuntime.accounts || []).map((item) => Number(item.sourceAccountId)).filter(Boolean);
+      const [usersResult, accountsResult] = await Promise.all([
+        userIds.length ? this.pool.query(`
+          SELECT source_user_id,email,username
+          FROM ${this.schema}.dim_users
+          WHERE source_user_id=ANY($1::bigint[])`, [userIds]) : { rows: [] },
+        accountIds.length ? this.pool.query(`
+          SELECT source_account_id,name,platform
+          FROM ${this.schema}.dim_accounts
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]) : { rows: [] },
+      ]);
+      const userDetails = new Map(usersResult.rows.map((row) => [Number(row.source_user_id), row]));
+      const accountDetails = new Map(accountsResult.rows.map((row) => [Number(row.source_account_id), row]));
+      const observedAt = liveRuntime.observedAt || new Date();
+      return {
+        queue: liveRuntime.queue ? {
+          available: true,
+          ...liveRuntime.queue,
+          observedAt,
+        } : { available: false },
+        users: (liveRuntime.users || []).map((item) => {
+          const id = Number(item.sourceUserId);
+          const detail = userDetails.get(id) || {};
+          const maxConcurrency = number(item.maxConcurrency);
+          const currentConcurrency = number(item.currentConcurrency);
+          return {
+            id,
+            email: item.email || detail.email || '',
+            username: item.username || detail.username || '',
+            maxConcurrency,
+            currentConcurrency,
+            waitingCount: number(item.waitingCount),
+            usagePercent: maxConcurrency > 0 ? Math.min(100, currentConcurrency * 100 / maxConcurrency) : null,
+            observedAt,
+          };
+        }).sort((a,b) => b.waitingCount-a.waitingCount || b.currentConcurrency-a.currentConcurrency),
+        accounts: (liveRuntime.accounts || []).map((item) => {
+          const id = Number(item.sourceAccountId);
+          const detail = accountDetails.get(id) || {};
+          return {
+            id,
+            name: detail.name || `Account #${id}`,
+            platform: detail.platform || '',
+            currentConcurrency: number(item.currentConcurrency),
+            waitingCount: number(item.waitingCount),
+            observedAt,
+          };
+        }).sort((a,b) => b.waitingCount-a.waitingCount || b.currentConcurrency-a.currentConcurrency),
+      };
+    }
     const [queueResult, usersResult] = await Promise.all([
       this.pool.query(`
         SELECT enabled,mode,worker_count,active_workers,idle_workers,queue_size,queue_length,

@@ -25,6 +25,7 @@ import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
 import { ResponseCacheService } from './services/response-cache-service.mjs';
 import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
+import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -50,6 +51,7 @@ const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(rep
 const qqAlertNotificationService=new QqAlertNotificationService(repository,config);
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
+const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
 const pendingLogins=new PendingLoginStore();
 syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
 syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
@@ -58,7 +60,7 @@ syncService?.setRuntimeStatusReader(({accessToken})=>Promise.all([
   getSub2ApiRuntimeQueueStatus({accessToken},config),
   listSub2ApiAdministratorUserConcurrency({accessToken},config),
 ]).then(([queue, users])=>({queue,users})));
-syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listActiveUserConcurrency());
+syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listRuntimeConcurrency());
 syncService?.setReadCacheInvalidator(()=>responseCache.invalidate('runtime'));
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
@@ -154,6 +156,7 @@ async function login(request,res){
       return json(res,200,{requiresTwoFactor:true,emailMasked:result.emailMasked});
     }
     syncService?.setSub2ApiAccessToken(result.accessToken);
+    sub2ApiReadonlyGateway.setAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
     await syncService?.refreshChannelMonitorSnapshots();
     await syncService?.refreshRuntimeSnapshots();
@@ -172,6 +175,7 @@ async function loginTwoFactor(request,res){
     const result=await completeSub2ApiAdministratorTwoFactor({tempToken:pending.tempToken,totpCode:code,clientIp:clientIp(request)},config);
     pendingLogins.delete(pendingLoginId(request));
     syncService?.setSub2ApiAccessToken(result.accessToken);
+    sub2ApiReadonlyGateway.setAccessToken(result.accessToken);
     await refreshSourceGroupCatalog(result.accessToken,request);
     await syncService?.refreshChannelMonitorSnapshots();
     await syncService?.refreshRuntimeSnapshots();
@@ -188,6 +192,29 @@ async function api(request,res,url){
   if(request.method!=='GET')await responseCache.invalidate();
   const cached=(scope,ttl,loader)=>responseCache.remember(scope,`${request.method}:${url.pathname}?${url.searchParams.toString()}`,ttl,loader);
   if(request.method==='GET'&&url.pathname==='/api/bootstrap')return json(res,200,await cached('bootstrap',config.dashboardCacheTtlSeconds,()=>repository.getBootstrap()));
+  if(request.method==='GET'&&url.pathname==='/api/source/dashboard-snapshot'){
+    return json(res,200,await sub2ApiReadonlyGateway.dashboardSnapshot({
+      includeStats:url.searchParams.get('include_stats')!=='false',
+      includeTrend:url.searchParams.get('include_trend')!=='false',
+      includeModels:url.searchParams.get('include_models')!=='false',
+      includeGroups:url.searchParams.get('include_groups')==='true',
+      includeUsersTrend:url.searchParams.get('include_users_trend')==='true',
+      startDate:url.searchParams.get('start_date') || '',
+      endDate:url.searchParams.get('end_date') || '',
+    }));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/source/channel-monitors'){
+    return json(res,200,await sub2ApiReadonlyGateway.channelMonitors());
+  }
+  if(request.method==='GET'&&url.pathname==='/api/source/risk-control'){
+    return json(res,200,await sub2ApiReadonlyGateway.riskControlStatus());
+  }
+  if(request.method==='POST'&&url.pathname==='/api/source/accounts/today-stats'){
+    const input=await body(request);
+    const ids=Array.isArray(input.accountIds)?input.accountIds.map(Number).filter(Number.isSafeInteger):[];
+    if(!ids.length||ids.length>100)return json(res,400,{error:'accountIds must contain 1 to 100 ids'});
+    return json(res,200,await sub2ApiReadonlyGateway.accountTodayStats(ids));
+  }
   if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>repository.getSummary(range())));
   if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>repository.getOverviewDashboard(range())));
   if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>repository.getTrend(range())));
@@ -345,13 +372,16 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/non-cash-balance-credits')return json(res,200,await cached('non-cash-balance-credits',config.listCacheTtlSeconds,()=>repository.listNonCashBalanceCredits({...range(),...page()})));
   if(request.method==='GET'&&url.pathname==='/api/runtime'){
     const live=url.searchParams.get('live')==='1';
-    if(url.searchParams.get('refresh')==='1'||live){
+    if(url.searchParams.get('refresh')==='1'&&!live){
       await syncService?.refreshRuntimeSnapshots({
-        minIntervalMs:live?config.runtimeLiveRefreshSeconds*1000:0,
+        minIntervalMs:0,
       });
       await responseCache.invalidate('runtime');
     }
-    return json(res,200,await cached('runtime',config.runtimeCacheTtlSeconds,()=>repository.getRuntimeDashboard()));
+    return json(res,200,await cached('runtime',config.runtimeCacheTtlSeconds,async()=>{
+      const liveRuntime=live&&syncService?await syncService.readLiveRuntime():null;
+      return repository.getRuntimeDashboard(liveRuntime);
+    }));
   }
   if(request.method==='GET'&&url.pathname==='/api/reconciliation')return json(res,200,await cached('reconciliation',config.listCacheTtlSeconds,()=>repository.getReconciliation(range())));
   if(request.method==='GET'&&url.pathname==='/api/cost-profiles')return json(res,200,await cached('cost-profiles',config.listCacheTtlSeconds,()=>repository.listCostProfiles()));
@@ -427,14 +457,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance']],
+    [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing']],
   );
-  if(migration.rowCount < 21)throw new Error('required FinOps migrations through 022_usage_cost_snapshot_performance are not applied');
+  if(migration.rowCount < 22)throw new Error('required FinOps migrations through 023_incremental_cost_repricing are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
   };
@@ -453,6 +483,7 @@ const server=http.createServer(async(request,res)=>{
     if(request.method==='POST'&&url.pathname==='/auth/login/2fa')return await loginTwoFactor(request,res);
     if(request.method==='POST'&&url.pathname==='/auth/logout'){
       syncService?.clearSub2ApiAccessToken();
+      sub2ApiReadonlyGateway.clearAccessToken();
       res.setHeader('Set-Cookie',[clearPendingLoginCookie(config),clearSessionCookie(config)]);
       return json(res,200,{ok:true});
     }

@@ -1,15 +1,29 @@
-FROM node:22-alpine
+FROM node:22-alpine AS build
 
 WORKDIR /app
 RUN corepack enable
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --prod --frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 COPY --chown=node:node migrations ./migrations
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node src ./src
 COPY --chown=node:node web ./web
+COPY --chown=node:node frontend ./frontend
+RUN pnpm build:web
+
+FROM node:22-alpine
+
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --prod --frozen-lockfile
+
+COPY --from=build --chown=node:node migrations ./migrations
+COPY --from=build --chown=node:node scripts ./scripts
+COPY --from=build --chown=node:node src ./src
+COPY --from=build --chown=node:node web ./web
 
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8090
 USER node

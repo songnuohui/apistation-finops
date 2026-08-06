@@ -273,7 +273,8 @@ export class SyncService {
       this.logger.warn('[runtime] failed to read Sub2API runtime API snapshot', error?.code || error?.message || error);
     }
     try {
-      const redisUsers = await this.runtimeConcurrencyReader?.();
+      const redisRuntime = await this.runtimeConcurrencyReader?.();
+      const redisUsers = Array.isArray(redisRuntime) ? redisRuntime : redisRuntime?.users;
       if (Array.isArray(redisUsers) && redisUsers.length) {
         const userMap = new Map(users.map((user) => [Number(user.sourceUserId), user]));
         for (const user of redisUsers) {
@@ -335,6 +336,39 @@ export class SyncService {
       this.logger.warn('[runtime] failed to persist Sub2API runtime snapshots', error?.code || error?.message || error);
       return 0;
     }
+  }
+
+  async readLiveRuntime() {
+    let queue = null;
+    let users = [];
+    let accounts = [];
+    if (this.runtimeStatusReader && this.sub2ApiAccessToken) {
+      try {
+        const result = await this.runtimeStatusReader({ accessToken: this.sub2ApiAccessToken });
+        queue = result?.queue || null;
+        users = Array.isArray(result?.users) ? result.users : [];
+      } catch (error) {
+        if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
+        this.logger.warn('[runtime] live Sub2API API read failed', error?.code || error?.message || error);
+      }
+    }
+    try {
+      const redisRuntime = await this.runtimeConcurrencyReader?.();
+      const redisUsers = Array.isArray(redisRuntime) ? redisRuntime : redisRuntime?.users;
+      accounts = Array.isArray(redisRuntime?.accounts) ? redisRuntime.accounts : [];
+      if (Array.isArray(redisUsers)) {
+        const userMap = new Map(users.map((user) => [Number(user.sourceUserId), user]));
+        for (const user of redisUsers) {
+          const sourceUserId = Number(user?.sourceUserId);
+          if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0) continue;
+          userMap.set(sourceUserId, { ...(userMap.get(sourceUserId) || {}), ...user, sourceUserId });
+        }
+        users = [...userMap.values()];
+      }
+    } catch (error) {
+      this.logger.warn('[runtime] live Sub2API Redis read failed', error?.code || error?.message || error);
+    }
+    return { queue, users, accounts, observedAt: new Date() };
   }
 
   async validateSourceSchema() {
@@ -724,7 +758,6 @@ export class SyncService {
 
   async freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay = false } = {}) {
     let total = 0;
-    const refreshStartedAt = new Date();
     for (;;) {
       const pending = await client.query(`
         WITH pending_usage AS MATERIALIZED (
@@ -732,15 +765,13 @@ export class SyncService {
           FROM ${this.schema}.fact_usage_events f
           LEFT JOIN ${this.schema}.fact_usage_cost_snapshots current_snapshot
             ON current_snapshot.source_usage_id=f.source_usage_id
+          LEFT JOIN ${this.schema}.usage_cost_reprice_queue reprice
+            ON reprice.source_usage_id=f.source_usage_id
           WHERE current_snapshot.source_usage_id IS NULL
             OR (
               $2::boolean
               AND current_snapshot.finalized=FALSE
-              AND current_snapshot.frozen_at < $5
-              AND f.occurred_at >= (
-                date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
-                - (($4::int - 1) * INTERVAL '1 day')
-              )
+              AND reprice.source_usage_id IS NOT NULL
             )
           ORDER BY f.occurred_at,f.source_usage_id
           LIMIT $1
@@ -837,9 +868,6 @@ export class SyncService {
         `, [
         COST_SNAPSHOT_BATCH_SIZE,
         refreshOpenDay,
-        this.config.timezone || 'UTC',
-        USAGE_COST_SNAPSHOT_OPEN_DAYS,
-        refreshStartedAt,
       ]);
       if (!pending.rowCount) break;
 
@@ -968,14 +996,9 @@ export class SyncService {
             finalized_at=NULL
           WHERE NOT fact_usage_cost_snapshots.finalized`
     : 'ON CONFLICT(source_usage_id) DO NOTHING'}`, params);
-        if (refreshOpenDay) {
-          await client.query(`
-            UPDATE ${this.schema}.fact_usage_cost_snapshots
-            SET frozen_at=clock_timestamp()
-            WHERE source_usage_id=ANY($1::bigint[]) AND finalized=FALSE`, [
-            chunk.map((row) => row.source_usage_id),
-          ]);
-        }
+        await client.query(`
+          DELETE FROM ${this.schema}.usage_cost_reprice_queue
+          WHERE source_usage_id=ANY($1::bigint[])`, [chunk.map((row) => row.source_usage_id)]);
         total += inserted.rowCount;
       }
     }
@@ -1179,6 +1202,7 @@ export class SyncService {
       const params = [];
       for (const row of chunk) for (const column of USAGE_COLUMNS) params.push(row[column] ?? null);
       await client.query(`
+        WITH upserted AS (
         INSERT INTO ${this.schema}.fact_usage_events(${USAGE_COLUMNS.join(',')})
         VALUES ${valuesPlaceholders(chunk.length, USAGE_COLUMNS.length)}
         ON CONFLICT(source_usage_id) DO UPDATE SET
@@ -1194,7 +1218,36 @@ export class SyncService {
           first_token_ms=EXCLUDED.first_token_ms,occurred_at=EXCLUDED.occurred_at,
           standard_cost_usd_reference=EXCLUDED.standard_cost_usd_reference,
           user_charge_cny=EXCLUDED.user_charge_cny,
-          synced_at=NOW()`, params);
+          synced_at=NOW()
+        WHERE ROW(
+          fact_usage_events.request_id,fact_usage_events.source_user_id,
+          fact_usage_events.source_api_key_id,fact_usage_events.source_account_id,
+          fact_usage_events.source_group_id,fact_usage_events.source_channel_id,
+          fact_usage_events.model,fact_usage_events.requested_model,fact_usage_events.upstream_model,
+          fact_usage_events.billing_mode,fact_usage_events.billing_type,fact_usage_events.subscription_id,
+          fact_usage_events.input_tokens,fact_usage_events.output_tokens,
+          fact_usage_events.cache_creation_tokens,fact_usage_events.cache_read_tokens,
+          fact_usage_events.user_rate_multiplier,fact_usage_events.account_rate_multiplier,
+          fact_usage_events.duration_ms,fact_usage_events.first_token_ms,fact_usage_events.occurred_at,
+          fact_usage_events.standard_cost_usd_reference,fact_usage_events.user_charge_cny
+        ) IS DISTINCT FROM ROW(
+          EXCLUDED.request_id,EXCLUDED.source_user_id,
+          EXCLUDED.source_api_key_id,EXCLUDED.source_account_id,
+          EXCLUDED.source_group_id,EXCLUDED.source_channel_id,
+          EXCLUDED.model,EXCLUDED.requested_model,EXCLUDED.upstream_model,
+          EXCLUDED.billing_mode,EXCLUDED.billing_type,EXCLUDED.subscription_id,
+          EXCLUDED.input_tokens,EXCLUDED.output_tokens,
+          EXCLUDED.cache_creation_tokens,EXCLUDED.cache_read_tokens,
+          EXCLUDED.user_rate_multiplier,EXCLUDED.account_rate_multiplier,
+          EXCLUDED.duration_ms,EXCLUDED.first_token_ms,EXCLUDED.occurred_at,
+          EXCLUDED.standard_cost_usd_reference,EXCLUDED.user_charge_cny
+        )
+        RETURNING source_usage_id
+        )
+        INSERT INTO ${this.schema}.usage_cost_reprice_queue(source_usage_id,reason,queued_at)
+        SELECT source_usage_id,'usage_changed',NOW() FROM upserted
+        ON CONFLICT(source_usage_id) DO UPDATE SET
+          reason=EXCLUDED.reason,queued_at=EXCLUDED.queued_at`, params);
     }
     await client.query(`
       UPDATE ${this.schema}.fact_usage_events
