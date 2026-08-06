@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPinnedHttpsRequestOptions, SupplierAdapterError, SupplierAdapterRegistry, SupplierHttpClient,
-  normalizeSupplierBaseUrl,
+  normalizeSupplierBaseUrl, preferIpv4SupplierTargets,
 } from '../src/services/supplier-adapters.mjs';
 
 const config = { supplierRequestTimeoutMs: 1_000, supplierMaxResponseBytes: 1024 * 1024 };
@@ -52,6 +52,22 @@ test('pinned HTTPS requests connect directly to the validated address while pres
     autoSelectFamily: false,
   });
   assert.equal('lookup' in options, false);
+});
+
+test('dual-stack supplier DNS prefers IPv4 when the server has no IPv6 route', () => {
+  assert.deepEqual(preferIpv4SupplierTargets([
+    { address: '2001:4860:4860::8888', family: 6 },
+    { address: '8.8.8.8', family: 4 },
+    { address: '1.1.1.1', family: 4 },
+  ]), [
+    { address: '8.8.8.8', family: 4 },
+    { address: '1.1.1.1', family: 4 },
+  ]);
+  assert.deepEqual(preferIpv4SupplierTargets([
+    { address: '2001:4860:4860::8888', family: 6 },
+  ]), [
+    { address: '2001:4860:4860::8888', family: 6 },
+  ]);
 });
 
 test('supplier redirects identify the migrated host without forwarding credentials', async () => {

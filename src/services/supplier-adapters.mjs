@@ -66,6 +66,11 @@ function assertSupplierHostAllowed(host, blockedHosts) {
   }
 }
 
+export function preferIpv4SupplierTargets(targets = []) {
+  const ipv4 = targets.filter((target) => Number(target?.family) === 4);
+  return ipv4.length ? ipv4 : targets;
+}
+
 export function normalizeSupplierBaseUrl(value, { blockedHosts = [] } = {}) {
   let parsed;
   try {
@@ -119,7 +124,7 @@ async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts) {
       family: Number(record?.family) || net.isIP(address),
     });
   }
-  return targets;
+  return preferIpv4SupplierTargets(targets);
 }
 
 function endpoint(baseUrl, pathname) {
