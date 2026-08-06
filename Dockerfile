@@ -20,10 +20,10 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
-COPY --from=build --chown=node:node migrations ./migrations
-COPY --from=build --chown=node:node scripts ./scripts
-COPY --from=build --chown=node:node src ./src
-COPY --from=build --chown=node:node web ./web
+COPY --from=build --chown=node:node /app/migrations ./migrations
+COPY --from=build --chown=node:node /app/scripts ./scripts
+COPY --from=build --chown=node:node /app/src ./src
+COPY --from=build --chown=node:node /app/web ./web
 
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8090
 USER node
