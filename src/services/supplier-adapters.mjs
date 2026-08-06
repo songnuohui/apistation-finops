@@ -308,10 +308,10 @@ function pinnedHttpsRequest(urlValue, init, target, { timeoutMs, maxResponseByte
         raw: Buffer.concat(chunks, length),
       }));
       response.on('error', (error) => finish(error instanceof SupplierAdapterError
-        ? error : new SupplierAdapterError('request_failed', 'could not connect to supplier')));
+        ? error : new SupplierAdapterError('request_failed', `could not connect to supplier${error?.code ? ` (${error.code})` : ''}`)));
     });
     request.on('error', (error) => finish(error instanceof SupplierAdapterError
-      ? error : new SupplierAdapterError('request_failed', 'could not connect to supplier')));
+      ? error : new SupplierAdapterError('request_failed', `could not connect to supplier${error?.code ? ` (${error.code})` : ''}`)));
     timer = setTimeout(() => {
       const error = new SupplierAdapterError('timeout', 'supplier request timed out');
       request.destroy(error);

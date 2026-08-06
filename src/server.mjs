@@ -17,6 +17,7 @@ import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
+  hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
@@ -318,8 +319,17 @@ async function api(request,res,url){
     if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
     const id=Number(supplierConnectionId[1]);
     const current=await repository.getSupplierConnection(id,{includeCiphertext:true});
-    const input=normalizeSupplierConnection(await body(request));
+    let input=normalizeSupplierConnection(await body(request));
     input.baseUrl=normalizeSupplierBaseUrl(input.baseUrl,{blockedHosts:config.supplierBlockedHosts});
+    if (!config.demoMode && hasSupplierCredentialInput(input.credentials) && input.authMode === current.authMode) {
+      input = {
+        ...input,
+        credentials: mergeSupplierCredentials(
+          supplierMonitorService.decryptCredentials(current.credentialsCiphertext),
+          input.credentials,
+        ),
+      };
+    }
     const replaceCredentials=assertSupplierCredentials(input,{existing:true});
     if(!replaceCredentials&&input.authMode!==current.authMode){
       throw Object.assign(new Error('切换认证方式时必须重新填写访问凭据'),{statusCode:400});

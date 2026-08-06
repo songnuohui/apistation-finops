@@ -264,8 +264,29 @@ export function normalizeSupplierConnection(input) {
   };
 }
 
+export function hasSupplierCredentialInput(credentials = {}) {
+  return Object.values(credentials).some((value) => value !== undefined && value !== null && value !== '');
+}
+
+export function mergeSupplierCredentials(existing = {}, incoming = {}) {
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== undefined && value !== null && value !== '') merged[key] = value;
+  }
+  const authenticationChanged = ['username', 'password', 'totpSecret']
+    .some((key) => incoming[key] !== undefined && incoming[key] !== null
+      && incoming[key] !== '' && incoming[key] !== existing[key]);
+  if (authenticationChanged) {
+    merged.accessToken = '';
+    merged.sessionCookie = '';
+    merged.userId = '';
+    merged.accessTokenExpiresAt = null;
+  }
+  return merged;
+}
+
 export function assertSupplierCredentials(input, { existing = false } = {}) {
-  const provided = Object.values(input.credentials).some((value) => value !== null && value !== '');
+  const provided = hasSupplierCredentialInput(input.credentials);
   if (input.adapterType === 'openai_compatible' && input.authMode !== 'api_key') {
     throw badRequest('openai_compatible requires api_key authentication');
   }

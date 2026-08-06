@@ -8,6 +8,7 @@ import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
+  mergeSupplierCredentials,
   normalizeAlertNotificationSettings,
 } from '../src/http/validation.mjs';
 
@@ -198,6 +199,27 @@ test('supplier connections validate encrypted portal and API-key credentials', (
   assert.equal(openAi.authMode, 'api_key');
   assert.equal(assertSupplierCredentials(openAi), true);
   assert.throws(() => assertSupplierCredentials({ ...openAi, authMode: 'access_token' }), /requires api_key/);
+});
+
+test('editing supplier credentials can keep or partially replace the encrypted credentials', () => {
+  const existing = {
+    username: 'operator@example.test',
+    password: 'old-secret',
+    totpSecret: 'OLD-TOTP',
+    accessToken: 'stale-token',
+    sessionCookie: 'stale-cookie',
+    userId: '9',
+  };
+  assert.deepEqual(mergeSupplierCredentials(existing, {}), existing);
+  assert.deepEqual(mergeSupplierCredentials(existing, { password: 'new-secret' }), {
+    username: 'operator@example.test',
+    password: 'new-secret',
+    totpSecret: 'OLD-TOTP',
+    accessToken: '',
+    sessionCookie: '',
+    userId: '',
+    accessTokenExpiresAt: null,
+  });
 });
 
 test('supplier quality targets require a selected model and bounded probe costs', () => {
