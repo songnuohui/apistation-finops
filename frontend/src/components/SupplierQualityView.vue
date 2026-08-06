@@ -2,10 +2,10 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { ChevronDown, FileText, RefreshCw, Search, ShieldCheck } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
-import { get } from '../api';
+import { get, query, rangeQuery } from '../api';
 
 type AnyRecord = Record<string, any>;
-const props = defineProps<{ refreshToken?: number }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 const router = useRouter();
 const source = ref<AnyRecord[]>([]);
@@ -87,7 +87,7 @@ function toggleSort(key: string) {
 }
 async function load() {
   loading.value = true;
-  try { source.value = (await get('/supplier-quality-overview')).items || []; }
+  try { source.value = (await get(`/supplier-quality-overview?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`)).items || []; }
   catch (error: any) { notify(error.message); }
   finally { loading.value = false; }
 }

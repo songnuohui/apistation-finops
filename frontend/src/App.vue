@@ -2,11 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  Activity, AlertTriangle, BarChart3, ChevronDown, CircleDollarSign, DatabaseZap, Download,
+  Activity, AlertTriangle, BarChart3, CalendarDays, ChevronDown, CircleDollarSign, DatabaseZap, Download,
   FileText, LayoutDashboard, LogOut, Menu, RefreshCw, Search, ServerCog, Settings2,
   ShieldCheck, Users, WalletCards, X,
 } from 'lucide-vue-next';
-import { get, query, send } from './api';
+import { get, query, rangeQuery, send } from './api';
 import SupplierConnectionsView from './components/SupplierConnectionsView.vue';
 import AccountCostsView from './components/AccountCostsView.vue';
 import SupplierQualityView from './components/SupplierQualityView.vue';
@@ -21,6 +21,8 @@ const router = useRouter();
 const page = computed(() => String(route.path.split('/')[1] || 'overview'));
 const mobileOpen = ref(false);
 const range = ref('7d');
+const customStart = ref('');
+const customEnd = ref('');
 const search = ref('');
 const toast = ref('');
 const loading = ref(false);
@@ -94,7 +96,7 @@ async function loadOverview() {
   trend.value = {};
   overviewModels.value = {};
   runtime.value = {};
-  const params = query({ preset: range.value });
+  const params = query(rangeQuery(range.value, customStart.value, customEnd.value));
   await Promise.all([
     get(`/overview-dashboard?${params}`).then((data) => { overview.value = data; }).catch((error) => showToast(error.message)),
     get(`/trend?${params}`).then((data) => { trend.value = data; }).catch((error) => showToast(error.message)),
@@ -110,7 +112,7 @@ async function loadRuntime() {
 async function loadUsers() {
   users.value = {};
   try {
-    users.value = await get(`/users?${query({ preset: range.value, page: 1, page_size: 20, search: search.value, sort: sort.value, direction: direction.value })}`);
+    users.value = await get(`/users?${query({ ...rangeQuery(range.value, customStart.value, customEnd.value), page: 1, page_size: 20, search: search.value, sort: sort.value, direction: direction.value })}`);
   } catch (error: any) { showToast(error.message); }
 }
 
@@ -118,13 +120,13 @@ async function loadUsage() {
   usage.value = {};
   try {
     const endpoint = activeUsageTab.value === 'users' ? '/usage/users' : activeUsageTab.value === 'models' ? '/usage/models' : '/usage/events';
-    usage.value = await get(`${endpoint}?${query({ preset: range.value, page: 1, page_size: 30, search: search.value, sort: sort.value, direction: direction.value })}`);
+    usage.value = await get(`${endpoint}?${query({ ...rangeQuery(range.value, customStart.value, customEnd.value), page: 1, page_size: 30, search: search.value, sort: sort.value, direction: direction.value })}`);
   } catch (error: any) { showToast(error.message); }
 }
 
 async function loadAccounts() {
   accounts.value = {};
-  try { accounts.value = await get(`/accounts?${query({ preset: range.value, page: 1, page_size: 30, search: search.value })}`); } catch (error: any) { showToast(error.message); }
+  try { accounts.value = await get(`/accounts?${query({ ...rangeQuery(range.value, customStart.value, customEnd.value), page: 1, page_size: 30, search: search.value })}`); } catch (error: any) { showToast(error.message); }
 }
 
 async function loadSuppliers() {
@@ -171,7 +173,7 @@ async function refresh() {
 }
 
 async function openUser(item: AnyRecord) {
-  try { detail.value = await get(`/users/${item.id}/details?${query({ preset: range.value, recharge_page: 1, usage_page: 1, detail_page_size: 10 })}`); } catch (error: any) { showToast(error.message); }
+  try { detail.value = await get(`/users/${item.id}/details?${query({ ...rangeQuery(range.value, customStart.value, customEnd.value), recharge_page: 1, usage_page: 1, detail_page_size: 10 })}`); } catch (error: any) { showToast(error.message); }
 }
 
 function openAccount(item: AnyRecord) {
@@ -243,7 +245,7 @@ async function logout() {
 }
 
 watch(page, () => { search.value = ''; loadPage(); });
-watch(range, () => { if (['usage', 'users', 'accounts', 'overview'].includes(page.value)) loadPage(); });
+watch([range, customStart, customEnd], () => { if (range.value !== 'custom' || (customStart.value && customEnd.value)) loadPage(); });
 watch(search, () => {
   const timer = window.setTimeout(() => {
     if (page.value === 'users') loadUsers();
@@ -303,6 +305,12 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
         <div class="toolbar">
           <div class="range-picker">
             <button v-for="item in [['today','今天'],['7d','近 7 天'],['30d','近 30 天'],['month','本月']]" :key="item[0]" :class="{ active: range === item[0] }" @click="range = item[0]">{{ item[1] }}</button>
+            <button class="custom-range-trigger" :class="{ active: range === 'custom' }" title="自定义时间" @click="range = 'custom'"><CalendarDays :size="14" />自定义</button>
+          </div>
+          <div v-if="range === 'custom'" class="custom-range-fields">
+            <label><span>开始</span><input v-model="customStart" type="date" /></label>
+            <span class="custom-range-separator">至</span>
+            <label><span>结束</span><input v-model="customEnd" type="date" /></label>
           </div>
           <button class="icon-button" title="刷新" @click="refresh"><RefreshCw :size="18" /></button>
           <div class="user-chip">
@@ -314,7 +322,7 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
       </header>
       <section class="page-content">
         <div v-if="toast" class="toast">{{ toast }}</div>
-        <OverviewView v-if="page === 'overview'" :refresh-token="overviewRefreshToken" :range="range" @toast="showToast" />
+        <OverviewView v-if="page === 'overview'" :refresh-token="overviewRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <div class="metric-grid">
             <Metric title="充值净额" :value="formatCny(Number(cash.rechargeReceived || 0) - Number(cash.refunds || 0))" :hint="`充值 ${formatCny(cash.rechargeReceived)} · 退款 ${formatCny(cash.refunds)}`" />
@@ -362,7 +370,7 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <UserFinanceView v-else-if="page === 'users'" :refresh-token="userRefreshToken" :range="range" @toast="showToast" />
+        <UserFinanceView v-else-if="page === 'users'" :refresh-token="userRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索邮箱、用户名或标签" :loading="loading" />
           <section class="panel table-panel">
@@ -373,7 +381,7 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <UsageView v-else-if="page === 'usage'" :refresh-token="usageRefreshToken" :range="range" @toast="showToast" />
+        <UsageView v-else-if="page === 'usage'" :refresh-token="usageRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索模型或消费记录" :loading="loading" />
           <div class="tabs"><button v-for="tab in [['users','用户消费汇总'],['models','模型消费汇总'],['events','请求明细']]" :key="tab[0]" :class="{ active: activeUsageTab === tab[0] }" @click="activeUsageTab = tab[0]">{{ tab[1] }}</button></div>
@@ -388,9 +396,9 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
             </DataTable>
           </section>
         </div>
-        <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" @toast="showToast" />
-        <SupplierConnectionsView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken" @toast="showToast" />
-        <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" @toast="showToast" />
+        <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
+        <SupplierConnectionsView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
+        <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">

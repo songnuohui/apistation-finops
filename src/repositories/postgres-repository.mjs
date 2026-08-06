@@ -3340,7 +3340,9 @@ export class PostgresRepository {
     return this.getSupplierQualityTargetContext(resultTargetId);
   }
 
-  async loadSupplierQualityScores() {
+  async loadSupplierQualityScores({ start, end } = {}) {
+    const windowStart = start || new Date(Date.now() - 7 * 86_400_000);
+    const windowEnd = end || new Date();
     const [connectionsResult, observationsResult, keysResult, targetsResult, usageResult] = await Promise.all([
       this.pool.query(`
         WITH keys AS (
@@ -3381,23 +3383,23 @@ export class PostgresRepository {
         SELECT id,connection_id,source_kind,target_id,supplier_key_id,model,group_name,status,
                availability_sample,http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,
                observed_at,metadata
-        FROM ${this.schema}.supplier_quality_observations
-        WHERE observed_at>=NOW()-INTERVAL '7 days'
-        ORDER BY observed_at DESC,id DESC`),
+         FROM ${this.schema}.supplier_quality_observations
+         WHERE observed_at>=$1 AND observed_at<$2
+         ORDER BY observed_at DESC,id DESC`, [windowStart, windowEnd]),
       this.pool.query(`
         SELECT id,connection_id,name,masked_key,group_name,status,removed_at,rate_multiplier,
                last_check_status,last_check_at
-        FROM ${this.schema}.supplier_keys`),
+         FROM ${this.schema}.supplier_keys`),
       this.pool.query(`
         SELECT id,connection_id,supplier_key_id,model,enabled,last_status,last_probe_at
         FROM ${this.schema}.supplier_quality_targets`),
       this.pool.query(`
         SELECT k.connection_id,k.id AS supplier_key_id,f.model,SUM(f.user_charge_cny) AS amount
-        FROM ${this.schema}.fact_usage_events f
-        JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=f.source_account_id
-        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
-        WHERE f.occurred_at>=NOW()-INTERVAL '7 days' AND NULLIF(BTRIM(f.model),'') IS NOT NULL
-        GROUP BY k.connection_id,k.id,f.model`),
+         FROM ${this.schema}.fact_usage_events f
+         JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=f.source_account_id
+         JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+         WHERE f.occurred_at>=$1 AND f.occurred_at<$2 AND NULLIF(BTRIM(f.model),'') IS NOT NULL
+         GROUP BY k.connection_id,k.id,f.model`, [windowStart, windowEnd]),
     ]);
     const connectionRows = new Map(connectionsResult.rows.map((row) => [Number(row.id), row]));
     const scores = buildSupplierQualityScores({
@@ -3443,8 +3445,8 @@ export class PostgresRepository {
     }));
   }
 
-  async getSupplierQualityDashboard(connectionId) {
-    const items = await this.loadSupplierQualityScores();
+  async getSupplierQualityDashboard(connectionId, range = {}) {
+    const items = await this.loadSupplierQualityScores(range);
     const dashboard = items.find((item) => Number(item.connection.id) === Number(connectionId));
     if (!dashboard) throw httpError('supplier connection not found', 404);
     return {
@@ -3456,13 +3458,14 @@ export class PostgresRepository {
                availability_sample,http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,
                observed_at,metadata
         FROM ${this.schema}.supplier_quality_observations
-        WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 100`, [connectionId]))
+         WHERE connection_id=$1 AND observed_at>=$2 AND observed_at<$3
+         ORDER BY observed_at DESC,id DESC LIMIT 100`, [connectionId, range.start || new Date(Date.now() - 7 * 86_400_000), range.end || new Date()]))
         .rows.map((row) => this.qualityObservation(row)),
     };
   }
 
-  async listSupplierQualityOverview() {
-    return { items: await this.loadSupplierQualityScores() };
+  async listSupplierQualityOverview(range = {}) {
+    return { items: await this.loadSupplierQualityScores(range) };
   }
 
   async recordSupplierSyncFailure(connectionId, error) {
@@ -3522,7 +3525,8 @@ export class PostgresRepository {
             connection_id,external_key_id,name,masked_key,key_fingerprint,status,group_id,group_name,
             rate_multiplier,quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,
             source_data,last_seen_at,removed_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW(),NULL)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW(),
+             CASE WHEN $6 IN ('removed','deleted') THEN NOW() ELSE NULL END)
           ON CONFLICT(connection_id,external_key_id) DO UPDATE SET
             name=EXCLUDED.name,masked_key=EXCLUDED.masked_key,
             key_fingerprint=CASE WHEN EXCLUDED.key_fingerprint='' THEN ${this.schema}.supplier_keys.key_fingerprint ELSE EXCLUDED.key_fingerprint END,
@@ -3530,7 +3534,11 @@ export class PostgresRepository {
             rate_multiplier=EXCLUDED.rate_multiplier,quota_total=EXCLUDED.quota_total,quota_used=EXCLUDED.quota_used,
             quota_remaining=EXCLUDED.quota_remaining,quota_currency=EXCLUDED.quota_currency,
             expires_at=EXCLUDED.expires_at,last_used_at=EXCLUDED.last_used_at,source_data=EXCLUDED.source_data,
-            last_seen_at=NOW(),removed_at=NULL,updated_at=NOW()
+             last_seen_at=NOW(),
+             removed_at=CASE WHEN EXCLUDED.status IN ('removed','deleted')
+               THEN COALESCE(${this.schema}.supplier_keys.removed_at,NOW())
+               ELSE NULL END,
+             updated_at=NOW()
           RETURNING *`, [
           connectionId,item.externalId,item.name,item.maskedKey,item.keyFingerprint || '',item.status,
           item.groupId,item.groupName,item.rateMultiplier,item.quotaTotal,item.quotaUsed,item.quotaRemaining,

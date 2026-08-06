@@ -156,6 +156,7 @@ function status(value) {
   const text = String(value ?? '').toLowerCase();
   if (['1', 'active', 'enabled', 'ok', 'normal'].includes(text)) return 'active';
   if (['2', 'disabled', 'inactive', 'banned'].includes(text)) return 'disabled';
+  if (['3', 'removed', 'deleted', 'revoked'].includes(text)) return 'removed';
   if (['expired'].includes(text)) return 'expired';
   return text || 'unknown';
 }

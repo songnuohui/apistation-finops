@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { ChevronDown, RefreshCw, Search, ShieldCheck, UserRoundCheck, UserRoundX, Users, X } from 'lucide-vue-next';
-import { get, query, send } from '../api';
+import { get, query, rangeQuery, send } from '../api';
 
 type AnyRecord = Record<string, any>;
-const props = defineProps<{ refreshToken?: number; range?: string }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 const data = ref<AnyRecord>({});
 const loading = ref(false);
@@ -27,7 +27,7 @@ const percent = (value: any) => value === null || value === undefined ? '--' : `
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 async function load() {
   loading.value = true;
-  try { data.value = await get(`/users?${query({ preset: props.range || '7d', page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`); }
+  try { data.value = await get(`/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`); }
   catch (error: any) { emit('toast', error.message); }
   finally { loading.value = false; }
 }
@@ -59,7 +59,7 @@ async function updateSelected(excludeFromBalanceStats: boolean) {
 async function loadDetail(user: AnyRecord, reset = true) {
   if (reset) detailPage.value = { usage: 1, recharges: 1 };
   try {
-    detail.value = await get(`/users/${user.id}/details?${query({ preset: props.range || '7d', recharge_page: detailPage.value.recharges, usage_page: detailPage.value.usage, detail_page_size: 10 })}`);
+    detail.value = await get(`/users/${user.id}/details?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), recharge_page: detailPage.value.recharges, usage_page: detailPage.value.usage, detail_page_size: 10 })}`);
   } catch (error: any) { emit('toast', error.message); }
 }
 async function moveDetailPage(kind: 'usage' | 'recharges', delta: number) {
@@ -74,7 +74,7 @@ async function openWhitelist() {
 async function loadWhitelist() {
   if (!whitelist.value) return;
   whitelist.value.loading = true;
-  try { whitelist.value.data = await get(`/users?${query({ preset: props.range || '7d', page: whitelist.value.page, page_size: 20, search: whitelist.value.search, balance_scope: whitelist.value.scope })}`); }
+  try { whitelist.value.data = await get(`/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: whitelist.value.page, page_size: 20, search: whitelist.value.search, balance_scope: whitelist.value.scope })}`); }
   catch (error: any) { emit('toast', error.message); }
   finally { if (whitelist.value) whitelist.value.loading = false; }
 }

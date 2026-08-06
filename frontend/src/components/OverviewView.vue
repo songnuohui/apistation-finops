@@ -2,12 +2,12 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Activity, AlertTriangle, BarChart3, ChevronDown, RefreshCw, X } from 'lucide-vue-next';
 import { Chart, registerables } from 'chart.js';
-import { get, query } from '../api';
+import { get, query, rangeQuery } from '../api';
 
 Chart.register(...registerables);
 type AnyRecord = Record<string, any>;
 type DetailType = 'recharge' | 'gift' | 'consumption' | 'tokens' | 'balance' | null;
-const props = defineProps<{ refreshToken?: number; range?: string }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 const dashboard = ref<AnyRecord>({});
 const trend = ref<AnyRecord>({});
@@ -56,7 +56,7 @@ async function loadRuntime() {
 async function load() {
   loading.value = true;
   try {
-    const params = query({ preset: props.range || '7d' });
+    const params = query(rangeQuery(props.range, props.rangeStart, props.rangeEnd));
     const [dashboardData, trendData, modelData] = await Promise.all([
       get(`/overview-dashboard?${params}`),
       get(`/trend?${params}`),
@@ -112,15 +112,15 @@ async function loadDetail() {
   if (!detailType.value) return;
   try {
     const type = detailType.value;
-    const params = query({ preset: props.range || '7d', page: detailPage.value, page_size: 20 });
+    const params = query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: detailPage.value, page_size: 20 });
     let endpoint = '';
     if (type === 'recharge') endpoint = `/funds?scope=recharge&${params}`;
     else if (type === 'gift') endpoint = `/non-cash-balance-credits?${params}`;
-    else if (type === 'balance') endpoint = `/users?${query({ preset: props.range || '7d', page: detailPage.value, page_size: 20, balance_scope: 'reported', sort: 'balanceCny', direction: 'desc' })}`;
-    else if (type === 'tokens') endpoint = `/usage/models?${query({ preset: props.range || '7d', page: detailPage.value, page_size: 20, sort: 'tokens', direction: 'desc' })}`;
+    else if (type === 'balance') endpoint = `/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: detailPage.value, page_size: 20, balance_scope: 'reported', sort: 'balanceCny', direction: 'desc' })}`;
+    else if (type === 'tokens') endpoint = `/usage/models?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: detailPage.value, page_size: 20, sort: 'tokens', direction: 'desc' })}`;
     else endpoint = detailTab.value === 'models'
-      ? `/usage/models?${query({ preset: props.range || '7d', page: detailPage.value, page_size: 20, sort: detailSort.value, direction: detailDirection.value })}`
-      : `/usage/users?${query({ preset: props.range || '7d', page: detailPage.value, page_size: 20, sort: detailSort.value, direction: detailDirection.value })}`;
+      ? `/usage/models?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: detailPage.value, page_size: 20, sort: detailSort.value, direction: detailDirection.value })}`
+      : `/usage/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: detailPage.value, page_size: 20, sort: detailSort.value, direction: detailDirection.value })}`;
     detail.value = await get(endpoint);
   } catch (error: any) { notify(error.message); }
 }

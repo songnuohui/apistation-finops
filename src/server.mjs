@@ -255,7 +255,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-connections')return json(res,200,await cached('supplier-connections',config.listCacheTtlSeconds,()=>repository.listSupplierConnections({search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-quality-overview'){
-    return json(res,200,await cached('supplier-quality-overview',config.listCacheTtlSeconds,()=>repository.listSupplierQualityOverview()));
+    return json(res,200,await cached('supplier-quality-overview',config.listCacheTtlSeconds,()=>repository.listSupplierQualityOverview(range())));
   }
   const supplierConnectionDetails=/^\/api\/supplier-connections\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&supplierConnectionDetails){
@@ -266,7 +266,7 @@ async function api(request,res,url){
     const connectionId=Number(supplierQuality[1]);
     await repository.getSupplierConnection(connectionId);
     const [dashboard,targets]=await Promise.all([
-      repository.getSupplierQualityDashboard(connectionId),
+      repository.getSupplierQualityDashboard(connectionId, range()),
       repository.listSupplierQualityTargets(connectionId),
     ]);
     return json(res,200,{...dashboard,targets:targets.items||[]});

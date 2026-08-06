@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { Check, Clock3, Edit3, History, Link2, Plus, RefreshCw, WalletCards, X } from 'lucide-vue-next';
-import { get, query, send } from '../api';
+import { get, query, rangeQuery, send } from '../api';
 
 type AnyRecord = Record<string, any>;
-const props = defineProps<{ refreshToken?: number; range?: string }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 
 const search = ref('');
@@ -75,7 +75,7 @@ async function load() {
   loading.value = true;
   try {
     const params = query({
-      preset: props.range || '7d', page: page.value, page_size: pageSize.value, search: search.value,
+      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize.value, search: search.value,
     });
     const [accountResult, catalogResult, profileResult] = await Promise.all([
       get(`/accounts?${params}`),

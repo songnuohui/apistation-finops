@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue';
 import { ChevronDown, FileText, RefreshCw, Search } from 'lucide-vue-next';
-import { get, query } from '../api';
+import { get, query, rangeQuery } from '../api';
 
 type AnyRecord = Record<string, any>;
-const props = defineProps<{ refreshToken?: number; range?: string }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 const tab = ref<'users' | 'models' | 'events'>('users');
 const search = ref('');
@@ -32,7 +32,7 @@ async function load() {
   loading.value = true;
   try {
     const endpoint = tab.value === 'users' ? '/usage/users' : tab.value === 'models' ? '/usage/models' : '/usage/events';
-    data.value = await get(`${endpoint}?${query({ preset: props.range || '7d', page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`);
+    data.value = await get(`${endpoint}?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`);
   } catch (error: any) { emit('toast', error.message); }
   finally { loading.value = false; }
 }

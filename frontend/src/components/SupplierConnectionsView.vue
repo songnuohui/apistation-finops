@@ -5,12 +5,12 @@ import {
   Activity, AlertTriangle, Bell, Check, Edit3, KeyRound, Link2, Plus, RefreshCw,
   Send, ServerCog, Settings2, ShieldCheck, Unlink, X,
 } from 'lucide-vue-next';
-import { get, query, send } from '../api';
+import { get, query, rangeQuery, send } from '../api';
 
 type AnyRecord = Record<string, any>;
 type DetailTab = 'keys' | 'quality' | 'balances' | 'checks' | 'alerts';
 
-const props = defineProps<{ refreshToken?: number }>();
+const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 const route = useRoute();
 const router = useRouter();
@@ -290,7 +290,7 @@ async function openDetails(connectionId: number, tab: DetailTab = 'keys') {
   try {
     const [connectionDetail, quality] = await Promise.all([
       get(`/supplier-connections/${connectionId}/details`),
-      get(`/supplier-connections/${connectionId}/quality`),
+      get(`/supplier-connections/${connectionId}/quality?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`),
     ]);
     detail.value = { ...connectionDetail, quality };
     if (String(route.query.connection || '') !== String(connectionId)) {
@@ -483,6 +483,9 @@ watch(search, () => {
   searchTimer = window.setTimeout(loadConnections, 250);
 });
 watch(() => props.refreshToken, () => loadConnections());
+watch([() => props.range, () => props.rangeStart, () => props.rangeEnd], () => {
+  if (detail.value?.connection?.id) openDetails(Number(detail.value.connection.id), detailTab.value);
+});
 watch(() => editor.value?.adapterType, () => syncEditorAuthMode());
 watch(() => targetEditor.value?.keyId, (value, previous) => {
   if (value && value !== previous && targetEditor.value) {

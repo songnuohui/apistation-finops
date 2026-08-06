@@ -62,7 +62,7 @@ test('supplier quality overview loads model, key, and usage data for cross-suppl
         }] };
       }
       if (text.includes('FROM "finops".supplier_quality_observations')) {
-        assert.match(text, /NOW\(\)-INTERVAL '7 days'/);
+        assert.match(text, /observed_at>?\s*=\$1 AND observed_at<\$2/);
         return { rows: Array.from({ length: 200 }, (_, index) => ({
           id: String(index + 1),
           connection_id: index < 100 ? '7' : '8',

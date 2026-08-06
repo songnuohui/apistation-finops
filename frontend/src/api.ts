@@ -22,3 +22,10 @@ export function query(params: Record<string, string | number | boolean | null | 
   });
   return search.toString();
 }
+
+export function rangeQuery(range: string | undefined, start = '', end = '') {
+  return {
+    range: range || '7d',
+    ...(range === 'custom' ? { start, end } : {}),
+  };
+}
