@@ -167,7 +167,7 @@ function multiplierText(value: any) {
 function profitGuardHint(policy: AnyRecord | null | undefined) {
   if (!policy?.enabled) return '未启用利润保护';
   if (policy.thresholdMode === 'minimum_sale_multiplier') {
-    return `最低售价 ${multiplierText(policy.minimumSaleMultiplier)}`;
+    return `成本触发 ${multiplierText(policy.minimumSaleMultiplier)}`;
   }
   return `最低毛利 ${(Number(policy.minimumMargin || 0) * 100).toFixed(1).replace(/\.0$/, '')}%`;
 }
@@ -939,14 +939,14 @@ onMounted(async () => {
           <label>保护方式
             <select v-model="profitGuardEditor.thresholdMode" :disabled="!profitGuardEditor.enabled">
               <option value="margin">最低毛利率</option>
-              <option value="minimum_sale_multiplier">最低售卖倍率</option>
+              <option value="minimum_sale_multiplier">上游成本触发倍率</option>
             </select>
           </label>
           <label>当前上游倍率<input :value="multiplierText(profitGuardEditor.upstreamMultiplier)" readonly /></label>
           <label v-if="profitGuardEditor.thresholdMode === 'margin'">最低毛利率 (%)
             <input v-model="profitGuardEditor.minimumMarginPercent" type="number" min="0" max="99.99" step="0.1" :disabled="!profitGuardEditor.enabled" />
           </label>
-          <label v-else>最低售卖倍率
+          <label v-else>上游成本触发倍率
             <input v-model="profitGuardEditor.minimumSaleMultiplier" type="number" min="0" step="0.0001" :disabled="!profitGuardEditor.enabled" />
           </label>
           <label class="toggle-field">
@@ -958,7 +958,7 @@ onMounted(async () => {
           按当前上游倍率 {{ multiplierText(profitGuardEditor.upstreamMultiplier) }} 和最低毛利率计算，最低售卖倍率为
           <strong>{{ calculatedMinimumSaleMultiplier === null ? '--' : multiplierText(calculatedMinimumSaleMultiplier) }}</strong>。
         </div>
-        <div v-else class="form-note">售价倍率低于该值的分组会自动从这个账号移除；售价不高于上游成本的分组始终会被移除。</div>
+        <div v-else class="form-note">上游成本达到此倍率后，售价倍率不高于该值的分组会自动移除；售价不高于上游成本的分组始终会被移除。</div>
         <footer>
           <button class="secondary-button" @click="profitGuardEditor = null">取消</button>
           <button class="primary-button" :disabled="profitGuardSaving" @click="saveProfitGuard"><Check :size="16" />保存利润保护</button>
@@ -983,13 +983,13 @@ onMounted(async () => {
           <label>保护方式
             <select v-model="supplierProfitGuardEditor.thresholdMode" :disabled="!supplierProfitGuardEditor.enabled">
               <option value="margin">最低毛利率</option>
-              <option value="minimum_sale_multiplier">最低售卖倍率</option>
+              <option value="minimum_sale_multiplier">上游成本触发倍率</option>
             </select>
           </label>
           <label v-if="supplierProfitGuardEditor.thresholdMode === 'margin'">最低毛利率 (%)
             <input v-model="supplierProfitGuardEditor.minimumMarginPercent" type="number" min="0" max="99.99" step="0.1" :disabled="!supplierProfitGuardEditor.enabled" />
           </label>
-          <label v-else>最低售卖倍率
+          <label v-else>上游成本触发倍率
             <input v-model="supplierProfitGuardEditor.minimumSaleMultiplier" type="number" min="0" step="0.0001" :disabled="!supplierProfitGuardEditor.enabled" />
           </label>
           <label class="toggle-field full-field">
@@ -1000,7 +1000,7 @@ onMounted(async () => {
         <div v-if="supplierProfitGuardEditor.thresholdMode === 'margin'" class="form-note">
           该规则会按每个密钥各自的当前上游倍率计算最低售卖倍率；保存时立即覆盖当前关联账号。
         </div>
-        <div v-else class="form-note">售卖倍率低于该值的分组会从对应账号移除；售卖倍率不高于上游成本的分组始终会被移除。</div>
+        <div v-else class="form-note">上游成本达到此倍率后，售价倍率不高于该值的分组会从对应账号移除；售价不高于上游成本的分组始终会被移除。</div>
         <footer>
           <button class="secondary-button" @click="supplierProfitGuardEditor = null">取消</button>
           <button class="primary-button" :disabled="supplierProfitGuardSaving" @click="saveSupplierProfitGuard"><Check :size="16" />保存并批量应用</button>

@@ -26,7 +26,7 @@ function removalReason({ upstreamMultiplier, groupRateMultiplier, minimumMargin,
     return `分组售价倍率 ${groupRateMultiplier}x 不高于上游成本倍率 ${upstreamMultiplier}x`;
   }
   if (thresholdMode === 'minimum_sale_multiplier') {
-    return `分组售价倍率 ${groupRateMultiplier}x 低于最低售卖倍率 ${minimumSaleMultiplier}x（上游成本倍率 ${upstreamMultiplier}x）`;
+    return `上游成本倍率 ${upstreamMultiplier}x 已达到触发倍率 ${minimumSaleMultiplier}x，分组售价倍率 ${groupRateMultiplier}x 不高于触发倍率`;
   }
   return `上游成本倍率 ${upstreamMultiplier}x 导致预计毛利率低于 ${minimumMargin * 100}%`;
 }
@@ -46,7 +46,9 @@ export function groupShouldBeRemoved(
   if (upstreamMultiplier === null || groupRateMultiplier === null || groupRateMultiplier <= 0) return false;
   if (groupRateMultiplier <= upstreamMultiplier) return true;
   if (thresholdMode === 'minimum_sale_multiplier') {
-    return minimumSaleMultiplier !== null && groupRateMultiplier < minimumSaleMultiplier;
+    return minimumSaleMultiplier !== null
+      && upstreamMultiplier >= minimumSaleMultiplier
+      && groupRateMultiplier <= minimumSaleMultiplier;
   }
   const margin = 1 - upstreamMultiplier / groupRateMultiplier;
   return margin < minimumMargin;

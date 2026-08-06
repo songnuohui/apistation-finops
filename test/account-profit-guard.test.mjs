@@ -13,11 +13,13 @@ test('profit guard removes a group when the required margin is no longer availab
   assert.equal(groupShouldBeRemoved(0.16, 0.16, 0), true);
 });
 
-test('profit guard supports an explicit minimum sale multiplier', () => {
+test('profit guard supports an upstream cost trigger multiplier', () => {
   assert.equal(minimumSaleMultiplierForMargin(0.085, 0.2), 0.10625);
-  assert.equal(groupShouldBeRemoved(0.085, 0.09, 0, 'minimum_sale_multiplier', 0.1), true);
-  assert.equal(groupShouldBeRemoved(0.085, 0.1, 0, 'minimum_sale_multiplier', 0.1), false);
-  assert.equal(groupShouldBeRemoved(0.085, 0.08, 0, 'minimum_sale_multiplier', 0.01), true);
+  assert.equal(groupShouldBeRemoved(0.06, 0.08, 0, 'minimum_sale_multiplier', 0.085), false);
+  assert.equal(groupShouldBeRemoved(0.085, 0.08, 0, 'minimum_sale_multiplier', 0.085), true);
+  assert.equal(groupShouldBeRemoved(0.085, 0.09, 0, 'minimum_sale_multiplier', 0.085), false);
+  assert.equal(groupShouldBeRemoved(0.075, 0.08, 0, 'minimum_sale_multiplier', 0.07), false);
+  assert.equal(groupShouldBeRemoved(0.08, 0.08, 0, 'minimum_sale_multiplier', 0.01), true);
 });
 
 test('profit guard re-reads the account and sends only group_ids on a safe update', async () => {
