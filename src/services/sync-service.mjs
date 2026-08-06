@@ -181,6 +181,7 @@ export class SyncService {
     this.runtimeConcurrencyReader = null;
     this.readCacheInvalidator = null;
     this.sub2ApiAccessToken = '';
+    this.sub2ApiAccessTokenProvider = null;
   }
 
   setChannelMonitorReader(reader) {
@@ -211,29 +212,49 @@ export class SyncService {
     this.sub2ApiAccessToken = String(accessToken || '').trim();
   }
 
+  setSub2ApiAccessTokenProvider(provider) {
+    this.sub2ApiAccessTokenProvider = provider && typeof provider.getAccessToken === 'function' ? provider : null;
+  }
+
   clearSub2ApiAccessToken() {
     this.sub2ApiAccessToken = '';
   }
 
-  async readChannelMonitors() {
-    if (!this.channelMonitorReader || !this.sub2ApiAccessToken) return null;
+  async withSub2ApiAccessToken(reader) {
+    const serviceToken = this.sub2ApiAccessTokenProvider ? await this.sub2ApiAccessTokenProvider.getAccessToken() : '';
+    const accessToken = String(serviceToken || this.sub2ApiAccessToken || '').trim();
+    if (!accessToken) return null;
     try {
-      return await this.channelMonitorReader({ accessToken: this.sub2ApiAccessToken });
+      return await reader(accessToken);
     } catch (error) {
+      if ((error?.statusCode === 401 || error?.statusCode === 403) && serviceToken) {
+        await this.sub2ApiAccessTokenProvider.invalidateAccessToken(serviceToken);
+        const retryToken = await this.sub2ApiAccessTokenProvider.getAccessToken({ force: true });
+        return reader(retryToken);
+      }
       if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
+      throw error;
+    }
+  }
+
+  async readChannelMonitors() {
+    if (!this.channelMonitorReader) return null;
+    try {
+      return await this.withSub2ApiAccessToken((accessToken) => this.channelMonitorReader({ accessToken }));
+    } catch (error) {
       this.logger.warn('[monitor] failed to read sub2api channel monitors', error?.code || error?.message || error);
       return null;
     }
   }
 
   async refreshSourceGroupCatalog() {
-    if (!this.sourceGroupCatalogReader || !this.sourceGroupCatalogWriter || !this.sub2ApiAccessToken) return null;
+    if (!this.sourceGroupCatalogReader || !this.sourceGroupCatalogWriter) return null;
     try {
-      const groups = await this.sourceGroupCatalogReader({ accessToken: this.sub2ApiAccessToken });
+      const groups = await this.withSub2ApiAccessToken((accessToken) => this.sourceGroupCatalogReader({ accessToken }));
+      if (!Array.isArray(groups)) return null;
       await this.sourceGroupCatalogWriter(groups);
       return groups;
     } catch (error) {
-      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
       this.logger.warn('[monitor] failed to refresh sub2api group catalog', error?.code || error?.message || error);
       return null;
     }
@@ -262,13 +283,12 @@ export class SyncService {
     let queue = null;
     let users = [];
     try {
-      if (this.runtimeStatusReader && this.sub2ApiAccessToken) {
-        const result = await this.runtimeStatusReader({ accessToken: this.sub2ApiAccessToken });
+      if (this.runtimeStatusReader) {
+        const result = await this.withSub2ApiAccessToken((accessToken) => this.runtimeStatusReader({ accessToken }));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
       }
     } catch (error) {
-      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
       await this.markSourceError('runtime_load', error);
       this.logger.warn('[runtime] failed to read Sub2API runtime API snapshot', error?.code || error?.message || error);
     }
@@ -342,13 +362,12 @@ export class SyncService {
     let queue = null;
     let users = [];
     let accounts = [];
-    if (this.runtimeStatusReader && this.sub2ApiAccessToken) {
+    if (this.runtimeStatusReader) {
       try {
-        const result = await this.runtimeStatusReader({ accessToken: this.sub2ApiAccessToken });
+        const result = await this.withSub2ApiAccessToken((accessToken) => this.runtimeStatusReader({ accessToken }));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
       } catch (error) {
-        if (error?.statusCode === 401 || error?.statusCode === 403) this.clearSub2ApiAccessToken();
         this.logger.warn('[runtime] live Sub2API API read failed', error?.code || error?.message || error);
       }
     }

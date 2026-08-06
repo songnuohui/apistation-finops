@@ -119,9 +119,9 @@ function optionalNumber(value) {
 export async function listSub2ApiAdminGroups({ accessToken, clientIp = '' }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
   if (!token) throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api administrator token is unavailable', 503);
-  const groups = await request(
+  const payload = await request(
     config.sub2apiAuthUrl,
-    '/api/v1/admin/groups/all?include_inactive=true',
+    '/api/v1/admin/groups',
     {
       method: 'GET',
       headers: {
@@ -133,6 +133,7 @@ export async function listSub2ApiAdminGroups({ accessToken, clientIp = '' }, con
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
   );
+  const groups = Array.isArray(payload) ? payload : payload?.items;
   if (!Array.isArray(groups)) {
     throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api returned an invalid group catalog', 503);
   }

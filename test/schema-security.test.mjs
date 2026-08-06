@@ -214,6 +214,14 @@ test('profit guard threshold migration remains FinOps-owned', () => {
   assert.doesNotMatch(migration, /\b(?:public|sub2api)\./i);
 });
 
+test('Sub2API service authentication remains FinOps-owned and stores no plaintext credentials or token', () => {
+  const migration = read('migrations/027_sub2api_service_auth.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*sub2api_service_auth_settings/s);
+  assert.match(migration, /credentials_ciphertext TEXT NOT NULL/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\b(?:password|access_token|refresh_token)\s+(?:TEXT|VARCHAR)/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

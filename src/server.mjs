@@ -19,7 +19,7 @@ import {
   normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
   hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
-  normalizeAccountProfitGuard,
+  normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -29,6 +29,7 @@ import { ResponseCacheService } from './services/response-cache-service.mjs';
 import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
 import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs';
 import { AccountProfitGuardService } from './services/account-profit-guard-service.mjs';
+import { Sub2ApiServiceAuthService } from './services/sub2api-service-auth-service.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -55,9 +56,12 @@ const qqAlertNotificationService=new QqAlertNotificationService(repository,confi
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
+const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
 const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
 const pendingLogins=new PendingLoginStore();
 supplierMonitorService?.setProfitGuardService(accountProfitGuardService);
+sub2ApiReadonlyGateway.setAccessTokenProvider(sub2ApiServiceAuthService);
+syncService?.setSub2ApiAccessTokenProvider(sub2ApiServiceAuthService);
 syncService?.setChannelMonitorReader(({accessToken})=>listSub2ApiChannelMonitors({accessToken},config));
 syncService?.setSourceGroupCatalogReader(({accessToken})=>listSub2ApiAdminGroups({accessToken},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
@@ -390,6 +394,23 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/alert-notification-settings'){
     return json(res,200,await repository.getAlertNotificationSettings());
   }
+  if(request.method==='GET'&&url.pathname==='/api/sub2api-service-auth'){
+    await sub2ApiServiceAuthService.loadSettings();
+    return json(res,200,sub2ApiServiceAuthService.status());
+  }
+  if(request.method==='PATCH'&&url.pathname==='/api/sub2api-service-auth'){
+    const settings=await sub2ApiServiceAuthService.updateSettings(
+      normalizeSub2ApiServiceAuthSettings(await body(request)),
+      auth.actor,
+    );
+    await syncService?.refreshChannelMonitorSnapshots();
+    await syncService?.refreshRuntimeSnapshots();
+    return json(res,200,settings);
+  }
+  if(request.method==='POST'&&url.pathname==='/api/sub2api-service-auth/test'){
+    await sub2ApiServiceAuthService.getAccessToken({force:true});
+    return json(res,200,sub2ApiServiceAuthService.status());
+  }
   if(request.method==='PATCH'&&url.pathname==='/api/alert-notification-settings'){
     const input=normalizeAlertNotificationSettings(await body(request));
     const accessTokenCiphertext=input.clearAccessToken
@@ -492,16 +513,17 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth']],
   );
-  if(migration.rowCount < 25)throw new Error('required FinOps migrations through 026_profit_guard_threshold_modes are not applied');
+  if(migration.rowCount < 26)throw new Error('required FinOps migrations through 027_sub2api_service_auth are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
+    sub2apiServiceAuth:sub2ApiServiceAuthService.status(),
   };
 }
 
@@ -544,11 +566,12 @@ const server=http.createServer(async(request,res)=>{
 
 async function start(){
   if(!config.demoMode)await assertDistinctDatabases(sourcePool,finopsPool);
+  sub2ApiServiceAuthService.start();
   if(syncService&&config.syncEnabled){await syncService.validateSourceSchema();syncService.start();}
   supplierMonitorService?.start();
   qqAlertNotificationService.start();
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);syncService?.stop();supplierMonitorService?.stop();qqAlertNotificationService.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);sub2ApiServiceAuthService.stop();syncService?.stop();supplierMonitorService?.stop();qqAlertNotificationService.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

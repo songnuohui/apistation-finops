@@ -31,6 +31,8 @@ const targetModels = ref<string[]>([]);
 const targetModelsLoading = ref(false);
 const qqEditor = ref<AnyRecord | null>(null);
 const qqSaving = ref(false);
+const serviceAuthEditor = ref<AnyRecord | null>(null);
+const serviceAuthSaving = ref(false);
 const profitGuardEditor = ref<AnyRecord | null>(null);
 const profitGuardSaving = ref(false);
 let searchTimer: number | undefined;
@@ -551,6 +553,66 @@ async function testQqSettings() {
   }
 }
 
+async function openServiceAuthSettings() {
+  try {
+    const settings = await get('/sub2api-service-auth');
+    serviceAuthEditor.value = {
+      ...settings,
+      password: '',
+      totpSecret: '',
+      clearCredentials: false,
+    };
+  } catch (error: any) {
+    notify(error.message);
+  }
+}
+
+async function saveServiceAuthSettings(closeAfter = true) {
+  if (!serviceAuthEditor.value) return false;
+  serviceAuthSaving.value = true;
+  try {
+    const result = await send('/sub2api-service-auth', 'PATCH', {
+      enabled: Boolean(serviceAuthEditor.value.enabled),
+      email: String(serviceAuthEditor.value.email || '').trim(),
+      password: serviceAuthEditor.value.password || '',
+      totpSecret: serviceAuthEditor.value.totpSecret || '',
+      clearCredentials: Boolean(serviceAuthEditor.value.clearCredentials),
+    });
+    serviceAuthEditor.value = {
+      ...serviceAuthEditor.value,
+      ...result,
+      password: '',
+      totpSecret: '',
+      clearCredentials: false,
+    };
+    notify(result.authenticated ? 'Sub2API 服务账号已验证' : 'Sub2API 服务账号已保存');
+    if (closeAfter) serviceAuthEditor.value = null;
+    return true;
+  } catch (error: any) {
+    notify(error.message);
+    return false;
+  } finally {
+    serviceAuthSaving.value = false;
+  }
+}
+
+async function testServiceAuthSettings() {
+  if (!await saveServiceAuthSettings(false)) return;
+  try {
+    const result = await send('/sub2api-service-auth/test', 'POST', {});
+    if (serviceAuthEditor.value) serviceAuthEditor.value = {
+      ...serviceAuthEditor.value,
+      ...result,
+      password: '',
+      totpSecret: '',
+      clearCredentials: false,
+    };
+    notify('Sub2API 服务账号已验证');
+  } catch (error: any) {
+    notify(error.message);
+  }
+}
+
 watch(search, () => {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(loadConnections, 250);
@@ -582,6 +644,7 @@ onMounted(async () => {
         <input v-model="search" placeholder="搜索供应商、连接名称或站点地址" />
       </label>
       <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
+      <button class="secondary-button" @click="openServiceAuthSettings"><KeyRound :size="16" />Sub2API 自动认证</button>
       <button class="secondary-button" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
@@ -874,6 +937,27 @@ onMounted(async () => {
           <label v-if="qqEditor.accessTokenConfigured" class="toggle-field full-field"><input v-model="qqEditor.clearAccessToken" type="checkbox" /><span><strong>清除已保存的 Access Token</strong><small>仅在 OneBot 网关已关闭鉴权时使用</small></span></label>
         </div>
         <footer><button class="secondary-button" :disabled="qqSaving" @click="testQqSettings"><Send :size="16" />发送测试</button><button class="primary-button" :disabled="qqSaving" @click="saveQqSettings(true)"><Check :size="16" />保存配置</button></footer>
+      </section>
+    </div>
+
+    <div v-if="serviceAuthEditor" class="modal-layer nested-modal" @click.self="serviceAuthEditor = null">
+      <section class="modal form-modal sub2api-service-auth-modal">
+        <header><div><h2>Sub2API 自动认证</h2><p>后台同步与利润保护使用独立服务账号，不依赖当前网页登录状态。</p></div><button class="icon-button" @click="serviceAuthEditor = null"><X :size="19" /></button></header>
+        <div class="supplier-metrics">
+          <div><span>认证状态</span><strong :class="{ 'service-auth-ready': serviceAuthEditor.authenticated }">{{ serviceAuthEditor.authenticated ? '已认证' : serviceAuthEditor.enabled ? '待认证' : '未启用' }}</strong><small>{{ serviceAuthEditor.lastError || '访问 Token 仅保存在服务内存中' }}</small></div>
+          <div><span>上次认证</span><strong>{{ dateTime(serviceAuthEditor.lastAuthenticatedAt) }}</strong><small>服务重启后会自动重新登录</small></div>
+          <div><span>Token 到期</span><strong>{{ dateTime(serviceAuthEditor.tokenExpiresAt) }}</strong><small>到期前自动续期，401/403 自动重试</small></div>
+          <div><span>更新人</span><strong>{{ serviceAuthEditor.updatedBy || '--' }}</strong><small>{{ dateTime(serviceAuthEditor.updatedAt) }}</small></div>
+        </div>
+        <div class="form-grid">
+          <label class="toggle-field full-field"><input v-model="serviceAuthEditor.enabled" type="checkbox" /><span><strong>启用独立服务账号</strong><small>供应商同步、分组读取和利润保护均优先使用此账号；前台退出登录不会影响后台任务。</small></span></label>
+          <label class="full-field">管理员邮箱<input v-model="serviceAuthEditor.email" type="email" autocomplete="off" placeholder="service-admin@example.com" /></label>
+          <label>管理员密码<input v-model="serviceAuthEditor.password" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '已配置，留空保持不变' : '首次配置必填'" /></label>
+          <label>TOTP 密钥（可选）<input v-model="serviceAuthEditor.totpSecret" type="password" autocomplete="new-password" :placeholder="serviceAuthEditor.credentialsConfigured ? '留空保持不变' : '账号启用两步验证时填写'" /></label>
+          <label v-if="serviceAuthEditor.credentialsConfigured" class="toggle-field full-field"><input v-model="serviceAuthEditor.clearCredentials" type="checkbox" /><span><strong>清除服务账号凭据</strong><small>清除后会立即停止自动认证与后台分组更新。</small></span></label>
+        </div>
+        <div class="form-note">密码和 TOTP 密钥以 FinOps 的 AES-GCM 密钥加密保存；访问 Token 不写入数据库或 Redis。请使用仅供 FinOps 使用的 Sub2API 管理员账号。</div>
+        <footer><button class="secondary-button" :disabled="serviceAuthSaving" @click="testServiceAuthSettings"><ShieldCheck :size="16" />验证连接</button><button class="primary-button" :disabled="serviceAuthSaving" @click="saveServiceAuthSettings(true)"><Check :size="16" />保存自动认证</button></footer>
       </section>
     </div>
   </div>

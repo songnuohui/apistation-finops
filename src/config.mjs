@@ -186,6 +186,7 @@ export function loadConfig(env = process.env) {
     authDisabled,
     sub2apiAuthUrl: authDisabled ? null : httpUrl(env.SUB2API_AUTH_URL, 'SUB2API_AUTH_URL'),
     sub2apiAuthTimeoutMs: intValue(env.SUB2API_AUTH_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
+    sub2apiServiceAuthRefreshSeconds: intValue(env.SUB2API_SERVICE_AUTH_REFRESH_SECONDS, 300, { min: 30, max: 3600 }),
     sub2apiRuntimePageSize: intValue(env.SUB2API_RUNTIME_PAGE_SIZE, 100, { min: 10, max: 100 }),
     finopsRedisUrl: redisUrl(env.FINOPS_REDIS_URL, 'FINOPS_REDIS_URL'),
     finopsRedisKeyPrefix: redisKeyPrefix(env.FINOPS_REDIS_KEY_PREFIX),

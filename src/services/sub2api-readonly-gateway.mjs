@@ -8,7 +8,12 @@ export class Sub2ApiReadonlyGateway {
     this.logger = logger;
     this.fetchImpl = fetchImpl;
     this.accessToken = '';
+    this.accessTokenProvider = null;
     this.cache = new Map();
+  }
+
+  setAccessTokenProvider(provider) {
+    this.accessTokenProvider = provider && typeof provider.getAccessToken === 'function' ? provider : null;
   }
 
   setAccessToken(token) {
@@ -21,38 +26,57 @@ export class Sub2ApiReadonlyGateway {
     this.cache.clear();
   }
 
+  async token() {
+    const token = this.accessTokenProvider ? await this.accessTokenProvider.getAccessToken() : '';
+    return { token: String(token || this.accessToken || '').trim(), serviceManaged: Boolean(token) };
+  }
+
   async request(pathname, { method = 'GET', body, cacheKey = pathname, ttlMs = 30_000, cache = true } = {}) {
-    if (!this.accessToken) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
     const now = Date.now();
     const existing = cache && method === 'GET' ? this.cache.get(cacheKey) : null;
     if (existing && existing.expiresAt > now) return existing.payload;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
-    try {
-      const response = await this.fetchImpl(endpoint(this.config.sub2apiAuthUrl, pathname), {
-        method,
-        signal: controller.signal,
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${this.accessToken}`,
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-      let raw = null;
-      try { raw = await response.json(); } catch { throw new Error('sub2api returned invalid JSON'); }
-      if (!response.ok || (Object.hasOwn(raw, 'code') && raw.code !== 0)) {
-        const error = Object.assign(new Error('sub2api administrator API request failed'), {
-          statusCode: response.status >= 500 ? 503 : response.status,
+    const requestWithToken = async (accessToken) => {
+      if (!accessToken) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
+      try {
+        const response = await this.fetchImpl(endpoint(this.config.sub2apiAuthUrl, pathname), {
+          method,
+          signal: controller.signal,
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
-        if (error.statusCode === 401 || error.statusCode === 403) this.clearAccessToken();
-        throw error;
+        let raw = null;
+        try { raw = await response.json(); } catch { throw new Error('sub2api returned invalid JSON'); }
+        if (!response.ok || (Object.hasOwn(raw, 'code') && raw.code !== 0)) {
+          throw Object.assign(new Error('sub2api administrator API request failed'), {
+            statusCode: response.status >= 500 ? 503 : response.status,
+          });
+        }
+        return Object.hasOwn(raw, 'data') ? raw.data : raw;
+      } finally {
+        clearTimeout(timer);
       }
-      const payload = Object.hasOwn(raw, 'data') ? raw.data : raw;
+    };
+    const selected = await this.token();
+    try {
+      const payload = await requestWithToken(selected.token);
       if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
       return payload;
-    } finally {
-      clearTimeout(timer);
+    } catch (error) {
+      if ((error?.statusCode === 401 || error?.statusCode === 403) && selected.serviceManaged) {
+        await this.accessTokenProvider.invalidateAccessToken(selected.token);
+        const retryToken = await this.accessTokenProvider.getAccessToken({ force: true });
+        const payload = await requestWithToken(retryToken);
+        if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
+        return payload;
+      }
+      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearAccessToken();
+      throw error;
     }
   }
 
@@ -73,8 +97,8 @@ export class Sub2ApiReadonlyGateway {
   }
 
   async listGroups() {
-    return this.request('/api/v1/admin/groups/all?include_inactive=true', {
-      cacheKey: 'groups:all',
+    return this.request('/api/v1/admin/groups', {
+      cacheKey: 'groups',
       ttlMs: 10_000,
     });
   }

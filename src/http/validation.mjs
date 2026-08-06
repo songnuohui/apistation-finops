@@ -349,6 +349,18 @@ export function normalizeAlertNotificationSettings(input) {
   return { enabled, qqNumber, onebotEndpoint, accessToken, clearAccessToken };
 }
 
+export function normalizeSub2ApiServiceAuthSettings(input) {
+  return {
+    enabled: input.enabled === undefined ? false : booleanValue(input.enabled, 'enabled'),
+    email: textValue(input.email, 'email', { required: false, max: 255 }),
+    password: textValue(input.password, 'password', { required: false, max: 8192 }),
+    totpSecret: textValue(input.totpSecret, 'totpSecret', { required: false, max: 256 }),
+    clearCredentials: input.clearCredentials === undefined
+      ? false
+      : booleanValue(input.clearCredentials, 'clearCredentials'),
+  };
+}
+
 export function normalizeAccountProfitGuard(input) {
   const rawMargin = input.minimumMargin === undefined || input.minimumMargin === ''
     ? 0

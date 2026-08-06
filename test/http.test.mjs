@@ -11,6 +11,7 @@ import {
   mergeSupplierCredentials,
   normalizeAlertNotificationSettings,
   normalizeAccountProfitGuard,
+  normalizeSub2ApiServiceAuthSettings,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -256,6 +257,25 @@ test('QQ alert settings require a numeric recipient and a safe HTTP OneBot endpo
   assert.throws(() => normalizeAlertNotificationSettings({
     enabled: true, qqNumber: '', onebotEndpoint: '',
   }), /require qqNumber and onebotEndpoint/);
+});
+
+test('Sub2API service authentication validates credentials without exposing a token field', () => {
+  assert.deepEqual(normalizeSub2ApiServiceAuthSettings({
+    enabled: 'true',
+    email: 'finops-service@example.com',
+    password: 'service-password',
+    totpSecret: 'JBSWY3DPEHPK3PXP',
+  }), {
+    enabled: true,
+    email: 'finops-service@example.com',
+    password: 'service-password',
+    totpSecret: 'JBSWY3DPEHPK3PXP',
+    clearCredentials: false,
+  });
+  assert.throws(
+    () => normalizeSub2ApiServiceAuthSettings({ enabled: 'not-a-boolean' }),
+    /invalid enabled/,
+  );
 });
 
 test('profit guard settings use a fractional margin and reject unsafe thresholds', () => {

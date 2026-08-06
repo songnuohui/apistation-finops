@@ -58,6 +58,21 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
   return result;
 }
 
+function sub2ApiServiceAuthSettings(row, { includeCiphertext = false } = {}) {
+  const result = {
+    enabled: Boolean(row?.enabled),
+    email: row?.email || '',
+    credentialsConfigured: Boolean(row?.credentials_ciphertext),
+    lastAuthenticatedAt: row?.last_authenticated_at || null,
+    tokenExpiresAt: row?.token_expires_at || null,
+    lastError: row?.last_error || '',
+    updatedBy: row?.updated_by || '',
+    updatedAt: row?.updated_at || null,
+  };
+  if (includeCiphertext) result.credentialsCiphertext = row?.credentials_ciphertext || '';
+  return result;
+}
+
 function cnySum(...values) {
   return values.reduce((total, value) => total.plus(value || 0), new Decimal(0)).toString();
 }
@@ -4090,6 +4105,46 @@ export class PostgresRepository {
       UPDATE ${this.schema}.account_profit_guard_policies
       SET last_evaluated_at=NOW(),last_error=$2,updated_at=NOW()
       WHERE source_account_id=$1`, [accountId, String(message || '').slice(0, 1000)]);
+  }
+
+  async getSub2ApiServiceAuthSettings({ includeCiphertext = false } = {}) {
+    const result = await this.pool.query(`
+      SELECT enabled,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
+             last_error,updated_by,updated_at
+      FROM ${this.schema}.sub2api_service_auth_settings WHERE id=1`);
+    return sub2ApiServiceAuthSettings(result.rows[0], { includeCiphertext });
+  }
+
+  async updateSub2ApiServiceAuthSettings(input, credentialsCiphertext, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.sub2api_service_auth_settings SET
+          enabled=$1,email=$2,credentials_ciphertext=$3,last_error='',
+          last_authenticated_at=NULL,token_expires_at=NULL,updated_by=$4,updated_at=NOW()
+        WHERE id=1
+        RETURNING enabled,email,credentials_ciphertext,last_authenticated_at,token_expires_at,
+                  last_error,updated_by,updated_at`,
+      [Boolean(input.enabled), input.email || '', credentialsCiphertext || '', actor]);
+      const row = result.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_sub2api_service_auth','sub2api_service_auth_settings','singleton',$2::jsonb)`,
+      [actor, JSON.stringify({
+        enabled: Boolean(row.enabled),
+        email: row.email || '',
+        credentialsConfigured: Boolean(row.credentials_ciphertext),
+      })]);
+      return sub2ApiServiceAuthSettings(row);
+    });
+  }
+
+  async recordSub2ApiServiceAuthResult({ lastAuthenticatedAt = null, tokenExpiresAt = null, lastError = '' }) {
+    await this.pool.query(`
+      UPDATE ${this.schema}.sub2api_service_auth_settings SET
+        last_authenticated_at=COALESCE($1::timestamptz,last_authenticated_at),
+        token_expires_at=CASE WHEN $1::timestamptz IS NULL THEN NULL ELSE $2::timestamptz END,
+        last_error=$3,updated_at=NOW()
+      WHERE id=1`,
+    [lastAuthenticatedAt, tokenExpiresAt, String(lastError || '').slice(0, 1000)]);
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

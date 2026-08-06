@@ -237,6 +237,10 @@ export class DemoRepository {
       enabled:false,qqNumber:'',onebotEndpoint:'',accessTokenConfigured:false,
       accessTokenCiphertext:'',updatedBy:'',updatedAt:null,
     };
+    this.sub2ApiServiceAuthSettings = {
+      enabled:false,email:'',credentialsConfigured:false,credentialsCiphertext:'',
+      lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
+    };
     this.supplierAlertDeliveries = new Map();
     this.accountProfitGuardPolicies = new Map();
     this.accountCostPeriods = this.accounts.map((account, index) => {
@@ -1275,6 +1279,36 @@ export class DemoRepository {
     };
     this.accountProfitGuardPolicies.set(Number(accountId), policy);
     return { accountId: Number(accountId), ...policy };
+  }
+
+  async getSub2ApiServiceAuthSettings({ includeCiphertext = false } = {}) {
+    const result = { ...this.sub2ApiServiceAuthSettings };
+    if (!includeCiphertext) delete result.credentialsCiphertext;
+    return result;
+  }
+
+  async updateSub2ApiServiceAuthSettings(input, credentialsCiphertext, actor = 'admin') {
+    Object.assign(this.sub2ApiServiceAuthSettings, {
+      enabled:Boolean(input.enabled),
+      email:input.email || '',
+      credentialsCiphertext:credentialsCiphertext || '',
+      credentialsConfigured:Boolean(credentialsCiphertext),
+      lastAuthenticatedAt:null,
+      tokenExpiresAt:null,
+      lastError:'',
+      updatedBy:actor,
+      updatedAt:new Date().toISOString(),
+    });
+    return this.getSub2ApiServiceAuthSettings();
+  }
+
+  async recordSub2ApiServiceAuthResult({ lastAuthenticatedAt = null, tokenExpiresAt = null, lastError = '' }) {
+    Object.assign(this.sub2ApiServiceAuthSettings, {
+      lastAuthenticatedAt:lastAuthenticatedAt || this.sub2ApiServiceAuthSettings.lastAuthenticatedAt,
+      tokenExpiresAt:lastAuthenticatedAt ? tokenExpiresAt : null,
+      lastError:String(lastError || ''),
+      updatedAt:new Date().toISOString(),
+    });
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

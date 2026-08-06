@@ -55,7 +55,7 @@ test('sub2api group catalog keeps only sanitized display fields', async () => {
     { accessToken: 'short-lived-token', clientIp: '203.0.113.6' },
     config,
     async (url, options) => {
-      assert.equal(url, 'http://127.0.0.1:8080/api/v1/admin/groups/all?include_inactive=true');
+      assert.equal(url, 'http://127.0.0.1:8080/api/v1/admin/groups');
       assert.equal(options.headers.Authorization, 'Bearer short-lived-token');
       return json({
         code: 0,
