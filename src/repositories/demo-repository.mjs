@@ -1107,8 +1107,9 @@ export class DemoRepository {
     };
   }
 
-  async listSupplierKeys({ search = '', status = 'active' } = {}) {
+  async listSupplierKeys({ search = '', supplier = '', status = 'active', page = 1, pageSize = 20 } = {}) {
     const term = String(search || '').trim().toLowerCase();
+    const supplierTerm = String(supplier || '').trim().toLowerCase();
     const normalizedStatus = String(status || '').trim().toLowerCase();
     const items = [];
     for (const connection of this.supplierConnections) {
@@ -1116,6 +1117,7 @@ export class DemoRepository {
       for (const key of detail.keys) {
         if (normalizedStatus === 'active' && (key.removedAt || key.status !== 'active')) continue;
         if (normalizedStatus && normalizedStatus !== 'active' && String(key.status || '').toLowerCase() !== normalizedStatus) continue;
+        if (supplierTerm && String(connection.supplierName || '').toLowerCase() !== supplierTerm) continue;
         const haystack = `${connection.supplierName} ${connection.name} ${connection.baseUrl} ${key.name} ${key.maskedKey}`.toLowerCase();
         if (term && !haystack.includes(term)) continue;
         const links = key.accountLinks || [];
@@ -1135,7 +1137,30 @@ export class DemoRepository {
         });
       }
     }
-    return { items };
+    const suppliers = [...new Set(this.supplierConnections.map((item) => String(item.supplierName || '').trim()).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+    return { ...pageResult(items, page, pageSize), suppliers };
+  }
+
+  async upsertSupplierKeyProfitGuard(keyId, accountIds, input, actor = 'admin') {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    const linked = new Set((match.key.accountLinks || []).map((link) => Number(link.accountId)));
+    const missing = accountIds.filter((id) => !linked.has(Number(id)));
+    if (missing.length) throw Object.assign(new Error(`accounts are not linked to this supplier key: ${missing.join(',')}`), { statusCode: 400 });
+    const policy = {
+      enabled: Boolean(input.enabled),
+      minimumMargin: Number(input.minimumMargin || 0),
+      thresholdMode: input.thresholdMode || 'margin',
+      minimumSaleMultiplier: input.minimumSaleMultiplier === null || input.minimumSaleMultiplier === undefined ? null : Number(input.minimumSaleMultiplier),
+      allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      autoAssignEnabled: Boolean(input.autoAssignEnabled),
+      targetMarginMin: input.targetMarginMin === null || input.targetMarginMin === undefined ? null : Number(input.targetMarginMin),
+      targetMarginMax: input.targetMarginMax === null || input.targetMarginMax === undefined ? null : Number(input.targetMarginMax),
+      lastEvaluatedAt: null, lastActionAt: null, lastError: '', updatedBy: actor, updatedAt: new Date().toISOString(),
+    };
+    accountIds.forEach((id) => this.accountProfitGuardPolicies.set(Number(id), { ...policy }));
+    return { keyId: Number(keyId), connectionId: Number(match.connection.id), accountIds: accountIds.map(Number), updated: accountIds.length };
   }
 
   async getSupplierKeyDetails(keyId) {

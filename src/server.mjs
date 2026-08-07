@@ -289,7 +289,9 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/supplier-keys'){
     return json(res,200,await repository.listSupplierKeys({
       search:searchTerm(url.searchParams),
+      supplier:String(url.searchParams.get('supplier') || '').trim(),
       status:url.searchParams.get('status') || 'active',
+      ...page(),
     }));
   }
   if(request.method==='GET'&&url.pathname==='/api/supplier-quality-overview'){
@@ -337,6 +339,44 @@ async function api(request,res,url){
   const supplierKeyDetails=/^\/api\/supplier-keys\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&supplierKeyDetails){
     return json(res,200,await repository.getSupplierKeyDetails(Number(supplierKeyDetails[1])));
+  }
+  const supplierKeyAccountGroups=/^\/api\/supplier-keys\/(\d+)\/accounts\/(\d+)\/groups$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierKeyAccountGroups){
+    const keyId=Number(supplierKeyAccountGroups[1]);
+    const accountId=Number(supplierKeyAccountGroups[2]);
+    const keyDetail=await repository.getSupplierKeyDetails(keyId);
+    const account=keyDetail.accounts.find((item)=>Number(item.id)===accountId);
+    if(!account)throw Object.assign(new Error('account is not linked to this supplier key'),{statusCode:404});
+    const sourceAccount=await sub2ApiReadonlyGateway.getAccount(accountId,{fresh:true});
+    const groupsPayload=await sub2ApiReadonlyGateway.listGroups();
+    const groups=Array.isArray(groupsPayload)?groupsPayload:groupsPayload?.items||[];
+    const rawGroupIds=sourceAccount?.group_ids??sourceAccount?.groupIds??sourceAccount?.groups??[];
+    const groupIds=Array.isArray(rawGroupIds)?rawGroupIds:[];
+    const assignedIds=new Set(groupIds.map((item)=>Number(typeof item==='object'?(item?.id??item?.group_id??item?.source_group_id):item)).filter((item)=>Number.isSafeInteger(item)&&item>0));
+    return json(res,200,{
+      account:{...account,id:accountId},
+      groups:groups.filter((group)=>assignedIds.has(Number(group?.id))).map((group)=>({
+        id:Number(group.id??group.group_id??group.source_group_id),name:group.name||'',platform:group.platform||'',
+        rateMultiplier:group.rate_multiplier??group.rateMultiplier??null,status:group.status||'',
+      })),
+    });
+  }
+  const supplierKeyProfitGuard=/^\/api\/supplier-keys\/(\d+)\/profit-guard$/.exec(url.pathname);
+  if(request.method==='PATCH'&&supplierKeyProfitGuard){
+    const keyId=Number(supplierKeyProfitGuard[1]);
+    const input=await body(request);
+    const accountIds=Array.isArray(input.accountIds)
+      ? [...new Set(input.accountIds.map(Number).filter((id)=>Number.isSafeInteger(id)&&id>0))]
+      : [];
+    if(!accountIds.length||accountIds.length>200)throw Object.assign(new Error('accountIds must contain between 1 and 200 accounts'),{statusCode:400});
+    const policy=normalizeAccountProfitGuard(input);
+    const result=await repository.upsertSupplierKeyProfitGuard(keyId,accountIds,policy,auth.actor);
+    let evaluation=null;
+    if(policy.enabled&&!config.demoMode){
+      try{evaluation=await accountProfitGuardService.evaluateSupplierConnection(result.connectionId);}
+      catch(error){evaluation={evaluated:0,changed:0,error:String(error?.message||error)};}
+    }
+    return json(res,200,{...result,evaluation});
   }
   if(request.method==='POST'&&supplierQualityTargets){
     const connectionId=Number(supplierQualityTargets[1]);

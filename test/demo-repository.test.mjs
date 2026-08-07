@@ -220,6 +220,46 @@ test('NewAPI supplier keys are available for account cost linking', async () => 
   assert.equal(result.costMode, 'probe_multiplier');
 });
 
+test('supplier key listing supports supplier filters and pagination', async () => {
+  const repository = new DemoRepository(config);
+  const firstPage = await repository.listSupplierKeys({ page: 1, pageSize: 2 });
+  const secondPage = await repository.listSupplierKeys({ page: 2, pageSize: 2 });
+  const filtered = await repository.listSupplierKeys({ supplier: 'Cloud Seats', page: 1, pageSize: 100 });
+
+  assert.equal(firstPage.total, 4);
+  assert.equal(firstPage.items.length, 2);
+  assert.equal(secondPage.items.length, 2);
+  assert.deepEqual(
+    [...firstPage.items, ...secondPage.items].map((item) => item.id).sort((left, right) => left - right),
+    [1, 2, 3, 4],
+  );
+  assert.equal(filtered.total, 4);
+  assert.ok(filtered.items.every((item) => item.supplierName === 'Cloud Seats'));
+  assert.deepEqual(filtered.suppliers, ['Cloud Seats']);
+});
+
+test('supplier key batch profit guard updates only linked accounts', async () => {
+  const repository = new DemoRepository(config);
+  const policy = {
+    enabled: true,
+    minimumMargin: 0.3,
+    thresholdMode: 'margin',
+    minimumSaleMultiplier: null,
+    allowEmptyGroups: false,
+    autoAssignEnabled: true,
+    targetMarginMin: 0.2,
+    targetMarginMax: 0.4,
+  };
+
+  const result = await repository.upsertSupplierKeyProfitGuard(1, [2745], policy, 'batch-admin');
+  assert.deepEqual(result.accountIds, [2745]);
+  assert.equal((await repository.getSupplierKeyDetails(1)).accounts[0].profitGuard.updatedBy, 'batch-admin');
+  await assert.rejects(
+    () => repository.upsertSupplierKeyProfitGuard(1, [2742], policy),
+    /not linked to this supplier key/,
+  );
+});
+
 test('supplier profit guard defaults apply to existing and newly linked accounts', async () => {
   const repository = new DemoRepository(config);
   const applied = await repository.upsertSupplierProfitGuardDefault(1, {

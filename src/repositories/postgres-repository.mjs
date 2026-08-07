@@ -3951,7 +3951,7 @@ export class PostgresRepository {
     };
   }
 
-  async listSupplierKeys({ search = '', status = 'active' } = {}) {
+  async listSupplierKeys({ search = '', supplier = '', status = 'active', page = 1, pageSize = 20, offset = 0 } = {}) {
     const normalizedStatus = String(status || '').trim().toLowerCase();
     const result = await this.pool.query(`
       SELECT k.id,k.connection_id,k.external_key_id,k.name,k.masked_key,k.status,k.group_id,k.group_name,
@@ -3960,7 +3960,8 @@ export class PostgresRepository {
              c.name AS connection_name,c.base_url,c.adapter_type,c.detected_adapter_type,
              s.name AS supplier_name,
              COUNT(l.source_account_id)::int AS account_count,
-             COUNT(l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count
+             COUNT(l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
+             COUNT(*) OVER()::int AS total_count
       FROM ${this.schema}.supplier_keys k
       JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
@@ -3968,12 +3969,21 @@ export class PostgresRepository {
       LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
       WHERE ($1='' OR k.name ILIKE '%'||$1||'%' OR k.masked_key ILIKE '%'||$1||'%'
         OR s.name ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%' OR c.base_url ILIKE '%'||$1||'%')
-        AND ($2='' OR ($2='active' AND k.removed_at IS NULL AND k.status='active')
-          OR ($2<>'active' AND k.status=$2))
+        AND ($2='' OR s.name=$2)
+        AND ($3='' OR ($3='active' AND k.removed_at IS NULL AND k.status='active')
+          OR ($3<>'active' AND k.status=$3))
       GROUP BY k.id,c.id,s.id
-      ORDER BY (k.last_check_status='failed') DESC,k.last_check_at DESC NULLS LAST,k.id DESC`, [search, normalizedStatus]);
+      ORDER BY (k.last_check_status='failed') DESC,k.last_check_at DESC NULLS LAST,k.id DESC
+      LIMIT $4 OFFSET $5`, [search, supplier, normalizedStatus, pageSize, offset]);
+    const supplierResult = await this.pool.query(`
+      SELECT DISTINCT s.name
+      FROM ${this.schema}.supplier_keys k
+      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      WHERE k.removed_at IS NULL AND k.status='active'
+      ORDER BY s.name`);
     return {
-      items: result.rows.map((row) => ({
+      ...pageResult(result.rows.map((row) => ({
         id: Number(row.id),
         connectionId: Number(row.connection_id),
         supplierName: row.supplier_name || '',
@@ -3999,8 +4009,46 @@ export class PostgresRepository {
         lastCheckError: row.last_check_error || '',
         accountCount: Number(row.account_count || 0),
         profitGuardAccountCount: Number(row.profit_guard_account_count || 0),
-      })),
+      })), page, pageSize),
+      suppliers: supplierResult.rows.map((row) => row.name || '').filter(Boolean),
     };
+  }
+
+  async upsertSupplierKeyProfitGuard(keyId, accountIds, input, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const key = await client.query(`
+        SELECT id,connection_id FROM ${this.schema}.supplier_keys
+        WHERE id=$1 AND removed_at IS NULL`, [keyId]);
+      if (!key.rowCount) throw httpError('supplier key not found', 404);
+      const linked = await client.query(`
+        SELECT source_account_id FROM ${this.schema}.supplier_account_links
+        WHERE supplier_key_id=$1 AND source_account_id=ANY($2::bigint[])`, [keyId, accountIds]);
+      const linkedIds = new Set(linked.rows.map((row) => Number(row.source_account_id)));
+      const missing = accountIds.filter((id) => !linkedIds.has(Number(id)));
+      if (missing.length) throw httpError(`accounts are not linked to this supplier key: ${missing.join(',')}`, 400);
+      await client.query(`
+        INSERT INTO ${this.schema}.account_profit_guard_policies(
+          source_account_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+          allow_empty_groups,auto_assign_enabled,target_margin_min,target_margin_max,created_by,updated_by)
+        SELECT unnest($1::bigint[]),$2,$3,$4,$5,$6,$7,$8,$9,$10,$10
+        ON CONFLICT(source_account_id) DO UPDATE SET
+          enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+          threshold_mode=EXCLUDED.threshold_mode,minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
+          allow_empty_groups=EXCLUDED.allow_empty_groups,
+          auto_assign_enabled=EXCLUDED.auto_assign_enabled,
+          target_margin_min=EXCLUDED.target_margin_min,target_margin_max=EXCLUDED.target_margin_max,
+          last_error='',updated_by=EXCLUDED.updated_by,updated_at=NOW()`, [
+        accountIds, Boolean(input.enabled), input.minimumMargin, input.thresholdMode,
+        input.minimumSaleMultiplier, Boolean(input.allowEmptyGroups), Boolean(input.autoAssignEnabled),
+        input.targetMarginMin, input.targetMarginMax, actor,
+      ]);
+      return {
+        keyId: Number(keyId),
+        connectionId: Number(key.rows[0].connection_id),
+        accountIds: accountIds.map(Number),
+        updated: accountIds.length,
+      };
+    });
   }
 
   async getSupplierKeyDetails(keyId) {
