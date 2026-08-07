@@ -21,6 +21,41 @@ function groupMultiplier(group) {
   return number(group?.rate_multiplier ?? group?.rateMultiplier);
 }
 
+function normalizedPlatform(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function groupPlatform(group) {
+  return normalizedPlatform(group?.platform ?? group?.channel_type ?? group?.channelType);
+}
+
+function groupShouldBeAdded(
+  upstreamMultiplier,
+  group,
+  accountPlatform,
+  targetMarginMin,
+  targetMarginMax,
+) {
+  const multiplier = groupMultiplier(group);
+  const platform = normalizedPlatform(accountPlatform);
+  const groupPlatformValue = groupPlatform(group);
+  if (
+    upstreamMultiplier === null
+    || multiplier === null
+    || multiplier <= 0
+    || !platform
+    || !groupPlatformValue
+    || platform !== groupPlatformValue
+    || targetMarginMin === null
+    || targetMarginMax === null
+  ) return false;
+  const status = String(group?.status || '').trim().toLowerCase();
+  if (status && !['active', 'enabled', 'available', 'ok'].includes(status)) return false;
+  const margin = 1 - upstreamMultiplier / multiplier;
+  const epsilon = 1e-9;
+  return margin + epsilon >= targetMarginMin && margin - epsilon <= targetMarginMax;
+}
+
 function removalReason({ upstreamMultiplier, groupRateMultiplier, minimumMargin, thresholdMode, minimumSaleMultiplier }) {
   if (groupRateMultiplier !== null && groupRateMultiplier <= upstreamMultiplier) {
     return `分组售价倍率 ${groupRateMultiplier}x 不高于上游成本倍率 ${upstreamMultiplier}x`;
@@ -88,10 +123,6 @@ export class AccountProfitGuardService {
     }
     const account = await this.gateway.getAccount(candidate.accountId, { fresh: true });
     const beforeGroupIds = [...new Set(groupIdsFromAccount(account))];
-    if (!beforeGroupIds.length) {
-      await this.repository.recordProfitGuardEvaluation(candidate);
-      return { changed: false, reason: 'account has no groups' };
-    }
     const removable = beforeGroupIds.filter((id) => {
       const group = groupsById.get(id);
       return groupShouldBeRemoved(
@@ -102,11 +133,32 @@ export class AccountProfitGuardService {
         candidate.minimumSaleMultiplier,
       );
     });
-    if (!removable.length) {
+    const autoAssign = Boolean(candidate.autoAssignEnabled)
+      && candidate.targetMarginMin !== null
+      && candidate.targetMarginMax !== null;
+    const addable = autoAssign
+      ? [...groupsById.values()]
+        .filter((group) => {
+          const id = groupId(group);
+          return id && !beforeGroupIds.includes(id) && groupShouldBeAdded(
+            upstream,
+            group,
+            candidate.platform,
+            candidate.targetMarginMin,
+            candidate.targetMarginMax,
+          );
+        })
+        .map(groupId)
+        .filter(Boolean)
+      : [];
+    if (!removable.length && !addable.length) {
       await this.repository.recordProfitGuardEvaluation(candidate);
-      return { changed: false };
+      return { changed: false, reason: beforeGroupIds.length ? '' : 'account has no eligible group changes' };
     }
-    let afterGroupIds = beforeGroupIds.filter((id) => !removable.includes(id));
+    let afterGroupIds = [...new Set([
+      ...beforeGroupIds.filter((id) => !removable.includes(id)),
+      ...addable,
+    ])];
     if (!candidate.allowEmptyGroups && afterGroupIds.length === 0) {
       for (const id of removable) {
         const group = groupsById.get(id);
@@ -133,11 +185,66 @@ export class AccountProfitGuardService {
     }
     const current = await this.gateway.getAccount(candidate.accountId, { fresh: true });
     const latestGroupIds = [...new Set(groupIdsFromAccount(current))];
-    if (latestGroupIds.join(',') !== beforeGroupIds.join(',')) {
-      afterGroupIds = latestGroupIds.filter((id) => !removable.includes(id));
+    const latestRemovable = latestGroupIds.filter((id) => {
+      const group = groupsById.get(id);
+      return groupShouldBeRemoved(
+        upstream,
+        groupMultiplier(group),
+        candidate.minimumMargin,
+        candidate.thresholdMode,
+        candidate.minimumSaleMultiplier,
+      );
+    });
+    const latestAddable = autoAssign
+      ? [...groupsById.values()]
+        .filter((group) => {
+          const id = groupId(group);
+          return id && !latestGroupIds.includes(id) && groupShouldBeAdded(
+            upstream,
+            group,
+            candidate.platform,
+            candidate.targetMarginMin,
+            candidate.targetMarginMax,
+          );
+        })
+        .map(groupId)
+        .filter(Boolean)
+      : [];
+    afterGroupIds = [...new Set([
+      ...latestGroupIds.filter((id) => !latestRemovable.includes(id)),
+      ...latestAddable,
+    ])];
+    const changedGroupIds = latestGroupIds.join(',') !== afterGroupIds.join(',');
+    if (!changedGroupIds) {
+      await this.repository.recordProfitGuardEvaluation(candidate);
+      return { changed: false };
+    }
+    if (!candidate.allowEmptyGroups && afterGroupIds.length === 0) {
+      for (const id of latestRemovable) {
+        const group = groupsById.get(id);
+        await this.repository.recordProfitGuardEvaluation(candidate, {
+          action: 'blocked_last_group',
+          groupId: id,
+          groupName: group?.name || '',
+          upstreamMultiplier: upstream,
+          groupMultiplier: groupMultiplier(group),
+          thresholdMode: candidate.thresholdMode,
+          minimumSaleMultiplier: candidate.minimumSaleMultiplier,
+          beforeGroupIds: latestGroupIds,
+          afterGroupIds: latestGroupIds,
+          reason: `${removalReason({
+            upstreamMultiplier: upstream,
+            groupRateMultiplier: groupMultiplier(group),
+            minimumMargin: candidate.minimumMargin,
+            thresholdMode: candidate.thresholdMode,
+            minimumSaleMultiplier: candidate.minimumSaleMultiplier,
+          })}; update blocked to preserve the last sales group`,
+        });
+      }
+      return { changed: false, blocked: true };
     }
     await this.gateway.updateAccountGroups(candidate.accountId, afterGroupIds);
-    for (const id of removable) {
+    for (const id of latestRemovable) {
       const group = groupsById.get(id);
       await this.repository.recordProfitGuardEvaluation(candidate, {
         action: 'remove_group',
@@ -158,6 +265,28 @@ export class AccountProfitGuardService {
         }),
       });
     }
-    return { changed: true, beforeGroupIds: latestGroupIds, afterGroupIds, removed: removable };
+    for (const id of latestAddable) {
+      const group = groupsById.get(id);
+      const margin = 1 - upstream / groupMultiplier(group);
+      await this.repository.recordProfitGuardEvaluation(candidate, {
+        action: 'add_group',
+        groupId: id,
+        groupName: group?.name || '',
+        upstreamMultiplier: upstream,
+        groupMultiplier: groupMultiplier(group),
+        thresholdMode: candidate.thresholdMode,
+        minimumSaleMultiplier: candidate.minimumSaleMultiplier,
+        beforeGroupIds: latestGroupIds,
+        afterGroupIds,
+        reason: `group margin ${(margin * 100).toFixed(2)}% is within target range ${(candidate.targetMarginMin * 100).toFixed(2)}%-${(candidate.targetMarginMax * 100).toFixed(2)}% and platform matches ${candidate.platform}`,
+      });
+    }
+    return {
+      changed: true,
+      beforeGroupIds: latestGroupIds,
+      afterGroupIds,
+      removed: latestRemovable,
+      added: latestAddable,
+    };
   }
 }

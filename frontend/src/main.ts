@@ -11,6 +11,7 @@ const routes = [
   { path: '/usage', component: App },
   { path: '/accounts', component: App },
   { path: '/suppliers', component: App },
+  { path: '/supplier-keys', component: App },
   { path: '/supplier-quality', component: App },
 ];
 

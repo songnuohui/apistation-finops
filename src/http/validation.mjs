@@ -381,12 +381,34 @@ export function normalizeAccountProfitGuard(input) {
   if (thresholdMode === 'minimum_sale_multiplier' && minimumSaleMultiplier === null) {
     throw badRequest('minimumSaleMultiplier is required for minimum_sale_multiplier');
   }
+  const autoAssignEnabled = input.autoAssignEnabled === undefined
+    ? false
+    : booleanValue(input.autoAssignEnabled, 'autoAssignEnabled');
+  const marginInput = (value, field) => {
+    if (value === undefined || value === null || value === '') return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+      throw badRequest(`${field} must be between 0 and 1`);
+    }
+    return parsed;
+  };
+  const targetMarginMin = marginInput(input.targetMarginMin, 'targetMarginMin');
+  const targetMarginMax = marginInput(input.targetMarginMax, 'targetMarginMax');
+  if (autoAssignEnabled && (targetMarginMin === null || targetMarginMax === null)) {
+    throw badRequest('targetMarginMin and targetMarginMax are required when autoAssignEnabled is enabled');
+  }
+  if (targetMarginMin !== null && targetMarginMax !== null && targetMarginMin > targetMarginMax) {
+    throw badRequest('targetMarginMin must not exceed targetMarginMax');
+  }
   return {
     enabled: Boolean(input.enabled),
     minimumMargin: rawMargin,
     thresholdMode,
     minimumSaleMultiplier: thresholdMode === 'minimum_sale_multiplier' ? Number(minimumSaleMultiplier) : null,
     allowEmptyGroups: input.allowEmptyGroups === undefined ? true : Boolean(input.allowEmptyGroups),
+    autoAssignEnabled,
+    targetMarginMin,
+    targetMarginMax,
   };
 }
 

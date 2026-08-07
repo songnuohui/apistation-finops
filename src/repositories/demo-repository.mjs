@@ -1107,6 +1107,70 @@ export class DemoRepository {
     };
   }
 
+  async listSupplierKeys({ search = '', status = 'active' } = {}) {
+    const term = String(search || '').trim().toLowerCase();
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const items = [];
+    for (const connection of this.supplierConnections) {
+      const detail = this.supplierDetail(connection.id);
+      for (const key of detail.keys) {
+        if (normalizedStatus === 'active' && (key.removedAt || key.status !== 'active')) continue;
+        if (normalizedStatus && normalizedStatus !== 'active' && String(key.status || '').toLowerCase() !== normalizedStatus) continue;
+        const haystack = `${connection.supplierName} ${connection.name} ${connection.baseUrl} ${key.name} ${key.maskedKey}`.toLowerCase();
+        if (term && !haystack.includes(term)) continue;
+        const links = key.accountLinks || [];
+        items.push({
+          id: Number(key.id), connectionId: Number(connection.id), supplierName: connection.supplierName || '',
+          connectionName: connection.name || '', baseUrl: connection.baseUrl || '',
+          adapterType: connection.detectedAdapterType || connection.adapterType || '',
+          externalId: key.externalId || '', name: key.name || '', maskedKey: key.maskedKey || '',
+          status: key.status || '', groupId: key.groupId || null, groupName: key.groupName || '',
+          rateMultiplier: finiteNumber(key.rateMultiplier), quotaTotal: finiteNumber(key.quotaTotal),
+          quotaUsed: finiteNumber(key.quotaUsed), quotaRemaining: finiteNumber(key.quotaRemaining),
+          quotaCurrency: key.quotaCurrency || '', expiresAt: key.expiresAt || null, lastUsedAt: key.lastUsedAt || null,
+          lastCheckStatus: key.lastCheckStatus || 'pending', lastCheckMethod: key.lastCheckMethod || '',
+          lastCheckAt: key.lastCheckAt || null, lastCheckError: key.lastCheckError || '',
+          accountCount: links.length,
+          profitGuardAccountCount: links.filter((link) => this.accountProfitGuardPolicies.get(Number(link.accountId))?.enabled).length,
+        });
+      }
+    }
+    return { items };
+  }
+
+  async getSupplierKeyDetails(keyId) {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    const detail = copySupplierDetail(match.detail);
+    const key = detail.keys.find((item) => Number(item.id) === Number(keyId));
+    const links = (key.accountLinks || []).map((link) => {
+      const account = this.accounts.find((item) => Number(item.id) === Number(link.accountId));
+      const policy = this.accountProfitGuardPolicies.get(Number(link.accountId));
+      return {
+        id: Number(link.accountId), name: account?.name || link.accountName || '', platform: account?.platform || '',
+        status: account?.status || '', profitGuard: policy ? { ...policy } : null,
+      };
+    });
+    return {
+      key: {
+        id: Number(key.id), connectionId: Number(match.connection.id), supplierName: match.connection.supplierName || '',
+        supplierNotes: match.connection.supplierNotes || '', connectionName: match.connection.name || '',
+        baseUrl: match.connection.baseUrl || '', adapterType: match.connection.detectedAdapterType || match.connection.adapterType || '',
+        externalId: key.externalId || '', name: key.name || '', maskedKey: key.maskedKey || '', status: key.status || '',
+        groupId: key.groupId || null, groupName: key.groupName || '', rateMultiplier: finiteNumber(key.rateMultiplier),
+        quotaTotal: finiteNumber(key.quotaTotal), quotaUsed: finiteNumber(key.quotaUsed),
+        quotaRemaining: finiteNumber(key.quotaRemaining), quotaCurrency: key.quotaCurrency || '',
+        expiresAt: key.expiresAt || null, lastUsedAt: key.lastUsedAt || null,
+        lastCheckStatus: key.lastCheckStatus || 'pending', lastCheckMethod: key.lastCheckMethod || '',
+        lastCheckAt: key.lastCheckAt || null, lastCheckError: key.lastCheckError || '',
+        firstSeenAt: key.firstSeenAt || null, lastSeenAt: key.lastSeenAt || null, removedAt: key.removedAt || null,
+      },
+      accounts: links,
+      checks: detail.checks.filter((item) => Number(item.keyId) === Number(keyId)),
+      alerts: detail.alerts.filter((item) => Number(item.keyId) === Number(keyId)),
+    };
+  }
+
   qualityTarget(target) {
     return { ...target };
   }
@@ -1354,6 +1418,9 @@ export class DemoRepository {
       thresholdMode: policy?.thresholdMode || 'margin',
       minimumSaleMultiplier: policy?.minimumSaleMultiplier ?? null,
       allowEmptyGroups: policy?.allowEmptyGroups ?? true,
+      autoAssignEnabled: Boolean(policy?.autoAssignEnabled),
+      targetMarginMin: policy?.targetMarginMin ?? null,
+      targetMarginMax: policy?.targetMarginMax ?? null,
       updatedBy: policy?.updatedBy || '',
       updatedAt: policy?.updatedAt || null,
     };
@@ -1369,6 +1436,9 @@ export class DemoRepository {
         ? null
         : Number(input.minimumSaleMultiplier),
       allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      autoAssignEnabled: Boolean(input.autoAssignEnabled),
+      targetMarginMin: input.targetMarginMin === null || input.targetMarginMin === undefined ? null : Number(input.targetMarginMin),
+      targetMarginMax: input.targetMarginMax === null || input.targetMarginMax === undefined ? null : Number(input.targetMarginMax),
       lastEvaluatedAt: null,
       lastActionAt: null,
       lastError: '',
@@ -1392,6 +1462,7 @@ export class DemoRepository {
   async getAccountProfitGuard(accountId) {
     const policy = this.accountProfitGuardPolicies.get(Number(accountId)) || {
       enabled: false, minimumMargin: 0, thresholdMode: 'margin', minimumSaleMultiplier: null, allowEmptyGroups: true,
+      autoAssignEnabled: false, targetMarginMin: null, targetMarginMax: null,
       lastEvaluatedAt: null, lastActionAt: null, lastError: '',
     };
     const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
@@ -1422,6 +1493,9 @@ export class DemoRepository {
         ? null
         : Number(input.minimumSaleMultiplier),
       allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      autoAssignEnabled: Boolean(input.autoAssignEnabled),
+      targetMarginMin: input.targetMarginMin === null || input.targetMarginMin === undefined ? null : Number(input.targetMarginMin),
+      targetMarginMax: input.targetMarginMax === null || input.targetMarginMax === undefined ? null : Number(input.targetMarginMax),
       lastEvaluatedAt: null,
       lastActionAt: null,
       lastError: '',

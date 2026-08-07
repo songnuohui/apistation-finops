@@ -429,6 +429,9 @@ async function openProfitGuardEditor(key: AnyRecord, link: AnyRecord) {
       minimumMarginPercent: Number(policy.minimumMargin || 0) * 100,
       minimumSaleMultiplier: policy.minimumSaleMultiplier ?? '',
       allowEmptyGroups: policy.allowEmptyGroups ?? true,
+      autoAssignEnabled: Boolean(policy.autoAssignEnabled),
+      targetMarginMinPercent: policy.targetMarginMin === null || policy.targetMarginMin === undefined ? '' : Number(policy.targetMarginMin) * 100,
+      targetMarginMaxPercent: policy.targetMarginMax === null || policy.targetMarginMax === undefined ? '' : Number(policy.targetMarginMax) * 100,
     };
   } catch (error: any) {
     notify(error.message);
@@ -450,6 +453,9 @@ async function saveProfitGuard() {
         ? Number(current.minimumSaleMultiplier)
         : null,
       allowEmptyGroups: Boolean(current.allowEmptyGroups),
+      autoAssignEnabled: Boolean(current.autoAssignEnabled),
+      targetMarginMin: current.autoAssignEnabled && current.targetMarginMinPercent !== '' ? Number(current.targetMarginMinPercent) / 100 : null,
+      targetMarginMax: current.autoAssignEnabled && current.targetMarginMaxPercent !== '' ? Number(current.targetMarginMaxPercent) / 100 : null,
     });
     profitGuardEditor.value = null;
     notify('账号利润保护已保存');
@@ -470,6 +476,9 @@ async function openSupplierProfitGuardEditor() {
       ...policy,
       minimumMarginPercent: Number(policy.minimumMargin || 0) * 100,
       minimumSaleMultiplier: policy.minimumSaleMultiplier ?? '',
+      autoAssignEnabled: Boolean(policy.autoAssignEnabled),
+      targetMarginMinPercent: policy.targetMarginMin === null || policy.targetMarginMin === undefined ? '' : Number(policy.targetMarginMin) * 100,
+      targetMarginMaxPercent: policy.targetMarginMax === null || policy.targetMarginMax === undefined ? '' : Number(policy.targetMarginMax) * 100,
     };
   } catch (error: any) {
     notify(error.message);
@@ -491,6 +500,9 @@ async function saveSupplierProfitGuard() {
         ? Number(current.minimumSaleMultiplier)
         : null,
       allowEmptyGroups: Boolean(current.allowEmptyGroups),
+      autoAssignEnabled: Boolean(current.autoAssignEnabled),
+      targetMarginMin: current.autoAssignEnabled && current.targetMarginMinPercent !== '' ? Number(current.targetMarginMinPercent) / 100 : null,
+      targetMarginMax: current.autoAssignEnabled && current.targetMarginMaxPercent !== '' ? Number(current.targetMarginMaxPercent) / 100 : null,
     });
     supplierProfitGuardEditor.value = null;
     const evaluationNote = result.evaluation?.error
@@ -1008,6 +1020,16 @@ onMounted(async () => {
             <input v-model="profitGuardEditor.allowEmptyGroups" type="checkbox" :disabled="!profitGuardEditor.enabled" />
             <span><strong>允许移出最后一个分组</strong><small>关闭时只产生告警，账号仍保留在最后一个分组。</small></span>
           </label>
+          <label class="toggle-field full-field">
+            <input v-model="profitGuardEditor.autoAssignEnabled" type="checkbox" :disabled="!profitGuardEditor.enabled" />
+            <span><strong>自动归组</strong><small>只添加与账号平台一致、且销售毛利率落在区间内的分组。</small></span>
+          </label>
+          <label v-if="profitGuardEditor.autoAssignEnabled">目标毛利率下限 (%)
+            <input v-model="profitGuardEditor.targetMarginMinPercent" type="number" min="0" max="100" step="0.1" :disabled="!profitGuardEditor.enabled" />
+          </label>
+          <label v-if="profitGuardEditor.autoAssignEnabled">目标毛利率上限 (%)
+            <input v-model="profitGuardEditor.targetMarginMaxPercent" type="number" min="0" max="100" step="0.1" :disabled="!profitGuardEditor.enabled" />
+          </label>
         </div>
         <div v-if="profitGuardEditor.thresholdMode === 'margin'" class="form-note">
           按当前上游倍率 {{ multiplierText(profitGuardEditor.upstreamMultiplier) }} 和最低毛利率计算，最低售卖倍率为
@@ -1050,6 +1072,16 @@ onMounted(async () => {
           <label class="toggle-field full-field">
             <input v-model="supplierProfitGuardEditor.allowEmptyGroups" type="checkbox" :disabled="!supplierProfitGuardEditor.enabled" />
             <span><strong>允许移出最后一个分组</strong><small>关闭时，账号只会告警并保留最后一个亏损分组。</small></span>
+          </label>
+          <label class="toggle-field full-field">
+            <input v-model="supplierProfitGuardEditor.autoAssignEnabled" type="checkbox" :disabled="!supplierProfitGuardEditor.enabled" />
+            <span><strong>自动归组</strong><small>统一为关联账号补充同平台且落在毛利率区间内的销售分组。</small></span>
+          </label>
+          <label v-if="supplierProfitGuardEditor.autoAssignEnabled">目标毛利率下限 (%)
+            <input v-model="supplierProfitGuardEditor.targetMarginMinPercent" type="number" min="0" max="100" step="0.1" :disabled="!supplierProfitGuardEditor.enabled" />
+          </label>
+          <label v-if="supplierProfitGuardEditor.autoAssignEnabled">目标毛利率上限 (%)
+            <input v-model="supplierProfitGuardEditor.targetMarginMaxPercent" type="number" min="0" max="100" step="0.1" :disabled="!supplierProfitGuardEditor.enabled" />
           </label>
         </div>
         <div v-if="supplierProfitGuardEditor.thresholdMode === 'margin'" class="form-note">

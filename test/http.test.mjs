@@ -297,19 +297,29 @@ test('profit guard settings use a fractional margin and reject unsafe thresholds
   }), {
     enabled: true, minimumMargin: 0.2, thresholdMode: 'margin',
     minimumSaleMultiplier: null, allowEmptyGroups: true,
+    autoAssignEnabled: false, targetMarginMin: null, targetMarginMax: null,
   });
   assert.deepEqual(normalizeAccountProfitGuard({ enabled: true }), {
     enabled: true, minimumMargin: 0, thresholdMode: 'margin',
     minimumSaleMultiplier: null, allowEmptyGroups: true,
+    autoAssignEnabled: false, targetMarginMin: null, targetMarginMax: null,
   });
   assert.deepEqual(normalizeAccountProfitGuard({
     enabled: true, thresholdMode: 'minimum_sale_multiplier', minimumSaleMultiplier: '0.125',
+    autoAssignEnabled: false,
   }), {
     enabled: true, minimumMargin: 0, thresholdMode: 'minimum_sale_multiplier',
     minimumSaleMultiplier: 0.125, allowEmptyGroups: true,
+    autoAssignEnabled: false, targetMarginMin: null, targetMarginMax: null,
   });
   assert.throws(() => normalizeAccountProfitGuard({
     thresholdMode: 'minimum_sale_multiplier',
   }), /minimumSaleMultiplier/);
   assert.throws(() => normalizeAccountProfitGuard({ minimumMargin: '1' }), /between 0 and 1/);
+  assert.deepEqual(normalizeAccountProfitGuard({
+    enabled: true, autoAssignEnabled: true, targetMarginMin: '0.2', targetMarginMax: '0.4',
+  }).targetMarginMax, 0.4);
+  assert.throws(() => normalizeAccountProfitGuard({
+    enabled: true, autoAssignEnabled: true, targetMarginMin: '0.4', targetMarginMax: '0.2',
+  }), /must not exceed/);
 });

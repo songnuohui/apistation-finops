@@ -4,10 +4,11 @@ import { useRoute, useRouter } from 'vue-router';
 import {
   Activity, AlertTriangle, BarChart3, CalendarDays, ChevronDown, CircleDollarSign, DatabaseZap, Download,
   FileText, LayoutDashboard, LogOut, Menu, RefreshCw, Search, ServerCog, Settings2,
-  ShieldCheck, Users, WalletCards, X,
+  ShieldCheck, Users, WalletCards, X, KeyRound,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from './api';
 import SupplierConnectionsView from './components/SupplierConnectionsView.vue';
+import SupplierKeysView from './components/SupplierKeysView.vue';
 import AccountCostsView from './components/AccountCostsView.vue';
 import SupplierQualityView from './components/SupplierQualityView.vue';
 import UsageView from './components/UsageView.vue';
@@ -45,6 +46,7 @@ const overviewRefreshToken = ref(0);
 const userRefreshToken = ref(0);
 const usageRefreshToken = ref(0);
 const qualityRefreshToken = ref(0);
+const supplierKeyRefreshToken = ref(0);
 const activeUsageTab = ref<'users' | 'models' | 'events'>('users');
 const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
@@ -57,6 +59,7 @@ const nav = [
   { id: 'usage', label: '总消耗', icon: BarChart3, group: '经营分析' },
   { id: 'accounts', label: '账号成本', icon: WalletCards, group: '资源与成本' },
   { id: 'suppliers', label: '供应商连接', icon: ServerCog, group: '资源与成本' },
+  { id: 'supplier-keys', label: '供应商密钥', icon: KeyRound, group: '资源与成本' },
   { id: 'supplier-quality', label: '供应商评分', icon: ShieldCheck, group: '资源与成本' },
 ];
 const pageMeta: Record<string, [string, string]> = {
@@ -65,6 +68,7 @@ const pageMeta: Record<string, [string, string]> = {
   usage: ['总消耗', '用户和模型两个维度查看实际消耗、成本与利润'],
   accounts: ['账号成本', '账号采购、成本归属、实时成本和毛利'],
   suppliers: ['供应商连接', '读取上游余额、密钥库存、同步状态和关联关系'],
+  'supplier-keys': ['供应商密钥', '跨供应商查看上游密钥、账号关联、利润控制和巡检状态'],
   'supplier-quality': ['供应商评分', '价格、可用性、首字延迟和稳定性评分'],
 };
 
@@ -147,6 +151,7 @@ async function loadPage() {
     else if (page.value === 'usage') usageRefreshToken.value += 1;
     else if (page.value === 'accounts') accountRefreshToken.value += 1;
     else if (page.value === 'suppliers') supplierRefreshToken.value += 1;
+    else if (page.value === 'supplier-keys') supplierKeyRefreshToken.value += 1;
     else if (page.value === 'supplier-quality') qualityRefreshToken.value += 1;
   } finally { loading.value = false; }
 }
@@ -399,6 +404,7 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
         </div>
         <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <SupplierConnectionsView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
+        <SupplierKeysView v-else-if="page === 'supplier-keys'" :refresh-token="supplierKeyRefreshToken" @toast="showToast" />
         <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />

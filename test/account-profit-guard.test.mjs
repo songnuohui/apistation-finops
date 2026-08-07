@@ -58,6 +58,55 @@ test('profit guard re-reads the account and sends only group_ids on a safe updat
   assert.equal(calls.filter((item) => item.kind === 'record').length, 1);
 });
 
+test('profit guard auto-assigns only platform-matched groups within the inclusive margin range', async () => {
+  const calls = [];
+  const repository = {
+    async recordProfitGuardEvaluation(_candidate, details) { if (details?.action) calls.push(details); },
+    async recordProfitGuardError() {},
+  };
+  const gateway = {
+    async getAccount() { return { group_ids: [10] }; },
+    async updateAccountGroups(_accountId, groupIds) { calls.push({ action: 'update', groupIds }); },
+  };
+  const service = new AccountProfitGuardService(repository, gateway);
+  const result = await service.evaluateCandidate({
+    accountId: 8, accountName: 'OpenAI account', platform: 'OpenAI', supplierKeyId: 7, connectionId: 9,
+    upstreamMultiplier: 0.06, minimumMargin: 0.3, allowEmptyGroups: true,
+    autoAssignEnabled: true, targetMarginMin: 0.2, targetMarginMax: 0.25,
+  }, new Map([
+    [10, { id: 10, name: 'existing', platform: 'openai', rate_multiplier: 0.09 }],
+    [20, { id: 20, name: 'boundary-low', platform: 'OpenAI', rate_multiplier: 0.075 }],
+    [30, { id: 30, name: 'boundary-high', platform: 'openai', rate_multiplier: 0.08 }],
+    [40, { id: 40, name: 'wrong-platform', platform: 'claude_code', rate_multiplier: 0.08 }],
+    [50, { id: 50, name: 'outside-range', platform: 'openai', rate_multiplier: 0.1 }],
+  ]));
+  assert.equal(result.changed, true);
+  assert.deepEqual(calls.find((item) => item.action === 'update'), { action: 'update', groupIds: [10, 20, 30] });
+  assert.deepEqual(calls.filter((item) => item.action === 'add_group').map((item) => item.groupId), [20, 30]);
+});
+
+test('profit guard applies removals and auto-assignment in one update', async () => {
+  const updates = [];
+  const repository = {
+    async recordProfitGuardEvaluation() {},
+    async recordProfitGuardError() {},
+  };
+  const gateway = {
+    async getAccount() { return { group_ids: [10, 20] }; },
+    async updateAccountGroups(_accountId, groupIds) { updates.push(groupIds); },
+  };
+  const service = new AccountProfitGuardService(repository, gateway);
+  await service.evaluateCandidate({
+    accountId: 8, platform: 'openai', upstreamMultiplier: 0.085, minimumMargin: 0.1,
+    allowEmptyGroups: true, autoAssignEnabled: true, targetMarginMin: 0.1, targetMarginMax: 0.3,
+  }, new Map([
+    [10, { id: 10, platform: 'openai', rate_multiplier: 0.09 }],
+    [20, { id: 20, platform: 'openai', rate_multiplier: 0.16 }],
+    [30, { id: 30, platform: 'openai', rate_multiplier: 0.1 }],
+  ]));
+  assert.deepEqual(updates, [[20, 30]]);
+});
+
 test('sub2api group updates bypass the read cache and invalidate account data', async () => {
   const calls = [];
   const gateway = new Sub2ApiReadonlyGateway({
