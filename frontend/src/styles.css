@@ -36,3 +36,4 @@
   .trend-chart{height:240px}
 }
 .profit-guard-box{margin-top:18px;padding-top:18px;border-top:1px solid var(--line)}.section-label{margin-bottom:10px;color:#31445d;font-size:13px;font-weight:700}.compact-grid{margin-top:10px}
+.supplier-key-table{min-width:1680px!important}.sort-button{display:inline-flex;align-items:center;gap:5px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:700;white-space:nowrap}.sort-button:hover{color:#1852c2}.platform-cell small{display:block;margin-top:4px;color:var(--muted);font-size:11px}.platform-cell .status-pill{display:inline-flex}

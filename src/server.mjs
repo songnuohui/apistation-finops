@@ -290,7 +290,10 @@ async function api(request,res,url){
     return json(res,200,await repository.listSupplierKeys({
       search:searchTerm(url.searchParams),
       supplier:String(url.searchParams.get('supplier') || '').trim(),
+      platform:String(url.searchParams.get('platform') || '').trim(),
       status:url.searchParams.get('status') || 'active',
+      sortBy:String(url.searchParams.get('sort_by') || 'last_check_at').trim(),
+      sortOrder:String(url.searchParams.get('sort_order') || 'desc').trim().toLowerCase(),
       ...page(),
     }));
   }
@@ -360,6 +363,27 @@ async function api(request,res,url){
         rateMultiplier:group.rate_multiplier??group.rateMultiplier??null,status:group.status||'',
       })),
     });
+  }
+  if(request.method==='PATCH'&&url.pathname==='/api/supplier-keys/profit-guard'){
+    const input=await body(request);
+    const keyIds=Array.isArray(input.keyIds)
+      ? [...new Set(input.keyIds.map(Number).filter((id)=>Number.isSafeInteger(id)&&id>0))]
+      : [];
+    if(!keyIds.length||keyIds.length>200)throw Object.assign(new Error('keyIds must contain between 1 and 200 supplier keys'),{statusCode:400});
+    const policy=normalizeAccountProfitGuard(input);
+    const result=await repository.upsertSupplierKeysProfitGuard(keyIds,policy,auth.actor);
+    const evaluations=[];
+    if(policy.enabled&&!config.demoMode){
+      for(const connectionId of result.connectionIds){
+        try{evaluations.push(await accountProfitGuardService.evaluateSupplierConnection(connectionId));}
+        catch(error){evaluations.push({evaluated:0,changed:0,error:String(error?.message||error)});}
+      }
+    }
+    return json(res,200,{...result,evaluation:{
+      evaluated:evaluations.reduce((sum,item)=>sum+Number(item.evaluated||0),0),
+      changed:evaluations.reduce((sum,item)=>sum+Number(item.changed||0),0),
+      errors:evaluations.filter((item)=>item.error).map((item)=>item.error),
+    }});
   }
   const supplierKeyProfitGuard=/^\/api\/supplier-keys\/(\d+)\/profit-guard$/.exec(url.pathname);
   if(request.method==='PATCH'&&supplierKeyProfitGuard){

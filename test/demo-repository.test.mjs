@@ -238,6 +238,13 @@ test('supplier key listing supports supplier filters and pagination', async () =
   assert.deepEqual(filtered.suppliers, ['Cloud Seats']);
   assert.ok('usageRequestCount' in firstPage.items[0]);
   assert.ok('usageTokenCount' in firstPage.items[0]);
+  assert.ok('usageAmountCny' in firstPage.items[0]);
+  assert.ok('supplierBalance' in firstPage.items[0]);
+  assert.ok('platform' in firstPage.items[0]);
+  assert.ok(firstPage.platforms.includes('OpenAI'));
+  assert.equal((await repository.listSupplierKeys({ platform: 'Anthropic', pageSize: 100 })).total, 1);
+  const byUsage = await repository.listSupplierKeys({ sortBy: 'usage_amount', sortOrder: 'desc', pageSize: 100 });
+  assert.ok(byUsage.items[0].usageAmountCny >= byUsage.items[1].usageAmountCny);
   assert.ok('minimumMarginVariantCount' in firstPage.items[0]);
   assert.ok('targetMarginVariantCount' in firstPage.items[0]);
 });
@@ -262,6 +269,10 @@ test('supplier key batch profit guard updates only linked accounts', async () =>
     () => repository.upsertSupplierKeyProfitGuard(1, [2742], policy),
     /not linked to this supplier key/,
   );
+  const bulkResult = await repository.upsertSupplierKeysProfitGuard([1, 2], policy, 'bulk-admin');
+  assert.deepEqual(bulkResult.accountIds, [2745]);
+  assert.deepEqual(bulkResult.connectionIds, [1]);
+  assert.equal((await repository.getSupplierKeyDetails(1)).accounts[0].profitGuard.updatedBy, 'bulk-admin');
 });
 
 test('supplier profit guard defaults apply to existing and newly linked accounts', async () => {

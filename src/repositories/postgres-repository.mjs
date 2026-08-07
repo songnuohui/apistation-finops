@@ -3951,47 +3951,88 @@ export class PostgresRepository {
     };
   }
 
-  async listSupplierKeys({ search = '', supplier = '', status = 'active', page = 1, pageSize = 20, offset = 0 } = {}) {
+  async listSupplierKeys({
+    search = '', supplier = '', platform = '', status = 'active',
+    page = 1, pageSize = 20, offset = 0, sortBy = 'last_check_at', sortOrder = 'desc',
+  } = {}) {
     const normalizedStatus = String(status || '').trim().toLowerCase();
+    const normalizedPlatform = String(platform || '').trim();
+    const sortColumns = {
+      supplier: 'supplier_name',
+      supplier_balance: 'supplier_balance',
+      base_url: 'base_url',
+      name: 'name',
+      platform: 'platform',
+      rate_multiplier: 'rate_multiplier',
+      profit_range: 'target_margin_min_min',
+      minimum_margin: 'minimum_margin_min',
+      status: 'status',
+      usage_amount: 'usage_amount_cny',
+      account_count: 'account_count',
+      last_check_at: 'last_check_at',
+    };
+    const sortColumn = sortColumns[String(sortBy || '')] || sortColumns.last_check_at;
+    const direction = String(sortOrder || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const result = await this.pool.query(`
-      SELECT k.id,k.connection_id,k.external_key_id,k.name,k.masked_key,k.status,k.group_id,k.group_name,
-             k.rate_multiplier,k.quota_total,k.quota_used,k.quota_remaining,k.quota_currency,k.expires_at,
-             k.last_used_at,k.last_check_status,k.last_check_method,k.last_check_at,k.last_check_error,
-             c.name AS connection_name,c.base_url,c.adapter_type,c.detected_adapter_type,
-             s.name AS supplier_name,
-             COUNT(DISTINCT l.source_account_id)::int AS account_count,
-             COUNT(DISTINCT l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
-             COUNT(DISTINCT f.source_usage_id)::int AS usage_request_count,
-             COALESCE(SUM(
-               COALESCE(f.input_tokens,0)
-               + COALESCE(f.output_tokens,0)
-               + COALESCE(f.cache_creation_tokens,0)
-               + COALESCE(f.cache_read_tokens,0)
-             ),0)::numeric AS usage_token_count,
-             MIN(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_min,
-             MAX(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_max,
-             COUNT(DISTINCT p.minimum_margin) FILTER (WHERE p.enabled)::int AS minimum_margin_variant_count,
-             MIN(p.threshold_mode) FILTER (WHERE p.enabled) AS profit_guard_threshold_mode,
-             COUNT(DISTINCT p.threshold_mode) FILTER (WHERE p.enabled)::int AS threshold_mode_variant_count,
-             MIN(p.target_margin_min) FILTER (WHERE p.auto_assign_enabled) AS target_margin_min_min,
-             MAX(p.target_margin_max) FILTER (WHERE p.auto_assign_enabled) AS target_margin_max_max,
-             COUNT(DISTINCT (p.target_margin_min,p.target_margin_max))
-               FILTER (WHERE p.auto_assign_enabled)::int AS target_margin_variant_count,
-             COUNT(*) OVER()::int AS total_count
-      FROM ${this.schema}.supplier_keys k
-      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
-      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
-      LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
-      LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
-      LEFT JOIN ${this.schema}.fact_usage_events f ON f.source_account_id=l.source_account_id
-      WHERE ($1='' OR k.name ILIKE '%'||$1||'%' OR k.masked_key ILIKE '%'||$1||'%'
-        OR s.name ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%' OR c.base_url ILIKE '%'||$1||'%')
-        AND ($2='' OR s.name=$2)
-        AND ($3='' OR ($3='active' AND k.removed_at IS NULL AND k.status='active')
-          OR ($3<>'active' AND k.status=$3))
-      GROUP BY k.id,c.id,s.id
-      ORDER BY (k.last_check_status='failed') DESC,k.last_check_at DESC NULLS LAST,k.id DESC
-      LIMIT $4 OFFSET $5`, [search, supplier, normalizedStatus, pageSize, offset]);
+      WITH usage_by_account AS (
+        SELECT source_account_id,
+               COUNT(*)::int AS usage_request_count,
+               COALESCE(SUM(
+                 COALESCE(input_tokens,0)
+                 + COALESCE(output_tokens,0)
+                 + COALESCE(cache_creation_tokens,0)
+                 + COALESCE(cache_read_tokens,0)
+               ),0)::numeric AS usage_token_count,
+               COALESCE(SUM(user_charge_cny),0)::numeric AS usage_amount_cny
+        FROM ${this.schema}.fact_usage_events
+        GROUP BY source_account_id
+      ),
+      key_rows AS (
+        SELECT k.id,k.connection_id,k.external_key_id,k.name,k.masked_key,k.status,k.group_id,k.group_name,
+               k.rate_multiplier,k.quota_total,k.quota_used,k.quota_remaining,k.quota_currency,k.expires_at,
+               k.last_used_at,k.last_check_status,k.last_check_method,k.last_check_at,k.last_check_error,
+               c.name AS connection_name,c.base_url,c.adapter_type,c.detected_adapter_type,
+               c.balance AS supplier_balance,c.balance_currency AS supplier_balance_currency,
+               s.name AS supplier_name,
+               COALESCE(NULLIF(gc.platform,''), MAX(NULLIF(a.platform,'')), '') AS platform,
+               COUNT(DISTINCT l.source_account_id)::int AS account_count,
+               COUNT(DISTINCT l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
+               COALESCE(SUM(u.usage_request_count),0)::int AS usage_request_count,
+               COALESCE(SUM(u.usage_token_count),0)::numeric AS usage_token_count,
+               COALESCE(SUM(u.usage_amount_cny),0)::numeric AS usage_amount_cny,
+               MIN(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_min,
+               MAX(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_max,
+               COUNT(DISTINCT p.minimum_margin) FILTER (WHERE p.enabled)::int AS minimum_margin_variant_count,
+               MIN(p.threshold_mode) FILTER (WHERE p.enabled) AS profit_guard_threshold_mode,
+               COUNT(DISTINCT p.threshold_mode) FILTER (WHERE p.enabled)::int AS threshold_mode_variant_count,
+               MIN(p.target_margin_min) FILTER (WHERE p.auto_assign_enabled) AS target_margin_min_min,
+               MAX(p.target_margin_max) FILTER (WHERE p.auto_assign_enabled) AS target_margin_max_max,
+               COUNT(DISTINCT (p.target_margin_min,p.target_margin_max))
+                 FILTER (WHERE p.auto_assign_enabled)::int AS target_margin_variant_count
+        FROM ${this.schema}.supplier_keys k
+        JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+        LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
+        LEFT JOIN usage_by_account u ON u.source_account_id=l.source_account_id
+        LEFT JOIN ${this.schema}.source_group_catalog gc
+          ON gc.source_group_id = CASE
+            WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint
+            ELSE NULL
+          END
+        WHERE ($1='' OR k.name ILIKE '%'||$1||'%' OR k.masked_key ILIKE '%'||$1||'%'
+          OR s.name ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%' OR c.base_url ILIKE '%'||$1||'%')
+          AND ($2='' OR s.name=$2)
+          AND ($3='' OR ($3='active' AND k.removed_at IS NULL AND k.status='active')
+            OR ($3<>'active' AND k.status=$3))
+        GROUP BY k.id,c.id,s.id,gc.platform
+      )
+      SELECT key_rows.*,COUNT(*) OVER()::int AS total_count
+      FROM key_rows
+      WHERE ($4='' OR platform=$4)
+      ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
+      LIMIT $5 OFFSET $6`, [search, supplier, normalizedStatus, normalizedPlatform, pageSize, offset]);
     const supplierResult = await this.pool.query(`
       SELECT DISTINCT s.name
       FROM ${this.schema}.supplier_keys k
@@ -3999,6 +4040,22 @@ export class PostgresRepository {
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
       WHERE k.removed_at IS NULL AND k.status='active'
       ORDER BY s.name`);
+    const platformResult = await this.pool.query(`
+      WITH key_platforms AS (
+        SELECT COALESCE(NULLIF(gc.platform,''), MAX(NULLIF(a.platform,'')), '') AS platform
+        FROM ${this.schema}.supplier_keys k
+        JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+        LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
+        LEFT JOIN ${this.schema}.source_group_catalog gc
+          ON gc.source_group_id = CASE
+            WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint
+            ELSE NULL
+          END
+        WHERE k.removed_at IS NULL AND k.status='active'
+        GROUP BY k.id,gc.platform
+      )
+      SELECT DISTINCT platform FROM key_platforms WHERE platform<>'' ORDER BY platform`);
     return {
       ...pageResult(result.rows.map((row) => ({
         id: Number(row.id),
@@ -4007,6 +4064,9 @@ export class PostgresRepository {
         connectionName: row.connection_name || '',
         baseUrl: row.base_url || '',
         adapterType: row.detected_adapter_type || row.adapter_type || '',
+        platform: row.platform || '',
+        supplierBalance: nullableNumber(row.supplier_balance),
+        supplierBalanceCurrency: row.supplier_balance_currency || '',
         externalId: row.external_key_id || '',
         name: row.name || '',
         maskedKey: row.masked_key || '',
@@ -4028,6 +4088,7 @@ export class PostgresRepository {
         profitGuardAccountCount: Number(row.profit_guard_account_count || 0),
         usageRequestCount: Number(row.usage_request_count || 0),
         usageTokenCount: Number(row.usage_token_count || 0),
+        usageAmountCny: nullableNumber(row.usage_amount_cny) || 0,
         minimumMarginMin: nullableNumber(row.minimum_margin_min),
         minimumMarginMax: nullableNumber(row.minimum_margin_max),
         minimumMarginVariantCount: Number(row.minimum_margin_variant_count || 0),
@@ -4038,7 +4099,48 @@ export class PostgresRepository {
         targetMarginVariantCount: Number(row.target_margin_variant_count || 0),
       })), page, pageSize),
       suppliers: supplierResult.rows.map((row) => row.name || '').filter(Boolean),
+      platforms: platformResult.rows.map((row) => row.platform || '').filter(Boolean),
     };
+  }
+
+  async upsertSupplierKeysProfitGuard(keyIds, input, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const keys = await client.query(`
+        SELECT id,connection_id FROM ${this.schema}.supplier_keys
+        WHERE id=ANY($1::bigint[]) AND removed_at IS NULL`, [keyIds]);
+      const foundIds = new Set(keys.rows.map((row) => Number(row.id)));
+      const missing = keyIds.filter((id) => !foundIds.has(Number(id)));
+      if (missing.length) throw httpError(`supplier keys not found: ${missing.join(',')}`, 404);
+      const linked = await client.query(`
+        SELECT DISTINCT source_account_id
+        FROM ${this.schema}.supplier_account_links
+        WHERE supplier_key_id=ANY($1::bigint[])`, [keyIds]);
+      const accountIds = linked.rows.map((row) => Number(row.source_account_id));
+      if (accountIds.length) {
+        await client.query(`
+          INSERT INTO ${this.schema}.account_profit_guard_policies(
+            source_account_id,enabled,minimum_margin,threshold_mode,minimum_sale_multiplier,
+            allow_empty_groups,auto_assign_enabled,target_margin_min,target_margin_max,created_by,updated_by)
+          SELECT unnest($1::bigint[]),$2,$3,$4,$5,$6,$7,$8,$9,$10,$10
+          ON CONFLICT(source_account_id) DO UPDATE SET
+            enabled=EXCLUDED.enabled,minimum_margin=EXCLUDED.minimum_margin,
+            threshold_mode=EXCLUDED.threshold_mode,minimum_sale_multiplier=EXCLUDED.minimum_sale_multiplier,
+            allow_empty_groups=EXCLUDED.allow_empty_groups,
+            auto_assign_enabled=EXCLUDED.auto_assign_enabled,
+            target_margin_min=EXCLUDED.target_margin_min,target_margin_max=EXCLUDED.target_margin_max,
+            last_error='',updated_by=EXCLUDED.updated_by,updated_at=NOW()`, [
+          accountIds, Boolean(input.enabled), input.minimumMargin, input.thresholdMode,
+          input.minimumSaleMultiplier, Boolean(input.allowEmptyGroups), Boolean(input.autoAssignEnabled),
+          input.targetMarginMin, input.targetMarginMax, actor,
+        ]);
+      }
+      return {
+        keyIds: keyIds.map(Number),
+        connectionIds: [...new Set(keys.rows.map((row) => Number(row.connection_id)))],
+        accountIds,
+        updated: accountIds.length,
+      };
+    });
   }
 
   async upsertSupplierKeyProfitGuard(keyId, accountIds, input, actor = 'admin') {

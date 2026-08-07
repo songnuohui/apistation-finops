@@ -1107,11 +1107,16 @@ export class DemoRepository {
     };
   }
 
-  async listSupplierKeys({ search = '', supplier = '', status = 'active', page = 1, pageSize = 20 } = {}) {
+  async listSupplierKeys({
+    search = '', supplier = '', platform = '', status = 'active', page = 1, pageSize = 20,
+    sortBy = 'last_check_at', sortOrder = 'desc',
+  } = {}) {
     const term = String(search || '').trim().toLowerCase();
     const supplierTerm = String(supplier || '').trim().toLowerCase();
+    const platformTerm = String(platform || '').trim().toLowerCase();
     const normalizedStatus = String(status || '').trim().toLowerCase();
     const items = [];
+    const availablePlatforms = new Set();
     for (const connection of this.supplierConnections) {
       const detail = this.supplierDetail(connection.id);
       for (const key of detail.keys) {
@@ -1127,6 +1132,14 @@ export class DemoRepository {
         const accounts = links
           .map((link) => this.accounts.find((account) => Number(account.id) === Number(link.accountId)))
           .filter(Boolean);
+        const platformValue = String(
+          key.platform
+          || key.sourceData?.platform
+          || accounts[0]?.platform
+          || (String(key.groupName || '').toLowerCase().includes('claude') ? 'Anthropic' : 'OpenAI'),
+        ).trim();
+        if (platformValue) availablePlatforms.add(platformValue);
+        if (platformTerm && platformValue.toLowerCase() !== platformTerm) continue;
         const enabledPolicies = policies.filter((policy) => policy.enabled);
         const autoAssignPolicies = policies.filter((policy) => (
           policy.autoAssignEnabled
@@ -1138,6 +1151,9 @@ export class DemoRepository {
           id: Number(key.id), connectionId: Number(connection.id), supplierName: connection.supplierName || '',
           connectionName: connection.name || '', baseUrl: connection.baseUrl || '',
           adapterType: connection.detectedAdapterType || connection.adapterType || '',
+          platform: platformValue,
+          supplierBalance: finiteNumber(connection.balance),
+          supplierBalanceCurrency: connection.balanceCurrency || '',
           externalId: key.externalId || '', name: key.name || '', maskedKey: key.maskedKey || '',
           status: key.status || '', groupId: key.groupId || null, groupName: key.groupName || '',
           rateMultiplier: finiteNumber(key.rateMultiplier), quotaTotal: finiteNumber(key.quotaTotal),
@@ -1149,6 +1165,7 @@ export class DemoRepository {
           profitGuardAccountCount: enabledPolicies.length,
           usageRequestCount: accounts.reduce((total, account) => total + Number(account.requests || 0), 0),
           usageTokenCount: accounts.reduce((total, account) => total + Number(account.tokens || 0), 0),
+          usageAmountCny: accounts.reduce((total, account) => total + Number(account.userChargeCny || 0), 0),
           minimumMarginMin: enabledPolicies.length ? Math.min(...enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))) : null,
           minimumMarginMax: enabledPolicies.length ? Math.max(...enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))) : null,
           minimumMarginVariantCount: new Set(enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))).size,
@@ -1160,9 +1177,40 @@ export class DemoRepository {
         });
       }
     }
+    const sortValues = {
+      supplier: (item) => item.supplierName,
+      supplier_balance: (item) => item.supplierBalance,
+      base_url: (item) => item.baseUrl,
+      name: (item) => item.name || item.maskedKey,
+      platform: (item) => item.platform,
+      rate_multiplier: (item) => item.rateMultiplier,
+      profit_range: (item) => item.targetMarginMinMin,
+      minimum_margin: (item) => item.minimumMarginMin,
+      status: (item) => item.status,
+      usage_amount: (item) => item.usageAmountCny,
+      account_count: (item) => item.accountCount,
+      last_check_at: (item) => item.lastCheckAt,
+    };
+    const valueOf = sortValues[sortBy] || sortValues.last_check_at;
+    const direction = String(sortOrder || '').toLowerCase() === 'asc' ? 1 : -1;
+    items.sort((left, right) => {
+      const leftValue = valueOf(left);
+      const rightValue = valueOf(right);
+      const leftNumber = typeof leftValue === 'number' ? leftValue : Number.NaN;
+      const rightNumber = typeof rightValue === 'number' ? rightValue : Number.NaN;
+      let result;
+      if (Number.isFinite(leftNumber) || Number.isFinite(rightNumber)) {
+        result = Number.isFinite(leftNumber) ? (Number.isFinite(rightNumber) ? leftNumber - rightNumber : -1) : 1;
+      } else {
+        result = String(leftValue || '').localeCompare(String(rightValue || ''), 'zh-CN');
+      }
+      return result * direction || Number(left.id) - Number(right.id);
+    });
     const suppliers = [...new Set(this.supplierConnections.map((item) => String(item.supplierName || '').trim()).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right, 'zh-CN'));
-    return { ...pageResult(items, page, pageSize), suppliers };
+    const platforms = [...availablePlatforms]
+      .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+    return { ...pageResult(items, page, pageSize), suppliers, platforms };
   }
 
   async upsertSupplierKeyProfitGuard(keyId, accountIds, input, actor = 'admin') {
@@ -1184,6 +1232,33 @@ export class DemoRepository {
     };
     accountIds.forEach((id) => this.accountProfitGuardPolicies.set(Number(id), { ...policy }));
     return { keyId: Number(keyId), connectionId: Number(match.connection.id), accountIds: accountIds.map(Number), updated: accountIds.length };
+  }
+
+  async upsertSupplierKeysProfitGuard(keyIds, input, actor = 'admin') {
+    const matches = keyIds.map((keyId) => this.findSupplierKey(keyId));
+    const missing = keyIds.filter((keyId, index) => !matches[index]);
+    if (missing.length) throw Object.assign(new Error(`supplier keys not found: ${missing.join(',')}`), { statusCode: 404 });
+    const accountIds = [...new Set(matches.flatMap((match) => (
+      (match.key.accountLinks || []).map((link) => Number(link.accountId))
+    )))];
+    const policy = {
+      enabled: Boolean(input.enabled),
+      minimumMargin: Number(input.minimumMargin || 0),
+      thresholdMode: input.thresholdMode || 'margin',
+      minimumSaleMultiplier: input.minimumSaleMultiplier === null || input.minimumSaleMultiplier === undefined ? null : Number(input.minimumSaleMultiplier),
+      allowEmptyGroups: Boolean(input.allowEmptyGroups),
+      autoAssignEnabled: Boolean(input.autoAssignEnabled),
+      targetMarginMin: input.targetMarginMin === null || input.targetMarginMin === undefined ? null : Number(input.targetMarginMin),
+      targetMarginMax: input.targetMarginMax === null || input.targetMarginMax === undefined ? null : Number(input.targetMarginMax),
+      lastEvaluatedAt: null, lastActionAt: null, lastError: '', updatedBy: actor, updatedAt: new Date().toISOString(),
+    };
+    accountIds.forEach((id) => this.accountProfitGuardPolicies.set(Number(id), { ...policy }));
+    return {
+      keyIds: keyIds.map(Number),
+      connectionIds: [...new Set(matches.map((match) => Number(match.connection.id)))],
+      accountIds,
+      updated: accountIds.length,
+    };
   }
 
   async getSupplierKeyDetails(keyId) {
