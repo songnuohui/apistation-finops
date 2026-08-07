@@ -97,6 +97,46 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
 });
 
+test('supplier key listing reads the latest supplier balance snapshot', async () => {
+  const queries = [];
+  const pool = {
+    async query(text) {
+      queries.push(text);
+      if (text.includes('FROM key_rows')) {
+        return {
+          rows: [{
+            id: '77',
+            connection_id: '9',
+            supplier_name: 'Provider A',
+            connection_name: 'main',
+            base_url: 'https://provider.example',
+            platform: 'openai',
+            name: 'upstream-key',
+            masked_key: 'sk-...test',
+            status: 'active',
+            supplier_balance: '12.50',
+            supplier_balance_currency: 'USD',
+            usage_amount_cny: '8.25',
+            total_count: '1',
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT DISTINCT s.name')) return { rows: [{ name: 'Provider A' }], rowCount: 1 };
+      if (text.includes('SELECT DISTINCT platform FROM key_platforms')) return { rows: [{ platform: 'openai' }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const result = await repository.listSupplierKeys({ page: 1, pageSize: 20 });
+
+  assert.equal(result.items[0].supplierBalance, 12.5);
+  assert.equal(result.items[0].supplierBalanceCurrency, 'USD');
+  assert.equal(result.items[0].usageAmountCny, 8.25);
+  assert.match(queries[0], /supplier_balance_snapshots/);
+  assert.doesNotMatch(queries[0], /c\.balance\s+AS\s+supplier_balance/);
+});
+
 test('removed supplier keys detach local account links and stop future automatic pricing', async () => {
   const queries = [];
   const client = {

@@ -3992,7 +3992,8 @@ export class PostgresRepository {
                k.rate_multiplier,k.quota_total,k.quota_used,k.quota_remaining,k.quota_currency,k.expires_at,
                k.last_used_at,k.last_check_status,k.last_check_method,k.last_check_at,k.last_check_error,
                c.name AS connection_name,c.base_url,c.adapter_type,c.detected_adapter_type,
-               c.balance AS supplier_balance,c.balance_currency AS supplier_balance_currency,
+               balance_snapshot.balance AS supplier_balance,
+               COALESCE(balance_snapshot.currency,c.balance_currency) AS supplier_balance_currency,
                s.name AS supplier_name,
                COALESCE(NULLIF(gc.platform,''), MAX(NULLIF(a.platform,'')), '') AS platform,
                COUNT(DISTINCT l.source_account_id)::int AS account_count,
@@ -4016,6 +4017,13 @@ export class PostgresRepository {
         LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
         LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
         LEFT JOIN usage_by_account u ON u.source_account_id=l.source_account_id
+        LEFT JOIN LATERAL (
+          SELECT balance,currency
+          FROM ${this.schema}.supplier_balance_snapshots
+          WHERE connection_id=c.id
+          ORDER BY observed_at DESC,id DESC
+          LIMIT 1
+        ) balance_snapshot ON TRUE
         LEFT JOIN ${this.schema}.source_group_catalog gc
           ON gc.source_group_id = CASE
             WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint
@@ -4026,7 +4034,7 @@ export class PostgresRepository {
           AND ($2='' OR s.name=$2)
           AND ($3='' OR ($3='active' AND k.removed_at IS NULL AND k.status='active')
             OR ($3<>'active' AND k.status=$3))
-        GROUP BY k.id,c.id,s.id,gc.platform
+        GROUP BY k.id,c.id,s.id,gc.platform,balance_snapshot.balance,balance_snapshot.currency
       )
       SELECT key_rows.*,COUNT(*) OVER()::int AS total_count
       FROM key_rows
