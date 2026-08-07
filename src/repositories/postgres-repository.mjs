@@ -26,6 +26,7 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     id: Number(row.id),
     supplierId: Number(row.supplier_id),
     supplierName: row.supplier_name || '',
+    supplierNotes: row.supplier_notes || '',
     name: row.name || '',
     adapterType: row.adapter_type || 'auto',
     detectedAdapterType: row.detected_adapter_type || '',
@@ -2930,7 +2931,7 @@ export class PostgresRepository {
 
   async listSupplierConnections({ search = '' } = {}) {
     const result = await this.pool.query(`
-      SELECT c.*,s.name AS supplier_name,b.balance,
+      SELECT c.*,s.name AS supplier_name,s.notes AS supplier_notes,b.balance,
              COALESCE(keys.key_count,0)::int AS key_count,
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
@@ -2963,7 +2964,7 @@ export class PostgresRepository {
 
   async getSupplierConnection(connectionId, { includeCiphertext = false } = {}) {
     const result = await this.pool.query(`
-      SELECT c.*,s.name AS supplier_name,b.balance,
+      SELECT c.*,s.name AS supplier_name,s.notes AS supplier_notes,b.balance,
              COALESCE(keys.key_count,0)::int AS key_count,
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
@@ -2997,8 +2998,8 @@ export class PostgresRepository {
     return inTransaction(this.pool, async (client) => {
       const supplierId = await this.ensureSupplierInTransaction(client, input.supplierName, actor);
       await client.query(`UPDATE ${this.schema}.suppliers
-        SET website_url=$2,supplier_type=$3,updated_at=NOW() WHERE id=$1`,
-      [supplierId, input.baseUrl, input.adapterType]);
+        SET website_url=$2,supplier_type=$3,notes=$4,updated_at=NOW() WHERE id=$1`,
+      [supplierId, input.baseUrl, input.adapterType, input.supplierNotes || '']);
       let result;
       try {
         result = await client.query(`
@@ -3030,8 +3031,8 @@ export class PostgresRepository {
       if (!current.rowCount) throw httpError('supplier connection not found', 404);
       const supplierId = await this.ensureSupplierInTransaction(client, input.supplierName, actor);
       await client.query(`UPDATE ${this.schema}.suppliers
-        SET website_url=$2,supplier_type=$3,updated_at=NOW() WHERE id=$1`,
-      [supplierId,input.baseUrl,input.adapterType]);
+        SET website_url=$2,supplier_type=$3,notes=$4,updated_at=NOW() WHERE id=$1`,
+      [supplierId,input.baseUrl,input.adapterType,input.supplierNotes || '']);
       let result;
       try {
         result = await client.query(`
@@ -3056,6 +3057,146 @@ export class PostgresRepository {
         VALUES($1,'update_supplier_connection','supplier_connection',$2,$3::jsonb)`,
       [actor,String(connectionId),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl, enabled: input.enabled })]);
       return supplierConnection(row);
+    });
+  }
+
+  async getSupplierConnectionDeletionPlan(connectionId) {
+    const result = await this.pool.query(`
+      SELECT c.id,c.supplier_id,s.name,
+             COALESCE(array_agg(DISTINCT l.source_account_id)
+               FILTER (WHERE l.source_account_id IS NOT NULL), '{}') AS account_ids
+      FROM ${this.schema}.supplier_connections c
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN ${this.schema}.supplier_keys k ON k.connection_id=c.id
+      LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+      WHERE c.id=$1
+      GROUP BY c.id,c.supplier_id,s.name`, [connectionId]);
+    if (!result.rowCount) throw httpError('supplier connection not found', 404);
+    return {
+      connectionId: Number(result.rows[0].id),
+      supplierId: Number(result.rows[0].supplier_id),
+      supplierName: result.rows[0].name || '',
+      accountIds: (result.rows[0].account_ids || []).map(Number).filter(Number.isSafeInteger),
+    };
+  }
+
+  async getSupplierKeyDeletionPlan(keyId) {
+    const result = await this.pool.query(`
+      SELECT k.id,k.connection_id,k.name,k.external_key_id,
+             COALESCE(array_agg(l.source_account_id)
+               FILTER (WHERE l.source_account_id IS NOT NULL), '{}') AS account_ids
+      FROM ${this.schema}.supplier_keys k
+      LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+      WHERE k.id=$1
+      GROUP BY k.id,k.connection_id,k.name,k.external_key_id`, [keyId]);
+    if (!result.rowCount) throw httpError('supplier key not found', 404);
+    return {
+      keyId: Number(result.rows[0].id),
+      connectionId: Number(result.rows[0].connection_id),
+      keyName: result.rows[0].name || result.rows[0].external_key_id || '',
+      accountIds: (result.rows[0].account_ids || []).map(Number).filter(Number.isSafeInteger),
+    };
+  }
+
+  async deleteSupplierConnection(connectionId, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        SELECT c.id,c.supplier_id,s.name
+        FROM ${this.schema}.supplier_connections c
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE c.id=$1
+        FOR UPDATE OF c,s`, [connectionId]);
+      if (!result.rowCount) throw httpError('supplier connection not found', 404);
+      const connection = result.rows[0];
+      const linkedAccounts = await client.query(`
+        SELECT DISTINCT l.source_account_id
+        FROM ${this.schema}.supplier_account_links l
+        JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+        WHERE k.connection_id=$1`, [connectionId]);
+      const accountIds = linkedAccounts.rows.map((row) => Number(row.source_account_id)).filter(Number.isSafeInteger);
+      if (accountIds.length) {
+        await client.query(`
+          UPDATE ${this.schema}.account_cost_rules r
+          SET effective_to=LEAST(COALESCE(r.effective_to,NOW()),NOW()),
+              status='superseded',updated_at=NOW()
+          FROM ${this.schema}.supplier_keys k
+          WHERE r.supplier_key_id=k.id AND k.connection_id=$1
+            AND r.status='active' AND r.effective_to IS NULL`, [connectionId]);
+        await client.query(`
+          UPDATE ${this.schema}.account_rate_observations r
+          SET fresh_until=LEAST(COALESCE(r.fresh_until,NOW()),NOW())
+          FROM ${this.schema}.supplier_keys k
+          WHERE r.supplier_key_id=k.id AND k.connection_id=$1
+            AND r.fresh_until>NOW()`, [connectionId]);
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts
+          SET supplier='',purchase_batch='',synced_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
+        await client.query(`
+          UPDATE ${this.schema}.account_profit_guard_policies
+          SET enabled=FALSE,last_error='supplier connection was deleted',updated_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
+      }
+      await client.query(`DELETE FROM ${this.schema}.supplier_connections WHERE id=$1`, [connectionId]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'delete_supplier_connection','supplier_connection',$2,$3::jsonb)`,
+      [actor,String(connectionId),JSON.stringify({
+        connectionId:Number(connectionId),supplierId:Number(connection.supplier_id),
+        supplierName:connection.name || '',accountIds,
+      })]);
+      return {
+        connectionId:Number(connectionId),supplierId:Number(connection.supplier_id),
+        supplierName:connection.name || '',deleted:true,
+      };
+    });
+  }
+
+  async deleteSupplierKey(keyId, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const keyResult = await client.query(`
+        SELECT k.id,k.connection_id,k.name,k.external_key_id,s.name AS supplier_name
+        FROM ${this.schema}.supplier_keys k
+        JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE k.id=$1
+        FOR UPDATE OF k`, [keyId]);
+      if (!keyResult.rowCount) throw httpError('supplier key not found', 404);
+      const key = keyResult.rows[0];
+      const linkedAccounts = await client.query(`
+        SELECT source_account_id
+        FROM ${this.schema}.supplier_account_links
+        WHERE supplier_key_id=$1`, [keyId]);
+      const accountIds = linkedAccounts.rows.map((row) => Number(row.source_account_id)).filter(Number.isSafeInteger);
+      if (accountIds.length) {
+        await client.query(`
+          UPDATE ${this.schema}.account_cost_rules
+          SET effective_to=LEAST(COALESCE(effective_to,NOW()),NOW()),
+              status='superseded',updated_at=NOW()
+          WHERE supplier_key_id=$1 AND status='active' AND effective_to IS NULL`, [keyId]);
+        await client.query(`
+          UPDATE ${this.schema}.account_rate_observations
+          SET fresh_until=LEAST(COALESCE(fresh_until,NOW()),NOW())
+          WHERE supplier_key_id=$1 AND fresh_until>NOW()`, [keyId]);
+        await client.query(`
+          UPDATE ${this.schema}.dim_accounts
+          SET supplier='',purchase_batch='',synced_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
+        await client.query(`
+          UPDATE ${this.schema}.account_profit_guard_policies
+          SET enabled=FALSE,last_error='supplier key was deleted',updated_at=NOW()
+          WHERE source_account_id=ANY($1::bigint[])`, [accountIds]);
+      }
+      await client.query(`DELETE FROM ${this.schema}.supplier_keys WHERE id=$1`, [keyId]);
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'delete_supplier_key','supplier_key',$2,$3::jsonb)`,
+      [actor,String(keyId),JSON.stringify({
+        keyId:Number(keyId),connectionId:Number(key.connection_id),
+        supplierName:key.supplier_name || '',keyName:key.name || key.external_key_id || '',accountIds,
+      })]);
+      return {
+        keyId:Number(keyId),connectionId:Number(key.connection_id),
+        supplierName:key.supplier_name || '',keyName:key.name || key.external_key_id || '',deleted:true,
+      };
     });
   }
 

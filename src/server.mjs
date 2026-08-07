@@ -29,6 +29,7 @@ import { ResponseCacheService } from './services/response-cache-service.mjs';
 import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
 import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs';
 import { AccountProfitGuardService } from './services/account-profit-guard-service.mjs';
+import { SupplierDeletionService } from './services/supplier-deletion-service.mjs';
 import { Sub2ApiServiceAuthService } from './services/sub2api-service-auth-service.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
@@ -58,6 +59,7 @@ const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
 const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
 const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
+const supplierDeletionService=new SupplierDeletionService(repository,sub2ApiReadonlyGateway,{demoMode:config.demoMode});
 const pendingLogins=new PendingLoginStore();
 supplierMonitorService?.setProfitGuardService(accountProfitGuardService);
 sub2ApiReadonlyGateway.setAccessTokenProvider(sub2ApiServiceAuthService);
@@ -360,6 +362,11 @@ async function api(request,res,url){
     return json(res,201,{connection:await repository.getSupplierConnection(created.id),sync});
   }
   const supplierConnectionId=/^\/api\/supplier-connections\/(\d+)$/.exec(url.pathname);
+  if(request.method==='DELETE'&&supplierConnectionId){
+    const result=await supplierDeletionService.deleteConnection(Number(supplierConnectionId[1]),auth.actor);
+    responseCache.invalidate('supplier-connections');
+    return json(res,200,result);
+  }
   if(request.method==='PATCH'&&supplierConnectionId){
     if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
     const id=Number(supplierConnectionId[1]);
@@ -383,6 +390,12 @@ async function api(request,res,url){
     await repository.updateSupplierConnection(id,input,ciphertext,auth.actor);
     const sync=input.enabled?(config.demoMode?await repository.syncSupplierConnection(id):await supplierMonitorService.syncConnection(id)):{ok:false,status:'disabled'};
     return json(res,200,{connection:await repository.getSupplierConnection(id),sync});
+  }
+  const supplierKeyId=/^\/api\/supplier-keys\/(\d+)$/.exec(url.pathname);
+  if(request.method==='DELETE'&&supplierKeyId){
+    const result=await supplierDeletionService.deleteKey(Number(supplierKeyId[1]),auth.actor);
+    responseCache.invalidate('supplier-connections');
+    return json(res,200,result);
   }
   const supplierConnectionSync=/^\/api\/supplier-connections\/(\d+)\/sync$/.exec(url.pathname);
   if(request.method==='POST'&&supplierConnectionSync){

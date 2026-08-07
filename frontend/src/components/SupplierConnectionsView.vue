@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   Activity, AlertTriangle, Bell, Check, Edit3, KeyRound, Link2, Plus, RefreshCw,
-  Send, ServerCog, Settings2, ShieldCheck, Unlink, X,
+  Send, ServerCog, Settings2, ShieldCheck, Trash2, Unlink, X,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
 
@@ -38,6 +38,7 @@ const profitGuardEditor = ref<AnyRecord | null>(null);
 const profitGuardSaving = ref(false);
 const supplierProfitGuardEditor = ref<AnyRecord | null>(null);
 const supplierProfitGuardSaving = ref(false);
+const deletingResource = ref<string | null>(null);
 let searchTimer: number | undefined;
 
 const adapterLabels: Record<string, string> = {
@@ -203,6 +204,7 @@ function blankEditor(connection: AnyRecord | null = null) {
     id: connection?.id || null,
     editing,
     supplierName: connection?.supplierName || '',
+    supplierNotes: connection?.supplierNotes || '',
     name: connection?.name || '主账号',
     adapterType: connection?.adapterType || 'auto',
     baseUrl: connection?.baseUrl || '',
@@ -263,6 +265,7 @@ async function saveConnection() {
   try {
     const payload = {
       supplierName: current.supplierName,
+      supplierNotes: current.supplierNotes || '',
       name: current.name,
       adapterType: current.adapterType,
       baseUrl: current.baseUrl,
@@ -301,6 +304,40 @@ async function saveConnection() {
     notify(error.message);
   } finally {
     editorSaving.value = false;
+  }
+}
+
+async function deleteConnection(connection: AnyRecord) {
+  const label = connection.supplierName || connection.name || `连接 #${connection.id}`;
+  if (!window.confirm(`确定删除供应商连接“${label}”吗？\n将同时删除该连接关联的 Sub2API 账号。\n此操作不可撤销。`)) return;
+  deletingResource.value = `connection:${connection.id}`;
+  try {
+    const result = await send(`/supplier-connections/${connection.id}`, 'DELETE', {});
+    notify(`供应商连接已删除，已处理 ${result.deletedAccounts?.length || 0} 个 Sub2API 账号`);
+    if (detail.value?.connection?.id === connection.id) await closeDetails();
+    await loadConnections();
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    deletingResource.value = null;
+  }
+}
+
+async function deleteKey(key: AnyRecord) {
+  const label = key.name || key.maskedKey || `密钥 #${key.id}`;
+  const accountCount = Number(key.accountLinks?.length || 0);
+  if (!window.confirm(`确定删除供应商密钥“${label}”吗？${accountCount ? `\n将同时删除其关联的 ${accountCount} 个 Sub2API 账号。` : ''}\n此操作不可撤销。`)) return;
+  deletingResource.value = `key:${key.id}`;
+  try {
+    const result = await send(`/supplier-keys/${key.id}`, 'DELETE', {});
+    notify(`供应商密钥已删除，已处理 ${result.deletedAccounts?.length || 0} 个 Sub2API 账号`);
+    const connectionId = Number(detail.value?.connection?.id);
+    await loadConnections();
+    if (connectionId) await openDetails(connectionId, 'keys');
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    deletingResource.value = null;
   }
 }
 
@@ -732,6 +769,7 @@ onMounted(async () => {
                 </button>
                 <small>{{ item.name || '默认连接' }} · {{ adapterLabel(item.detectedAdapterType || item.adapterType) }} · {{ authLabel(item.authMode) }}</small>
                 <small class="supplier-url">{{ item.baseUrl || '--' }}</small>
+                <small v-if="item.supplierNotes" class="supplier-note">{{ item.supplierNotes }}</small>
                 <small :class="{ 'profit-guard-on': item.profitGuardEnabled, 'profit-guard-missing': !item.profitGuardEnabled }">利润保护：{{ item.profitGuardEnabled ? '已启用' : item.profitGuardConfigured ? '已关闭' : '未配置' }}</small>
               </td>
               <td>
@@ -756,6 +794,7 @@ onMounted(async () => {
               </td>
               <td>
                 <div class="row-actions">
+                  <button class="icon-button mini-action danger-action" title="删除供应商连接" :disabled="deletingResource === `connection:${item.id}`" @click="deleteConnection(item)"><Trash2 :size="16" /></button>
                   <button class="icon-button mini-action" title="查看详情" @click="openDetails(item.id)"><Activity :size="16" /></button>
                   <button class="icon-button mini-action" title="编辑连接" @click="openEdit(item)"><Edit3 :size="16" /></button>
                   <button class="icon-button mini-action" title="立即同步" :disabled="!item.enabled || syncingId === item.id" @click="syncConnection(item.id)"><RefreshCw :size="16" :class="{ spin: syncingId === item.id }" /></button>
@@ -788,6 +827,10 @@ onMounted(async () => {
           <label>低余额告警阈值<input v-model="editor.lowBalanceThreshold" type="number" min="0" step="any" placeholder="不设置则不告警" /></label>
           <label class="toggle-field"><input v-model="editor.enabled" type="checkbox" /><span><strong>启用连接</strong><small>纳入定时读取</small></span></label>
           <label class="toggle-field"><input v-model="editor.activeCheckEnabled" type="checkbox" /><span><strong>巡检可用密钥</strong><small>只检测，不写入上游</small></span></label>
+        </div>
+        <div class="form-note supplier-note-editor">
+          供应商备注
+          <textarea v-model="editor.supplierNotes" rows="3" maxlength="2000" placeholder="记录采购联系人、价格说明或其他内部备注"></textarea>
         </div>
         <div class="form-section">
           <div class="form-section-head">
@@ -825,6 +868,7 @@ onMounted(async () => {
           <div class="detail-actionbar">
             <div><span class="status-pill" :class="statusClass(detail.connection.connectionStatus)">{{ statusLabel(detail.connection.connectionStatus) }}</span><span>{{ connectionHint(detail.connection) }}</span></div>
             <div class="row-actions">
+              <button class="secondary-button danger-action" :disabled="deletingResource === `connection:${detail.connection.id}`" @click="deleteConnection(detail.connection)"><Trash2 :size="16" />删除供应商</button>
               <button class="secondary-button" @click="openEdit(detail.connection)"><Settings2 :size="16" />编辑连接</button>
               <button class="primary-button" :disabled="!detail.connection.enabled || syncingId === detail.connection.id" @click="syncConnection(detail.connection.id)"><RefreshCw :size="16" :class="{ spin: syncingId === detail.connection.id }" />立即同步</button>
             </div>
@@ -846,7 +890,7 @@ onMounted(async () => {
           <section v-if="detailTab === 'keys'" class="detail-section">
             <div class="detail-section-head"><div><h3>API 密钥库存</h3><p>仅展示上游返回的脱敏标识；账号关联后自动使用该密钥的上游倍率。</p></div><button class="secondary-button" @click="openSupplierProfitGuardEditor"><Settings2 :size="16" />统一利润保护</button></div>
             <div class="table-wrap compact-table">
-              <table><thead><tr><th>密钥</th><th>状态</th><th>分组 / 倍率</th><th>额度</th><th>最近巡检</th><th>本地账号</th></tr></thead>
+              <table><thead><tr><th>密钥</th><th>状态</th><th>分组 / 倍率</th><th>额度</th><th>最近巡检</th><th>本地账号</th><th>操作</th></tr></thead>
                 <tbody>
                   <tr v-for="key in visibleKeys" :key="key.id">
                     <td><strong>{{ key.name || key.maskedKey || `密钥 #${key.id}` }}</strong><small>{{ key.maskedKey || key.externalId || '--' }} · ID {{ key.externalId || '--' }}</small></td>
@@ -866,8 +910,11 @@ onMounted(async () => {
                       </div>
                       <button v-if="!key.removedAt" class="small-button link-account-button" @click="openLinkPicker(key)"><Link2 :size="14" />关联账号</button>
                     </td>
+                    <td>
+                      <button class="icon-button mini-action danger-action" title="删除供应商密钥" :disabled="deletingResource === `key:${key.id}`" @click="deleteKey(key)"><Trash2 :size="15" /></button>
+                    </td>
                   </tr>
-                  <tr v-if="!visibleKeys.length"><td colspan="6" class="table-empty">本次同步没有返回可用密钥</td></tr>
+                  <tr v-if="!visibleKeys.length"><td colspan="7" class="table-empty">本次同步没有返回可用密钥</td></tr>
                 </tbody>
               </table>
             </div>

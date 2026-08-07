@@ -196,6 +196,7 @@ export class DemoRepository {
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
     this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
     this.supplierConnections = [{
+      supplierNotes: '',
       id: 1, supplierId: 1, supplierName: 'Cloud Seats', name: '主账号', adapterType: 'sub2api',
       detectedAdapterType: 'sub2api', baseUrl: 'https://supplier.example.com', authMode: 'access_token',
       credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true,
@@ -871,6 +872,7 @@ export class DemoRepository {
       id: Math.max(0, ...this.supplierConnections.map((item) => Number(item.id) || 0)) + 1,
       supplierId: sameSupplier?.supplierId || Math.max(0, ...this.supplierConnections.map((item) => Number(item.supplierId) || 0)) + 1,
       supplierName: input.supplierName,
+      supplierNotes: input.supplierNotes || '',
       name: input.name,
       adapterType: input.adapterType,
       detectedAdapterType: '',
@@ -916,6 +918,7 @@ export class DemoRepository {
     Object.assign(connection, {
       supplierId: supplier?.supplierId || connection.supplierId,
       supplierName: input.supplierName,
+      supplierNotes: input.supplierNotes || '',
       name: input.name,
       adapterType: input.adapterType,
       detectedAdapterType: '',
@@ -951,6 +954,85 @@ export class DemoRepository {
     }
     this.refreshSupplierConnectionStats(connection);
     return copySupplierConnection(connection);
+  }
+
+  async getSupplierConnectionDeletionPlan(connectionId) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    const detail = this.supplierDetail(connectionId);
+    return {
+      connectionId: Number(connection.id),
+      supplierId: Number(connection.supplierId),
+      supplierName: connection.supplierName,
+      accountIds: detail.keys.flatMap((key) => (key.accountLinks || []).map((link) => Number(link.accountId))),
+    };
+  }
+
+  async getSupplierKeyDeletionPlan(keyId) {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    return {
+      keyId: Number(keyId),
+      connectionId: Number(match.connection.id),
+      keyName: match.key.name || match.key.externalId || '',
+      accountIds: (match.key.accountLinks || []).map((link) => Number(link.accountId)),
+    };
+  }
+
+  clearDemoAccountSupplier(accountId) {
+    const account = this.accounts.find((item) => Number(item.id) === Number(accountId));
+    if (!account) return;
+    account.supplier = '';
+    account.purchaseBatch = '';
+    account.supplierKeyId = null;
+    account.supplierKeyName = '';
+    account.supplierKeyMasked = '';
+    account.supplierKeyGroupName = '';
+    account.supplierConnectionId = null;
+    account.supplierConnectionName = '';
+    account.linkedSupplierName = '';
+    account.upstreamMultiplier = null;
+    account.upstreamMultiplierSource = '';
+    this.accountProfitGuardPolicies.delete(Number(accountId));
+  }
+
+  async deleteSupplierConnection(connectionId) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    const detail = this.supplierDetail(connectionId);
+    const accountIds = [...new Set(detail.keys.flatMap((key) => (
+      (key.accountLinks || []).map((link) => Number(link.accountId))
+    )))];
+    accountIds.forEach((accountId) => this.clearDemoAccountSupplier(accountId));
+    this.supplierQualityTargets = this.supplierQualityTargets.filter((target) => Number(target.connectionId) !== Number(connectionId));
+    this.supplierQualityObservations = this.supplierQualityObservations.filter((item) => Number(item.connectionId) !== Number(connectionId));
+    this.supplierConnectionDetails.delete(Number(connectionId));
+    this.supplierProfitGuardDefaults.delete(Number(connectionId));
+    this.supplierConnections = this.supplierConnections.filter((item) => Number(item.id) !== Number(connectionId));
+    return {
+      connectionId: Number(connectionId),
+      supplierId: Number(connection.supplierId),
+      supplierName: connection.supplierName,
+      deleted: true,
+    };
+  }
+
+  async deleteSupplierKey(keyId) {
+    const match = this.findSupplierKey(keyId);
+    if (!match) throw Object.assign(new Error('supplier key not found'), { statusCode: 404 });
+    const accountIds = [...new Set((match.key.accountLinks || []).map((link) => Number(link.accountId)))];
+    accountIds.forEach((accountId) => this.clearDemoAccountSupplier(accountId));
+    this.supplierQualityTargets = this.supplierQualityTargets.filter((target) => Number(target.keyId) !== Number(keyId));
+    this.supplierQualityObservations = this.supplierQualityObservations.filter((item) => Number(item.keyId) !== Number(keyId));
+    match.detail.keys = match.detail.keys.filter((key) => Number(key.id) !== Number(keyId));
+    this.refreshSupplierConnectionStats(match.connection);
+    return {
+      keyId: Number(keyId),
+      connectionId: Number(match.connection.id),
+      supplierName: match.connection.supplierName,
+      keyName: match.key.name || match.key.externalId || '',
+      deleted: true,
+    };
   }
 
   async updateSupplierConnectionAccessToken(connectionId, credentialsCiphertext) {

@@ -68,11 +68,15 @@ export class Sub2ApiReadonlyGateway {
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
-        let raw = null;
-        try { raw = await response.json(); } catch { throw new Error('sub2api returned invalid JSON'); }
+        const responseText = await response.text();
+        let raw = {};
+        if (responseText.trim()) {
+          try { raw = JSON.parse(responseText); } catch { throw new Error('sub2api returned invalid JSON'); }
+        }
         if (!response.ok || (Object.hasOwn(raw, 'code') && raw.code !== 0)) {
-          throw Object.assign(new Error('sub2api administrator API request failed'), {
-            statusCode: response.status >= 500 ? 503 : response.status,
+          throw Object.assign(new Error(raw?.message || raw?.error || 'sub2api administrator API request failed'), {
+            statusCode: response.status >= 500 ? 503 : response.status || 502,
+            httpStatus: response.status,
           });
         }
         return Object.hasOwn(raw, 'data') ? raw.data : raw;
@@ -131,6 +135,19 @@ export class Sub2ApiReadonlyGateway {
       cache: false,
     });
     this.invalidate(`account:${Number(accountId)}`, 'accounts:', 'groups:');
+    return payload?.account || payload;
+  }
+
+  async deleteAccount(accountId) {
+    const normalizedId = Number(accountId);
+    if (!Number.isSafeInteger(normalizedId) || normalizedId <= 0) {
+      throw Object.assign(new Error('invalid Sub2API account id'), { statusCode: 400 });
+    }
+    const payload = await this.request(`/api/v1/admin/accounts/${normalizedId}`, {
+      method: 'DELETE',
+      cache: false,
+    });
+    this.invalidate(`account:${normalizedId}`, 'accounts:', 'groups:');
     return payload?.account || payload;
   }
 

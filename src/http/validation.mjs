@@ -232,6 +232,7 @@ export function normalizeSupplierConnection(input) {
     ? input.credentials : {};
   return {
     supplierName: textValue(input.supplierName, 'supplierName', { max: 160 }),
+    supplierNotes: textValue(input.supplierNotes ?? input.notes, 'supplierNotes', { required: false, max: 2000 }),
     name: textValue(input.name, 'name', { max: 160 }),
     adapterType,
     baseUrl: textValue(input.baseUrl, 'baseUrl', { max: 1000 }),
