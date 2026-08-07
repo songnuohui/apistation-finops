@@ -1121,6 +1121,19 @@ export class DemoRepository {
         const haystack = `${connection.supplierName} ${connection.name} ${connection.baseUrl} ${key.name} ${key.maskedKey}`.toLowerCase();
         if (term && !haystack.includes(term)) continue;
         const links = key.accountLinks || [];
+        const policies = links
+          .map((link) => this.accountProfitGuardPolicies.get(Number(link.accountId)))
+          .filter(Boolean);
+        const accounts = links
+          .map((link) => this.accounts.find((account) => Number(account.id) === Number(link.accountId)))
+          .filter(Boolean);
+        const enabledPolicies = policies.filter((policy) => policy.enabled);
+        const autoAssignPolicies = policies.filter((policy) => (
+          policy.autoAssignEnabled
+          && policy.targetMarginMin !== null && policy.targetMarginMin !== undefined
+          && policy.targetMarginMax !== null && policy.targetMarginMax !== undefined
+        ));
+        const thresholdModes = [...new Set(enabledPolicies.map((policy) => policy.thresholdMode || 'margin'))];
         items.push({
           id: Number(key.id), connectionId: Number(connection.id), supplierName: connection.supplierName || '',
           connectionName: connection.name || '', baseUrl: connection.baseUrl || '',
@@ -1133,7 +1146,17 @@ export class DemoRepository {
           lastCheckStatus: key.lastCheckStatus || 'pending', lastCheckMethod: key.lastCheckMethod || '',
           lastCheckAt: key.lastCheckAt || null, lastCheckError: key.lastCheckError || '',
           accountCount: links.length,
-          profitGuardAccountCount: links.filter((link) => this.accountProfitGuardPolicies.get(Number(link.accountId))?.enabled).length,
+          profitGuardAccountCount: enabledPolicies.length,
+          usageRequestCount: accounts.reduce((total, account) => total + Number(account.requests || 0), 0),
+          usageTokenCount: accounts.reduce((total, account) => total + Number(account.tokens || 0), 0),
+          minimumMarginMin: enabledPolicies.length ? Math.min(...enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))) : null,
+          minimumMarginMax: enabledPolicies.length ? Math.max(...enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))) : null,
+          minimumMarginVariantCount: new Set(enabledPolicies.map((policy) => Number(policy.minimumMargin || 0))).size,
+          profitGuardThresholdMode: thresholdModes.length === 1 ? thresholdModes[0] : null,
+          thresholdModeVariantCount: thresholdModes.length,
+          targetMarginMinMin: autoAssignPolicies.length ? Math.min(...autoAssignPolicies.map((policy) => Number(policy.targetMarginMin))) : null,
+          targetMarginMaxMax: autoAssignPolicies.length ? Math.max(...autoAssignPolicies.map((policy) => Number(policy.targetMarginMax))) : null,
+          targetMarginVariantCount: new Set(autoAssignPolicies.map((policy) => `${policy.targetMarginMin}:${policy.targetMarginMax}`)).size,
         });
       }
     }

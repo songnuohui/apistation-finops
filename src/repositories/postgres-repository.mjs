@@ -3959,14 +3959,31 @@ export class PostgresRepository {
              k.last_used_at,k.last_check_status,k.last_check_method,k.last_check_at,k.last_check_error,
              c.name AS connection_name,c.base_url,c.adapter_type,c.detected_adapter_type,
              s.name AS supplier_name,
-             COUNT(l.source_account_id)::int AS account_count,
-             COUNT(l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
+             COUNT(DISTINCT l.source_account_id)::int AS account_count,
+             COUNT(DISTINCT l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
+             COUNT(DISTINCT f.source_usage_id)::int AS usage_request_count,
+             COALESCE(SUM(
+               COALESCE(f.input_tokens,0)
+               + COALESCE(f.output_tokens,0)
+               + COALESCE(f.cache_creation_tokens,0)
+               + COALESCE(f.cache_read_tokens,0)
+             ),0)::numeric AS usage_token_count,
+             MIN(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_min,
+             MAX(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_max,
+             COUNT(DISTINCT p.minimum_margin) FILTER (WHERE p.enabled)::int AS minimum_margin_variant_count,
+             MIN(p.threshold_mode) FILTER (WHERE p.enabled) AS profit_guard_threshold_mode,
+             COUNT(DISTINCT p.threshold_mode) FILTER (WHERE p.enabled)::int AS threshold_mode_variant_count,
+             MIN(p.target_margin_min) FILTER (WHERE p.auto_assign_enabled) AS target_margin_min_min,
+             MAX(p.target_margin_max) FILTER (WHERE p.auto_assign_enabled) AS target_margin_max_max,
+             COUNT(DISTINCT (p.target_margin_min,p.target_margin_max))
+               FILTER (WHERE p.auto_assign_enabled)::int AS target_margin_variant_count,
              COUNT(*) OVER()::int AS total_count
       FROM ${this.schema}.supplier_keys k
       JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
       LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
       LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
+      LEFT JOIN ${this.schema}.fact_usage_events f ON f.source_account_id=l.source_account_id
       WHERE ($1='' OR k.name ILIKE '%'||$1||'%' OR k.masked_key ILIKE '%'||$1||'%'
         OR s.name ILIKE '%'||$1||'%' OR c.name ILIKE '%'||$1||'%' OR c.base_url ILIKE '%'||$1||'%')
         AND ($2='' OR s.name=$2)
@@ -4009,6 +4026,16 @@ export class PostgresRepository {
         lastCheckError: row.last_check_error || '',
         accountCount: Number(row.account_count || 0),
         profitGuardAccountCount: Number(row.profit_guard_account_count || 0),
+        usageRequestCount: Number(row.usage_request_count || 0),
+        usageTokenCount: Number(row.usage_token_count || 0),
+        minimumMarginMin: nullableNumber(row.minimum_margin_min),
+        minimumMarginMax: nullableNumber(row.minimum_margin_max),
+        minimumMarginVariantCount: Number(row.minimum_margin_variant_count || 0),
+        profitGuardThresholdMode: row.profit_guard_threshold_mode || null,
+        thresholdModeVariantCount: Number(row.threshold_mode_variant_count || 0),
+        targetMarginMinMin: nullableNumber(row.target_margin_min_min),
+        targetMarginMaxMax: nullableNumber(row.target_margin_max_max),
+        targetMarginVariantCount: Number(row.target_margin_variant_count || 0),
       })), page, pageSize),
       suppliers: supplierResult.rows.map((row) => row.name || '').filter(Boolean),
     };

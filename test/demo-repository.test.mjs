@@ -236,6 +236,10 @@ test('supplier key listing supports supplier filters and pagination', async () =
   assert.equal(filtered.total, 4);
   assert.ok(filtered.items.every((item) => item.supplierName === 'Cloud Seats'));
   assert.deepEqual(filtered.suppliers, ['Cloud Seats']);
+  assert.ok('usageRequestCount' in firstPage.items[0]);
+  assert.ok('usageTokenCount' in firstPage.items[0]);
+  assert.ok('minimumMarginVariantCount' in firstPage.items[0]);
+  assert.ok('targetMarginVariantCount' in firstPage.items[0]);
 });
 
 test('supplier key batch profit guard updates only linked accounts', async () => {

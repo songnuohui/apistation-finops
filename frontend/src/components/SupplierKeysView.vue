@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Activity, Check, CheckSquare, ExternalLink, KeyRound, RefreshCw, Search, Square, Trash2, X } from 'lucide-vue-next';
+import { Activity, Check, CheckSquare, ExternalLink, KeyRound, Pencil, RefreshCw, Search, Square, Trash2, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -54,6 +54,36 @@ function dateTime(value: any) {
 function multiplier(value: any) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? `${parsed.toFixed(4).replace(/\.?0+$/, '')}x` : '--';
+}
+function compactNumber(value: any) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return '0';
+  return parsed >= 1_000_000
+    ? `${(parsed / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+    : parsed >= 1_000
+      ? `${(parsed / 1_000).toFixed(1).replace(/\.0$/, '')}K`
+      : parsed.toLocaleString('zh-CN');
+}
+function percentText(value: any) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(1).replace(/\.0$/, '')}%` : '--';
+}
+function profitRangeText(row: AnyRecord) {
+  if (Number(row.targetMarginVariantCount || 0) > 1) return '混合配置';
+  if (row.targetMarginMinMin !== null && row.targetMarginMinMin !== undefined
+    && row.targetMarginMaxMax !== null && row.targetMarginMaxMax !== undefined) {
+    return `${percentText(row.targetMarginMinMin)} - ${percentText(row.targetMarginMaxMax)}`;
+  }
+  return row.accountCount ? '未启用自动归组' : '未配置';
+}
+function minimumMarginText(row: AnyRecord) {
+  if (Number(row.thresholdModeVariantCount || 0) > 1) return '混合配置';
+  if (row.profitGuardThresholdMode === 'minimum_sale_multiplier') return '成本倍率触发';
+  if (Number(row.minimumMarginVariantCount || 0) > 1) return '混合配置';
+  if (row.minimumMarginMin !== null && row.minimumMarginMin !== undefined) {
+    return `≥ ${percentText(row.minimumMarginMin)}`;
+  }
+  return row.accountCount ? '未配置' : '--';
 }
 function quota(row: AnyRecord) {
   if (row.quotaRemaining !== null && row.quotaRemaining !== undefined) {
@@ -111,8 +141,13 @@ async function load() {
 async function openDetails(id: number) {
   detailLoading.value = true;
   selectedAccountIds.value = [];
-  try { detail.value = await get(`/supplier-keys/${id}/details`); }
-  catch (error: any) { notify(error.message); }
+  try {
+    detail.value = await get(`/supplier-keys/${id}/details`);
+    return detail.value;
+  } catch (error: any) {
+    notify(error.message);
+    return null;
+  }
   finally { detailLoading.value = false; }
 }
 function openConnection(id: number) {
@@ -137,6 +172,16 @@ function openBatchEditor() {
   }
   const first = detail.value.accounts.find((item: AnyRecord) => Number(item.id) === selectedAccountIds.value[0]);
   batchEditor.value = policySeed(first || null);
+}
+async function openProfitEditor(id: number) {
+  const loaded = await openDetails(id);
+  const accountIds = (loaded?.accounts || []).map((item: AnyRecord) => Number(item.id));
+  if (!accountIds.length) {
+    notify('当前密钥没有关联账号，无法修改利润控制');
+    return;
+  }
+  selectedAccountIds.value = accountIds;
+  openBatchEditor();
 }
 async function saveBatchProfitGuard() {
   if (!detail.value || !batchEditor.value || !selectedCount.value) return;
@@ -213,21 +258,24 @@ onMounted(load);
     <section class="panel table-panel">
       <div class="panel-head"><div><h2>上游供应商密钥</h2><p>支持供应商筛选、分页查看、关联账号分组详情和批量利润控制。</p></div><KeyRound :size="20" class="head-icon" /></div>
       <div class="table-wrap">
-        <table class="supplier-table">
-          <thead><tr><th>密钥 / 供应商</th><th>上游地址</th><th>上游分组 / 倍率</th><th>状态 / 巡检</th><th>额度</th><th>关联账号</th><th>最近同步</th><th>操作</th></tr></thead>
+        <table class="supplier-key-table">
+          <thead><tr><th>供应商</th><th>上游地址</th><th>密钥名称</th><th>倍率</th><th>利润控制区间</th><th>最低毛利率控制</th><th>状态</th><th>使用量</th><th>关联账号个数</th><th>最近同步时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-if="loading && !rows.length"><td colspan="8" class="table-empty">正在读取供应商密钥</td></tr>
+            <tr v-if="loading && !rows.length"><td colspan="11" class="table-empty">正在读取供应商密钥</td></tr>
             <tr v-for="row in rows" :key="row.id">
-              <td><button class="link-button supplier-name-button" @click="openDetails(row.id)">{{ row.name || row.maskedKey || `密钥 #${row.id}` }}</button><small>{{ row.supplierName }} · {{ row.connectionName }}</small><small>{{ row.maskedKey || row.externalId || '--' }}</small></td>
+              <td class="supplier-cell"><strong>{{ row.supplierName || '--' }}</strong><small>{{ row.connectionName || '--' }}</small></td>
               <td class="supplier-address"><span class="supplier-cell-text" :title="row.baseUrl">{{ row.baseUrl || '--' }}</span></td>
-              <td><strong>{{ row.groupName || '未分组' }}</strong><small>{{ multiplier(row.rateMultiplier) }}</small></td>
-              <td><span class="status-pill" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span><small><span class="status-pill" :class="statusClass(row.lastCheckStatus)">{{ statusLabel(row.lastCheckStatus) }}</span> {{ dateTime(row.lastCheckAt) }}</small></td>
-              <td><strong>{{ quota(row) }}</strong><small>{{ row.expiresAt ? `到期 ${dateTime(row.expiresAt)}` : '无到期信息' }}</small></td>
-              <td><strong>{{ row.accountCount }} 个</strong><small>{{ row.profitGuardAccountCount }} 个已启用利润控制</small></td>
-              <td>{{ dateTime(row.lastCheckAt) }}</td>
-              <td><div class="row-actions"><button class="icon-button mini-action" title="查看密钥详情" @click="openDetails(row.id)"><Activity :size="16" /></button><button class="icon-button mini-action danger-action" title="删除供应商密钥" :disabled="deleting === row.id" @click="deleteKey(row)"><Trash2 :size="16" /></button></div></td>
+              <td class="key-name-cell"><strong>{{ row.name || row.maskedKey || `密钥 #${row.id}` }}</strong><small>{{ row.maskedKey || row.externalId || '--' }}</small></td>
+              <td class="multiplier-cell"><strong>{{ multiplier(row.rateMultiplier) }}</strong><small>{{ row.groupName || '未分组' }}</small></td>
+              <td class="profit-range-cell"><strong>{{ profitRangeText(row) }}</strong><small>{{ row.profitGuardAccountCount ? `${row.profitGuardAccountCount} 个账号已启用自动控制` : '未配置自动归组' }}</small></td>
+              <td class="minimum-margin-cell"><strong>{{ minimumMarginText(row) }}</strong><small>{{ row.profitGuardAccountCount ? `${row.profitGuardAccountCount} 个账号已启用` : '未配置' }}</small></td>
+              <td class="status-cell"><span class="status-pill" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span><small><span class="status-pill" :class="statusClass(row.lastCheckStatus)">{{ statusLabel(row.lastCheckStatus) }}</span></small></td>
+              <td class="usage-cell"><strong>{{ compactNumber(row.usageRequestCount) }} 请求</strong><small>{{ compactNumber(row.usageTokenCount) }} Token</small></td>
+              <td class="account-count-cell"><button class="link-button account-count-button" @click="openDetails(row.id)"><strong>{{ row.accountCount }} 个</strong></button><small>{{ row.profitGuardAccountCount }} 个已启用利润控制</small></td>
+              <td class="sync-cell">{{ dateTime(row.lastCheckAt) }}</td>
+              <td><div class="row-actions supplier-row-actions"><button class="icon-button mini-action" title="查看详情" aria-label="查看详情" @click="openDetails(row.id)"><Activity :size="16" /></button><button class="icon-button mini-action" title="修改相关利润" aria-label="修改相关利润" @click="openProfitEditor(row.id)"><Pencil :size="16" /></button><button class="icon-button mini-action danger-action" title="删除密钥" aria-label="删除密钥" :disabled="deleting === row.id" @click="deleteKey(row)"><Trash2 :size="16" /></button></div></td>
             </tr>
-            <tr v-if="!loading && !rows.length"><td colspan="8" class="table-empty">没有找到供应商密钥</td></tr>
+            <tr v-if="!loading && !rows.length"><td colspan="11" class="table-empty">没有找到供应商密钥</td></tr>
           </tbody>
         </table>
       </div>
