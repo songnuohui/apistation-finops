@@ -759,19 +759,19 @@ onMounted(async () => {
       </div>
       <div class="table-wrap">
         <table class="supplier-table">
-          <thead><tr><th>供应商 / 连接</th><th>连接状态</th><th class="number">余额</th><th>密钥 / 异常</th><th>告警</th><th>最近同步</th><th>操作</th></tr></thead>
+          <thead><tr><th>供应商 / 连接</th><th>供应商地址</th><th>备注</th><th>连接状态</th><th class="number">余额</th><th>密钥 / 异常</th><th>告警</th><th>最近同步</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-if="loading && !items.length"><td colspan="7" class="table-empty">正在读取供应商连接</td></tr>
+            <tr v-if="loading && !items.length"><td colspan="9" class="table-empty">正在读取供应商连接</td></tr>
             <tr v-for="item in items" :key="item.id">
               <td>
                 <button class="link-button supplier-name-button" @click="openDetails(item.id)">
                   {{ item.supplierName || '未命名供应商' }}
                 </button>
                 <small>{{ item.name || '默认连接' }} · {{ adapterLabel(item.detectedAdapterType || item.adapterType) }} · {{ authLabel(item.authMode) }}</small>
-                <small class="supplier-url">{{ item.baseUrl || '--' }}</small>
-                <small v-if="item.supplierNotes" class="supplier-note">{{ item.supplierNotes }}</small>
                 <small :class="{ 'profit-guard-on': item.profitGuardEnabled, 'profit-guard-missing': !item.profitGuardEnabled }">利润保护：{{ item.profitGuardEnabled ? '已启用' : item.profitGuardConfigured ? '已关闭' : '未配置' }}</small>
               </td>
+              <td class="supplier-address"><span class="supplier-cell-text" :title="item.baseUrl || ''">{{ item.baseUrl || '--' }}</span></td>
+              <td class="supplier-notes"><span class="supplier-cell-text" :title="item.supplierNotes || ''">{{ item.supplierNotes || '--' }}</span></td>
               <td>
                 <span class="status-pill" :class="statusClass(item.connectionStatus)">{{ statusLabel(item.connectionStatus) }}</span>
                 <small>{{ connectionHint(item) }}</small>
@@ -801,7 +801,7 @@ onMounted(async () => {
                 </div>
               </td>
             </tr>
-            <tr v-if="!loading && !items.length"><td colspan="7" class="table-empty">没有找到供应商连接</td></tr>
+            <tr v-if="!loading && !items.length"><td colspan="9" class="table-empty">没有找到供应商连接</td></tr>
           </tbody>
         </table>
       </div>
