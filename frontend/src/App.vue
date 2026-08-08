@@ -259,9 +259,15 @@ watch(search, () => {
   }, 280);
   return () => window.clearTimeout(timer);
 });
+watch([detail, accountEditor, supplierEditor], syncBodyScrollLock);
 onMounted(async () => {
+  window.addEventListener('keydown', onKeydown);
   await loadSession();
   await loadPage();
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  document.body.style.overflow = '';
 });
 
 const overviewSummary = computed(() => overview.value.summary || {});
@@ -279,11 +285,23 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
   const bv = Number(b.score?.[qualitySort.value] ?? b[qualitySort.value] ?? -1);
   return qualityDirection.value === 'desc' ? bv - av : av - bv;
 }));
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  mobileOpen.value = false;
+  detail.value = null;
+  accountEditor.value = null;
+  supplierEditor.value = null;
+}
+
+function syncBodyScrollLock() {
+  document.body.style.overflow = detail.value || accountEditor.value || supplierEditor.value ? 'hidden' : '';
+}
 </script>
 
 <template>
   <div class="app-shell">
-    <aside class="sidebar" :class="{ open: mobileOpen }">
+    <aside class="sidebar" :class="{ open: mobileOpen }" aria-label="主导航">
       <div class="brand">
         <div class="brand-mark">AF</div>
         <div><strong>ApiStation FinOps</strong><small>成本与用量中心</small></div>
@@ -291,43 +309,46 @@ const qualityRows = computed(() => [...(quality.value.items || [])].sort((a, b) 
       <nav class="nav">
         <template v-for="group in ['经营分析', '资源与成本']" :key="group">
           <p class="nav-label">{{ group }}</p>
-          <button v-for="item in nav.filter((navItem) => navItem.group === group)" :key="item.id" class="nav-item" :class="{ active: page === item.id }" @click="navigate(item.id)">
+          <button v-for="item in nav.filter((navItem) => navItem.group === group)" :key="item.id" class="nav-item" :class="{ active: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="navigate(item.id)">
             <component :is="item.icon" :size="18" stroke-width="1.8" /><span>{{ item.label }}</span>
           </button>
         </template>
       </nav>
       <div class="sidebar-bottom">
         <div class="sync-state"><span class="online-dot"></span><div><strong>FinOps 已连接</strong><small>数据独立存储</small></div></div>
-        <button class="secondary-button full" @click="refresh"><RefreshCw :size="16" />刷新数据</button>
+        <button class="secondary-button full" type="button" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading }" />刷新数据</button>
       </div>
     </aside>
     <div v-if="mobileOpen" class="mobile-backdrop" @click="mobileOpen = false"></div>
     <main class="main">
       <header class="topbar">
         <div class="heading">
-          <button class="icon-button mobile-menu" title="打开菜单" @click="mobileOpen = true"><Menu :size="20" /></button>
+          <button class="icon-button mobile-menu" type="button" title="打开菜单" aria-label="打开菜单" @click="mobileOpen = true"><Menu :size="20" /></button>
           <div><span class="eyebrow">管理控制台 · 财务核算</span><h1>{{ title }}</h1><p>{{ subtitle }}</p></div>
         </div>
         <div class="toolbar">
-          <div class="range-picker">
-            <button v-for="item in [['today','今天'],['7d','近 7 天'],['30d','近 30 天'],['month','本月']]" :key="item[0]" :class="{ active: range === item[0] }" @click="range = item[0]">{{ item[1] }}</button>
-            <button class="custom-range-trigger" :class="{ active: range === 'custom' }" title="自定义时间" @click="range = 'custom'"><CalendarDays :size="14" />自定义</button>
+          <div class="range-control">
+            <span class="toolbar-label">数据范围</span>
+            <div class="range-picker" role="group" aria-label="数据范围">
+              <button v-for="item in [['today','今天'],['7d','近 7 天'],['30d','近 30 天'],['month','本月']]" :key="item[0]" type="button" :class="{ active: range === item[0] }" @click="range = item[0]">{{ item[1] }}</button>
+              <button class="custom-range-trigger" type="button" :class="{ active: range === 'custom' }" title="自定义时间" @click="range = 'custom'"><CalendarDays :size="14" />自定义</button>
+            </div>
           </div>
           <div v-if="range === 'custom'" class="custom-range-fields">
             <label><span>开始</span><input v-model="customStart" type="date" /></label>
             <span class="custom-range-separator">至</span>
             <label><span>结束</span><input v-model="customEnd" type="date" /></label>
           </div>
-          <button class="icon-button" title="刷新" @click="refresh"><RefreshCw :size="18" /></button>
+          <button class="icon-button" type="button" title="刷新" aria-label="刷新" @click="refresh"><RefreshCw :size="18" :class="{ spin: loading }" /></button>
           <div class="user-chip">
             <span class="avatar"><Users :size="17" /></span>
             <span><strong>{{ sessionUser?.username || sessionUser?.email || '财务管理员' }}</strong><small>{{ sessionUser?.email || 'admin' }}</small></span>
-            <button class="icon-button mini" title="退出登录" @click="logout"><LogOut :size="16" /></button>
+            <button class="icon-button mini" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="16" /></button>
           </div>
         </div>
       </header>
       <section class="page-content">
-        <div v-if="toast" class="toast">{{ toast }}</div>
+        <div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div>
         <OverviewView v-if="page === 'overview'" :refresh-token="overviewRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <div class="metric-grid">
