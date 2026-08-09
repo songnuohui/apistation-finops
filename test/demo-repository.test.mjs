@@ -275,6 +275,28 @@ test('supplier key batch profit guard updates only linked accounts', async () =>
   assert.equal((await repository.getSupplierKeyDetails(1)).accounts[0].profitGuard.updatedBy, 'bulk-admin');
 });
 
+test('supplier connection coverage includes account-level profit guard policies', async () => {
+  const repository = new DemoRepository(config);
+  await repository.upsertSupplierKeyProfitGuard(1, [2745], {
+    enabled: true,
+    minimumMargin: 0.2,
+    thresholdMode: 'margin',
+    minimumSaleMultiplier: null,
+    allowEmptyGroups: true,
+    autoAssignEnabled: false,
+    targetMarginMin: null,
+    targetMarginMax: null,
+  }, 'account-admin');
+
+  const connection = (await repository.listSupplierConnections()).items.find((item) => item.id === 1);
+  assert.equal(connection.linkedAccountCount, 1);
+  assert.equal(connection.profitGuardConfiguredAccountCount, 1);
+  assert.equal(connection.profitGuardAccountCount, 1);
+  assert.equal(connection.profitGuardConfigured, true);
+  assert.equal(connection.profitGuardEnabled, true);
+  assert.equal(connection.profitGuardFullyEnabled, true);
+});
+
 test('supplier profit guard defaults apply to existing and newly linked accounts', async () => {
   const repository = new DemoRepository(config);
   const applied = await repository.upsertSupplierProfitGuardDefault(1, {

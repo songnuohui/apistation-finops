@@ -55,6 +55,10 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     openAlertCount: Number(row.open_alert_count || 0),
     profitGuardConfigured: Boolean(row.profit_guard_configured),
     profitGuardEnabled: Boolean(row.profit_guard_enabled),
+    profitGuardFullyEnabled: Boolean(row.profit_guard_fully_enabled),
+    linkedAccountCount: Number(row.linked_account_count || 0),
+    profitGuardConfiguredAccountCount: Number(row.profit_guard_configured_account_count || 0),
+    profitGuardAccountCount: Number(row.profit_guard_account_count || 0),
     updatedAt: row.updated_at || null,
   };
   if (includeCiphertext) result.credentialsCiphertext = row.credentials_ciphertext || '';
@@ -2936,12 +2940,34 @@ export class PostgresRepository {
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
              COALESCE(alerts.open_alert_count,0)::int AS open_alert_count,
-             (profit_guard.connection_id IS NOT NULL) AS profit_guard_configured,
-             COALESCE(profit_guard.enabled,FALSE) AS profit_guard_enabled
+             COALESCE(guard_accounts.linked_account_count,0)::int AS linked_account_count,
+             COALESCE(guard_accounts.configured_account_count,0)::int AS profit_guard_configured_account_count,
+             COALESCE(guard_accounts.enabled_account_count,0)::int AS profit_guard_account_count,
+             (profit_guard.connection_id IS NOT NULL
+               OR COALESCE(guard_accounts.configured_account_count,0)>0) AS profit_guard_configured,
+             (COALESCE(profit_guard.enabled,FALSE)
+               OR COALESCE(guard_accounts.enabled_account_count,0)>0) AS profit_guard_enabled,
+             (COALESCE(profit_guard.enabled,FALSE)
+               OR (COALESCE(guard_accounts.linked_account_count,0)>0
+                 AND guard_accounts.enabled_account_count=guard_accounts.linked_account_count)) AS profit_guard_fully_enabled
        FROM ${this.schema}.supplier_connections c
        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
        LEFT JOIN ${this.schema}.supplier_profit_guard_defaults profit_guard
          ON profit_guard.connection_id=c.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(DISTINCT links.source_account_id)::int AS linked_account_count,
+               COUNT(DISTINCT links.source_account_id) FILTER (
+                 WHERE policies.source_account_id IS NOT NULL
+               )::int AS configured_account_count,
+               COUNT(DISTINCT links.source_account_id) FILTER (
+                 WHERE policies.enabled
+               )::int AS enabled_account_count
+        FROM ${this.schema}.supplier_keys guard_keys
+        JOIN ${this.schema}.supplier_account_links links ON links.supplier_key_id=guard_keys.id
+        LEFT JOIN ${this.schema}.account_profit_guard_policies policies
+          ON policies.source_account_id=links.source_account_id
+        WHERE guard_keys.connection_id=c.id AND guard_keys.removed_at IS NULL
+      ) guard_accounts ON TRUE
       LEFT JOIN LATERAL (
         SELECT balance FROM ${this.schema}.supplier_balance_snapshots
         WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1
@@ -2969,12 +2995,34 @@ export class PostgresRepository {
              COALESCE(keys.active_key_count,0)::int AS active_key_count,
              COALESCE(keys.failed_key_count,0)::int AS failed_key_count,
              COALESCE(alerts.open_alert_count,0)::int AS open_alert_count,
-             (profit_guard.connection_id IS NOT NULL) AS profit_guard_configured,
-             COALESCE(profit_guard.enabled,FALSE) AS profit_guard_enabled
+             COALESCE(guard_accounts.linked_account_count,0)::int AS linked_account_count,
+             COALESCE(guard_accounts.configured_account_count,0)::int AS profit_guard_configured_account_count,
+             COALESCE(guard_accounts.enabled_account_count,0)::int AS profit_guard_account_count,
+             (profit_guard.connection_id IS NOT NULL
+               OR COALESCE(guard_accounts.configured_account_count,0)>0) AS profit_guard_configured,
+             (COALESCE(profit_guard.enabled,FALSE)
+               OR COALESCE(guard_accounts.enabled_account_count,0)>0) AS profit_guard_enabled,
+             (COALESCE(profit_guard.enabled,FALSE)
+               OR (COALESCE(guard_accounts.linked_account_count,0)>0
+                 AND guard_accounts.enabled_account_count=guard_accounts.linked_account_count)) AS profit_guard_fully_enabled
        FROM ${this.schema}.supplier_connections c
        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
        LEFT JOIN ${this.schema}.supplier_profit_guard_defaults profit_guard
          ON profit_guard.connection_id=c.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(DISTINCT links.source_account_id)::int AS linked_account_count,
+               COUNT(DISTINCT links.source_account_id) FILTER (
+                 WHERE policies.source_account_id IS NOT NULL
+               )::int AS configured_account_count,
+               COUNT(DISTINCT links.source_account_id) FILTER (
+                 WHERE policies.enabled
+               )::int AS enabled_account_count
+        FROM ${this.schema}.supplier_keys guard_keys
+        JOIN ${this.schema}.supplier_account_links links ON links.supplier_key_id=guard_keys.id
+        LEFT JOIN ${this.schema}.account_profit_guard_policies policies
+          ON policies.source_account_id=links.source_account_id
+        WHERE guard_keys.connection_id=c.id AND guard_keys.removed_at IS NULL
+      ) guard_accounts ON TRUE
       LEFT JOIN LATERAL (
         SELECT balance FROM ${this.schema}.supplier_balance_snapshots
         WHERE connection_id=c.id ORDER BY observed_at DESC,id DESC LIMIT 1

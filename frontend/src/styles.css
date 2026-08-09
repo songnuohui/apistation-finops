@@ -306,6 +306,8 @@ button:disabled{cursor:not-allowed!important}
 html,body,#app{max-width:100%;overflow-x:hidden}
 
 @media (max-width:760px){
+  .app-shell,.main{width:100%;min-width:0}
+  .main{margin-left:0}
   .topbar{width:100%;overflow:hidden}
   .heading{width:100%;min-width:0}
   .heading > div{min-width:0}

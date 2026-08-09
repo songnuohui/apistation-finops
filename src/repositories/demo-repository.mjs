@@ -783,25 +783,40 @@ export class DemoRepository {
     return {
       items: this.supplierConnections
         .filter((item) => `${item.supplierName} ${item.name} ${item.baseUrl}`.toLowerCase().includes(term))
-        .map((item) => {
-          const policy = this.supplierProfitGuardDefaults.get(Number(item.id));
-          return {
-            ...copySupplierConnection(item),
-            profitGuardConfigured: Boolean(policy),
-            profitGuardEnabled: Boolean(policy?.enabled),
-          };
-        }),
+        .map((item) => ({
+          ...copySupplierConnection(item),
+          ...this.supplierProfitGuardSummary(item.id),
+        })),
     };
   }
 
   async getSupplierConnection(connectionId, { includeCiphertext = false } = {}) {
     const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
     if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
-    const policy = this.supplierProfitGuardDefaults.get(Number(connectionId));
     return {
       ...copySupplierConnection(connection, { includeCiphertext }),
-      profitGuardConfigured: Boolean(policy),
-      profitGuardEnabled: Boolean(policy?.enabled),
+      ...this.supplierProfitGuardSummary(connectionId),
+    };
+  }
+
+  supplierProfitGuardSummary(connectionId) {
+    const detail = this.supplierDetail(connectionId);
+    const accountIds = [...new Set(detail.keys
+      .filter((key) => !key.removedAt)
+      .flatMap((key) => (key.accountLinks || []).map((link) => Number(link.accountId))))];
+    const accountPolicies = accountIds
+      .map((accountId) => this.accountProfitGuardPolicies.get(accountId))
+      .filter(Boolean);
+    const enabledAccountCount = accountPolicies.filter((policy) => policy.enabled).length;
+    const defaultPolicy = this.supplierProfitGuardDefaults.get(Number(connectionId));
+    return {
+      linkedAccountCount: accountIds.length,
+      profitGuardConfiguredAccountCount: accountPolicies.length,
+      profitGuardAccountCount: enabledAccountCount,
+      profitGuardConfigured: Boolean(defaultPolicy) || accountPolicies.length > 0,
+      profitGuardEnabled: Boolean(defaultPolicy?.enabled) || enabledAccountCount > 0,
+      profitGuardFullyEnabled: Boolean(defaultPolicy?.enabled)
+        || (accountIds.length > 0 && enabledAccountCount === accountIds.length),
     };
   }
 

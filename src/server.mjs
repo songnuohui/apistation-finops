@@ -266,19 +266,21 @@ async function api(request,res,url){
   if(request.method==='PATCH'&&accountProfitGuard){
     const accountId=Number(accountProfitGuard[1]);
     const policy=await repository.upsertAccountProfitGuard(accountId,normalizeAccountProfitGuard(await body(request)),auth.actor);
+    let evaluation=null;
     if (policy.enabled && !config.demoMode) {
       try {
         const account = await repository.getAccountProfitGuard(accountId);
         if (account.supplier?.keyId) {
-          await accountProfitGuardService.evaluateSupplierConnection(
+          evaluation=await accountProfitGuardService.evaluateSupplierConnection(
             (await repository.getSupplierKeyContext(account.supplier.keyId)).connection.id,
           );
         }
       } catch (error) {
         await repository.recordProfitGuardError(accountId,error?.message || error);
+        evaluation={evaluated:0,changed:0,error:String(error?.message||error)};
       }
     }
-    return json(res,200,await repository.getAccountProfitGuard(accountId));
+    return json(res,200,{...await repository.getAccountProfitGuard(accountId),evaluation});
   }
   if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await cached('accounts',config.listCacheTtlSeconds,()=>repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),

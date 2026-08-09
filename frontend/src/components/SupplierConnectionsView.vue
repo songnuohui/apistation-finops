@@ -81,9 +81,9 @@ const visibleKeys = computed(() => (detail.value?.keys || []).filter((item: AnyR
 const activeKeys = computed(() => visibleKeys.value);
 const openAlerts = computed(() => (detail.value?.alerts || []).filter((item: AnyRecord) => item.status === 'open'));
 const unconfiguredProfitGuardCount = computed(() => connectionItems.value
-  .filter((item) => !item.profitGuardEnabled).length);
+  .filter((item) => !item.profitGuardFullyEnabled).length);
 const items = computed(() => showUnconfiguredProfitGuard.value
-  ? connectionItems.value.filter((item) => !item.profitGuardEnabled)
+  ? connectionItems.value.filter((item) => !item.profitGuardFullyEnabled)
   : connectionItems.value);
 const calculatedMinimumSaleMultiplier = computed(() => {
   const current = profitGuardEditor.value;
@@ -177,6 +177,17 @@ function profitGuardHint(policy: AnyRecord | null | undefined) {
     return `成本触发 ${multiplierText(policy.minimumSaleMultiplier)}`;
   }
   return `最低毛利 ${(Number(policy.minimumMargin || 0) * 100).toFixed(1).replace(/\.0$/, '')}%`;
+}
+
+function connectionProfitGuardHint(item: AnyRecord) {
+  const linked = Number(item.linkedAccountCount || 0);
+  const enabled = Number(item.profitGuardAccountCount || 0);
+  if (item.profitGuardFullyEnabled) {
+    return linked ? `${enabled}/${linked} 账号已启用` : '统一策略已启用';
+  }
+  if (enabled) return `${enabled}/${linked} 账号已启用，仍有遗漏`;
+  if (item.profitGuardConfigured) return '已配置但未启用';
+  return '未配置';
 }
 
 function connectionHint(item: AnyRecord) {
@@ -445,7 +456,7 @@ async function saveProfitGuard() {
   const current = profitGuardEditor.value;
   profitGuardSaving.value = true;
   try {
-    await send(`/accounts/${current.accountId}/profit-guard`, 'PATCH', {
+    const result = await send(`/accounts/${current.accountId}/profit-guard`, 'PATCH', {
       enabled: Boolean(current.enabled),
       thresholdMode: current.thresholdMode,
       minimumMargin: Number(current.minimumMarginPercent || 0) / 100,
@@ -458,8 +469,17 @@ async function saveProfitGuard() {
       targetMarginMax: current.autoAssignEnabled && current.targetMarginMaxPercent !== '' ? Number(current.targetMarginMaxPercent) / 100 : null,
     });
     profitGuardEditor.value = null;
-    notify('账号利润保护已保存');
-    await openDetails(Number(detail.value.connection.id), 'keys');
+    if (result.evaluation?.error || result.policy?.lastError) {
+      notify(`利润保护已保存，但立即评估失败：${result.evaluation?.error || result.policy.lastError}`);
+    } else if (result.evaluation?.changed) {
+      notify(`利润保护已保存并立即执行，已调整 ${result.evaluation.changed} 个账号的销售分组`);
+    } else {
+      notify('利润保护已保存并立即检查，当前销售分组均满足保护条件');
+    }
+    await Promise.all([
+      loadConnections(),
+      openDetails(Number(detail.value.connection.id), 'keys'),
+    ]);
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -754,7 +774,7 @@ onMounted(async () => {
         <input v-model="search" placeholder="搜索供应商、连接名称或站点地址" />
       </label>
       <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
-      <button class="secondary-button profit-guard-filter" :class="{ active: showUnconfiguredProfitGuard }" title="显示未启用统一利润保护的供应商连接" @click="showUnconfiguredProfitGuard = !showUnconfiguredProfitGuard"><AlertTriangle :size="16" />未配置利润控制 <span v-if="unconfiguredProfitGuardCount" class="filter-count">{{ unconfiguredProfitGuardCount }}</span></button>
+      <button class="secondary-button profit-guard-filter" :class="{ active: showUnconfiguredProfitGuard }" title="显示仍有账号未启用利润保护的供应商连接" @click="showUnconfiguredProfitGuard = !showUnconfiguredProfitGuard"><AlertTriangle :size="16" />利润保护未覆盖 <span v-if="unconfiguredProfitGuardCount" class="filter-count">{{ unconfiguredProfitGuardCount }}</span></button>
       <button class="secondary-button" @click="openServiceAuthSettings"><KeyRound :size="16" />Sub2API 自动认证</button>
       <button class="secondary-button" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
@@ -780,7 +800,7 @@ onMounted(async () => {
                   {{ item.supplierName || '未命名供应商' }}
                 </button>
                 <small>{{ item.name || '默认连接' }} · {{ adapterLabel(item.detectedAdapterType || item.adapterType) }} · {{ authLabel(item.authMode) }}</small>
-                <small :class="{ 'profit-guard-on': item.profitGuardEnabled, 'profit-guard-missing': !item.profitGuardEnabled }">利润保护：{{ item.profitGuardEnabled ? '已启用' : item.profitGuardConfigured ? '已关闭' : '未配置' }}</small>
+                <small :class="{ 'profit-guard-on': item.profitGuardFullyEnabled, 'profit-guard-missing': !item.profitGuardFullyEnabled }">利润保护：{{ connectionProfitGuardHint(item) }}</small>
               </td>
               <td class="supplier-address"><span class="supplier-cell-text" :title="item.baseUrl || ''">{{ item.baseUrl || '--' }}</span></td>
               <td class="supplier-notes"><span class="supplier-cell-text" :title="item.supplierNotes || ''">{{ item.supplierNotes || '--' }}</span></td>

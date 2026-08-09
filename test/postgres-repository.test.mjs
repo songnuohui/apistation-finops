@@ -31,6 +31,31 @@ test('cost allocation respects standard, token, and no-allocation rules', () => 
   assert.match(standard, /cost\*tokens\/total_tokens/);
 });
 
+test('supplier connection profit guard coverage includes linked account policies', async () => {
+  let statement = '';
+  const repository = new PostgresRepository({
+    async query(text) {
+      statement = text;
+      return { rows: [{
+        id: '9', supplier_id: '4', supplier_name: 'Provider A', name: 'main',
+        adapter_type: 'sub2api', base_url: 'https://provider.example', auth_mode: 'password',
+        credentials_ciphertext: 'encrypted', enabled: true, inventory_interval_seconds: 30,
+        balance_currency: 'USD', connection_status: 'ok', linked_account_count: '1',
+        profit_guard_configured_account_count: '1', profit_guard_account_count: '1',
+        profit_guard_configured: true, profit_guard_enabled: true, profit_guard_fully_enabled: true,
+      }], rowCount: 1 };
+    },
+  }, config);
+
+  const connection = (await repository.listSupplierConnections()).items[0];
+  assert.match(statement, /account_profit_guard_policies policies/);
+  assert.match(statement, /enabled_account_count=guard_accounts\.linked_account_count/);
+  assert.equal(connection.linkedAccountCount, 1);
+  assert.equal(connection.profitGuardConfiguredAccountCount, 1);
+  assert.equal(connection.profitGuardAccountCount, 1);
+  assert.equal(connection.profitGuardFullyEnabled, true);
+});
+
 test('supplier key sync pins the status parameter to text in every SQL context', async () => {
   const queries = [];
   const client = {
