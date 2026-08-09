@@ -148,7 +148,8 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
   const reprice = queries.find((query) => query.text.includes("'supplier_key_changed'"));
   assert.ok(reprice);
-  assert.deepEqual(reprice.params, ['77']);
+  assert.deepEqual(reprice.params, ['77', true]);
+  assert.match(reprice.text, /snapshot\.upstream_multiplier_source NOT IN/);
 });
 
 test('supplier key listing reads the latest supplier balance snapshot', async () => {
