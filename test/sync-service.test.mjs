@@ -501,11 +501,11 @@ test('open usage cost snapshots refresh while finalized history remains immutabl
   assert.match(select.text, /NULLIF\(f\.user_rate_multiplier,0\) AS selling_multiplier/);
   assert.doesNotMatch(select.text, /group_selling_rate_rules|default_selling_multiplier|rule\.selling_multiplier/);
   assert.match(select.text, /snapshot\.finalized=FALSE/);
-  assert.match(select.text, /current_snapshot\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
+  assert.doesNotMatch(select.text, /current_snapshot\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
   assert.match(refresh.text, /ON CONFLICT\(source_usage_id\) DO UPDATE SET/);
   assert.match(refresh.text, /WHERE NOT fact_usage_cost_snapshots\.finalized/);
-  assert.match(refresh.text, /finalized=fact_usage_cost_snapshots\.finalized/);
-  assert.match(refresh.text, /fact_usage_cost_snapshots\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
+  assert.match(refresh.text, /finalized=FALSE/);
+  assert.doesNotMatch(refresh.text, /fact_usage_cost_snapshots\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
   assert.equal(refresh.params.length, COST_SNAPSHOT_COLUMN_COUNT);
   assert.equal(refresh.params[14], null);
   assert.equal(refresh.params[16], '2');

@@ -802,11 +802,8 @@ export class SyncService {
           WHERE current_snapshot.source_usage_id IS NULL
             OR (
               $2::boolean
+              AND current_snapshot.finalized=FALSE
               AND reprice.source_usage_id IS NOT NULL
-              AND (
-                current_snapshot.finalized=FALSE
-                OR current_snapshot.cost_status NOT IN ('priced','free','fixed_cost')
-              )
             )
           ORDER BY f.occurred_at,f.source_usage_id
           LIMIT $1
@@ -1062,10 +1059,9 @@ export class SyncService {
             snapshot_origin=EXCLUDED.snapshot_origin,
             pricing_version=EXCLUDED.pricing_version,
             frozen_at=clock_timestamp(),
-            finalized=fact_usage_cost_snapshots.finalized,
-            finalized_at=fact_usage_cost_snapshots.finalized_at
-          WHERE NOT fact_usage_cost_snapshots.finalized
-             OR fact_usage_cost_snapshots.cost_status NOT IN ('priced','free','fixed_cost')`
+            finalized=FALSE,
+            finalized_at=NULL
+          WHERE NOT fact_usage_cost_snapshots.finalized`
     : 'ON CONFLICT(source_usage_id) DO NOTHING'}`, params);
         await client.query(`
           DELETE FROM ${this.schema}.usage_cost_reprice_queue

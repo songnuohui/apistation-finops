@@ -147,10 +147,7 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   assert.ok(queries.some((query) => query.text.includes('pg_advisory_xact_lock')));
   assert.match(keyInsert.text, /VALUES\(\$1,\$2,\$3,\$4,\$5,\$6::text,\$7/);
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
-  const reprice = queries.find((query) => query.text.includes("'supplier_key_changed'"));
-  assert.ok(reprice);
-  assert.deepEqual(reprice.params, ['77', true]);
-  assert.match(reprice.text, /snapshot\.upstream_multiplier_source NOT IN/);
+  assert.equal(queries.some((query) => query.text.includes("'supplier_key_changed'")), false);
 });
 
 test('supplier key listing reads the latest supplier balance snapshot', async () => {
@@ -877,6 +874,26 @@ test('first account multiplier of the day starts at local midnight', async () =>
   assert.equal(insert.params[7], '2026-07-31T16:00:00.000Z');
   assert.equal(insert.params[5], null);
   assert.match(queries[0].text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$2\)/);
+});
+
+test('strict future-only multiplier starts at the binding instant', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return { rows: [{ now_at: '2026-08-01T04:00:00.000Z', day_start: '2026-07-31T16:00:00.000Z', has_multiplier_before_today: false, first_today_multiplier_rule_id: null }], rowCount: 1 };
+      }
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) return { rows: [{ effective_from: params[7] }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const rule = await repository.upsertAccountCostRule(client, 8, {
+    costMode: 'probe_multiplier', basisMode: 'revenue_backsolve', supplierKeyId: 77,
+    changeStrategy: 'future_only', strictFutureOnly: true,
+  });
+  assert.equal(rule.effective_from, '2026-08-01T04:00:00.000Z');
 });
 
 test('same-day account multiplier changes preserve the first rule at midnight and split later changes by time', async () => {

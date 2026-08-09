@@ -2248,6 +2248,7 @@ export class PostgresRepository {
     const costMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : 'fixed_purchase');
     const basisMode = input.basisMode || profile?.basis_mode || 'revenue_backsolve';
     const changeStrategy = input.changeStrategy || 'future_only';
+    const strictFutureOnly = Boolean(input.strictFutureOnly);
     const supplierKeyId = input.supplierKeyId ?? null;
     const upstreamMultiplier = input.upstreamMultiplier ?? (
       costMode === 'manual_multiplier' ? profile?.variable_multiplier : null
@@ -2328,7 +2329,7 @@ export class PostgresRepository {
           AND status IN ('active','superseded')
           AND effective_from < $2
           AND (effective_to IS NULL OR effective_to>$2)`, [accountId, clock.day_start, clock.now_at]);
-    } else if (!clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
+    } else if (!strictFutureOnly && !clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
       await client.query(`
         UPDATE ${this.schema}.account_cost_rules
         SET effective_from=$2,updated_at=$3
@@ -2337,7 +2338,9 @@ export class PostgresRepository {
       ]);
     }
     const firstMultiplierToday = Boolean(clock.first_today_multiplier_rule_id);
-    const effectiveFrom = changeStrategy === 'current_day' && multiplierMode
+    const effectiveFrom = strictFutureOnly
+      ? clock.now_at
+      : changeStrategy === 'current_day' && multiplierMode
       ? clock.day_start
       : multiplierMode
       && !clock.has_multiplier_before_today
@@ -3789,25 +3792,6 @@ export class PostgresRepository {
           supplier_key_id,status,group_name,rate_multiplier,quota_remaining,change_type,snapshot_data)
           VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
         [key.id,item.status,item.groupName,item.rateMultiplier,item.quotaRemaining,changeType,JSON.stringify(item.sourceData || {})]);
-        const linkedCostInputsChanged = Boolean(multiplierChanged || statusChanged);
-        if (linkedCostInputsChanged || (item.status === 'active' && item.rateMultiplier !== null && item.rateMultiplier !== undefined)) await client.query(`
-          INSERT INTO ${this.schema}.usage_cost_reprice_queue(source_usage_id,reason,queued_at)
-          SELECT snapshot.source_usage_id,'supplier_key_changed',NOW()
-          FROM ${this.schema}.fact_usage_cost_snapshots snapshot
-          JOIN ${this.schema}.supplier_account_links link
-            ON link.source_account_id=snapshot.source_account_id
-          WHERE link.supplier_key_id=$1
-            AND (
-              snapshot.finalized=FALSE
-              OR snapshot.cost_status NOT IN ('priced','free','fixed_cost')
-            )
-            AND (
-              ($2::boolean AND snapshot.finalized=FALSE)
-              OR snapshot.cost_status NOT IN ('priced','free','fixed_cost')
-              OR snapshot.upstream_multiplier_source NOT IN ('supplier_key_history','supplier_key_inventory')
-            )
-          ON CONFLICT(source_usage_id) DO UPDATE SET
-            reason=EXCLUDED.reason,queued_at=EXCLUDED.queued_at`, [key.id,linkedCostInputsChanged]);
         if (multiplierChanged) await alert({
           keyId:key.id,dedupeKey:`key:${key.id}:multiplier`,type:'multiplier_changed',title:'密钥倍率发生变化',
           message:`${item.name || item.maskedKey}：${previous.rate_multiplier ?? '--'}x → ${item.rateMultiplier ?? '--'}x`,
@@ -4398,6 +4382,7 @@ export class PostgresRepository {
           upstreamMultiplier: null,
           cnyPerReferenceUnit: null,
           changeStrategy: 'future_only',
+          strictFutureOnly: true,
           supplierKeyId: Number(keyId),
           notes: '',
         }, null, actor);
