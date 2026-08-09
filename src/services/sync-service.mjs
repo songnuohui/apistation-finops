@@ -788,9 +788,9 @@ export class SyncService {
     ]);
   }
 
-  async freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay = false } = {}) {
+  async freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay = false, maxBatches = Number.POSITIVE_INFINITY } = {}) {
     let total = 0;
-    for (;;) {
+    for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
       const pending = await client.query(`
         WITH pending_usage AS MATERIALIZED (
           SELECT f.*
@@ -1079,10 +1079,20 @@ export class SyncService {
   async refreshQueuedUsageCosts(origin = 'live_sync') {
     if (this.running) return 0;
     if (this.costRefreshPromise) return this.costRefreshPromise;
-    this.costRefreshPromise = inTransaction(
-      this.finopsPool,
-      (client) => this.freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay: true }),
-    ).finally(() => {
+    this.costRefreshPromise = (async () => {
+      let total = 0;
+      for (;;) {
+        const rows = await inTransaction(
+          this.finopsPool,
+          (client) => this.freezePendingUsageCostSnapshots(client, origin, {
+            refreshOpenDay: true,
+            maxBatches: 1,
+          }),
+        );
+        total += rows;
+        if (rows < COST_SNAPSHOT_BATCH_SIZE) return total;
+      }
+    })().finally(() => {
       this.costRefreshPromise = null;
     });
     return this.costRefreshPromise;
