@@ -817,8 +817,9 @@ export class SyncService {
             CASE
               WHEN account_profile.cost_type='free' THEN 'free'
               WHEN fixed_period.id IS NOT NULL THEN 'fixed_purchase'
-              WHEN COALESCE(supplier_rate.rate_multiplier,supplier_key.rate_multiplier) IS NOT NULL
-                AND COALESCE(supplier_rate.rate_multiplier,supplier_key.rate_multiplier)>=0
+              WHEN rule.supplier_key_id IS NOT NULL
+                AND supplier_rate.rate_multiplier IS NOT NULL
+                AND supplier_rate.rate_multiplier>=0
                 THEN 'probe_multiplier'
               -- Legacy unlinked accounts may still use a confirmed, read-only
               -- upstream probe when no supplier-key multiplier is available.
@@ -838,8 +839,7 @@ export class SyncService {
           ) AS cny_per_reference_unit,
           COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
           rule.id AS account_cost_rule_id,
-          COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id) AS configured_supplier_key_id,
-          supplier_key.rate_multiplier AS supplier_inventory_multiplier,
+          rule.supplier_key_id AS configured_supplier_key_id,
           supplier_rate.id AS supplier_rate_observation_id,
           supplier_rate.rate_multiplier AS supplier_observed_multiplier,
           NULL::bigint AS selling_rate_rule_id,
@@ -866,6 +866,7 @@ export class SyncService {
           WHERE r.source_account_id=f.source_account_id
             AND r.status IN ('active','superseded')
             AND r.effective_from <= f.occurred_at
+            AND (r.supplier_key_id IS NULL OR r.created_at <= f.occurred_at)
             AND (r.effective_to IS NULL OR r.effective_to > f.occurred_at)
           ORDER BY r.effective_from DESC,r.id DESC
           LIMIT 1
@@ -882,10 +883,8 @@ export class SyncService {
           ORDER BY p.effective_from DESC,p.id DESC
           LIMIT 1
         ) fixed_period ON TRUE
-        LEFT JOIN ${this.schema}.supplier_account_links supplier_link
-          ON supplier_link.source_account_id=f.source_account_id
         LEFT JOIN ${this.schema}.supplier_keys supplier_key
-          ON supplier_key.id=COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id)
+          ON supplier_key.id=rule.supplier_key_id
           AND supplier_key.status='active'
           AND supplier_key.removed_at IS NULL
         LEFT JOIN LATERAL (
@@ -893,11 +892,8 @@ export class SyncService {
           FROM ${this.schema}.supplier_key_observations key_rate
           WHERE key_rate.supplier_key_id=supplier_key.id
             AND key_rate.status='active'
-          ORDER BY
-            CASE WHEN key_rate.observed_at<=f.occurred_at THEN 0 ELSE 1 END,
-            CASE WHEN key_rate.observed_at<=f.occurred_at THEN key_rate.observed_at END DESC,
-            CASE WHEN key_rate.observed_at>f.occurred_at THEN key_rate.observed_at END ASC,
-            key_rate.id DESC
+            AND key_rate.observed_at<=f.occurred_at
+          ORDER BY key_rate.observed_at DESC,key_rate.id DESC
           LIMIT 1
         ) supplier_rate ON TRUE
         LEFT JOIN LATERAL (
@@ -906,8 +902,8 @@ export class SyncService {
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
             AND (
-              COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id) IS NULL
-              OR o.supplier_key_id=COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id)
+              rule.supplier_key_id IS NULL
+              OR o.supplier_key_id=rule.supplier_key_id
             )
             AND GREATEST(
               COALESCE(o.observed_at,'-infinity'::timestamptz),
@@ -941,7 +937,7 @@ export class SyncService {
           const supplierKeyMultiplier = row.configured_supplier_key_id === null
             || row.configured_supplier_key_id === undefined
             ? null
-            : row.supplier_observed_multiplier ?? row.supplier_inventory_multiplier;
+            : row.supplier_observed_multiplier;
           const occurredAt = new Date(row.occurred_at).getTime();
           const freshUntil = new Date(row.observation_fresh_until || 0).getTime();
           const observationFresh = row.observation_status === 'ok'
@@ -957,8 +953,7 @@ export class SyncService {
           }, row.occurred_at) : null;
           if (supplierKeyMultiplier !== null && supplierKeyMultiplier !== undefined) {
             upstreamMultiplier = supplierKeyMultiplier;
-            upstreamSource = row.supplier_rate_observation_id
-              ? 'supplier_key_history' : 'supplier_key_inventory';
+            upstreamSource = 'supplier_key_history';
           } else if (observedMultiplier !== null) {
             upstreamMultiplier = observedMultiplier;
             upstreamSource = row.observation_source_kind === 'supplier_direct_probe'

@@ -443,10 +443,10 @@ test('cost snapshots prefer supplier-key history, then probes and request multip
   assert.equal(row(5)[19], 'supplier_key_history');
   assert.equal(row(5)[20], 'priced');
   assert.equal(row(5)[21], '3');
-  assert.equal(row(6)[17], '0.04');
-  assert.equal(row(6)[19], 'supplier_key_inventory');
-  assert.equal(row(6)[20], 'priced');
-  assert.equal(row(6)[21], '2');
+  assert.equal(row(6)[17], null);
+  assert.equal(row(6)[19], '');
+  assert.equal(row(6)[20], 'missing_upstream_multiplier');
+  assert.equal(row(6)[21], null);
   const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
   assert.match(selection.text, /WITH pending_usage AS MATERIALIZED/);
   assert.match(selection.text, /LEFT JOIN "finops"\.fact_usage_cost_snapshots current_snapshot/);
@@ -454,7 +454,10 @@ test('cost snapshots prefer supplier-key history, then probes and request multip
   assert.match(selection.text, /SELECT o\.id,o\.status,o\.source_kind,o\.resolved_rate_multiplier,o\.effective_rate_multiplier/);
   assert.match(selection.text, /supplier_key_observations key_rate/);
   assert.doesNotMatch(selection.text, /key_rate\.rate_multiplier IS NOT NULL/);
-  assert.match(selection.text, /COALESCE\(rule\.supplier_key_id,supplier_link\.supplier_key_id\)/);
+  assert.doesNotMatch(selection.text, /supplier_account_links supplier_link/);
+  assert.match(selection.text, /rule\.supplier_key_id AS configured_supplier_key_id/);
+  assert.match(selection.text, /r\.supplier_key_id IS NULL OR r\.created_at <= f\.occurred_at/);
+  assert.match(selection.text, /key_rate\.observed_at<=f\.occurred_at/);
   assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
   assert.doesNotMatch(selection.text, /COALESCE\(o\.observed_at,o\.received_at,o\.last_attempt_at,o\.captured_at\)/);
   assert.match(selection.text, /GREATEST\(\s+COALESCE\(o\.observed_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.received_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.last_attempt_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.captured_at,'-infinity'::timestamptz\)\s+\)/);
