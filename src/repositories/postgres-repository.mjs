@@ -2367,7 +2367,10 @@ export class PostgresRepository {
       SELECT snapshot.source_usage_id,'cost_rule_changed',NOW()
       FROM ${this.schema}.fact_usage_cost_snapshots snapshot
       WHERE snapshot.source_account_id=$1
-        AND snapshot.finalized=FALSE
+        AND (
+          snapshot.finalized=FALSE
+          OR snapshot.cost_status NOT IN ('priced','free','fixed_cost')
+        )
         AND snapshot.occurred_at >= $2
       ON CONFLICT(source_usage_id) DO UPDATE SET
         reason=EXCLUDED.reason,queued_at=EXCLUDED.queued_at`, [accountId,effectiveFrom]);
@@ -3792,9 +3795,13 @@ export class PostgresRepository {
           FROM ${this.schema}.fact_usage_cost_snapshots snapshot
           JOIN ${this.schema}.supplier_account_links link
             ON link.source_account_id=snapshot.source_account_id
-          WHERE link.supplier_key_id=$1 AND snapshot.finalized=FALSE
+          WHERE link.supplier_key_id=$1
             AND (
-              $2::boolean
+              snapshot.finalized=FALSE
+              OR snapshot.cost_status NOT IN ('priced','free','fixed_cost')
+            )
+            AND (
+              ($2::boolean AND snapshot.finalized=FALSE)
               OR snapshot.cost_status NOT IN ('priced','free','fixed_cost')
               OR snapshot.upstream_multiplier_source NOT IN ('supplier_key_history','supplier_key_inventory')
             )

@@ -500,14 +500,25 @@ test('open usage cost snapshots refresh while finalized history remains immutabl
   assert.match(select.text, /NULLIF\(f\.user_rate_multiplier,0\) AS selling_multiplier/);
   assert.doesNotMatch(select.text, /group_selling_rate_rules|default_selling_multiplier|rule\.selling_multiplier/);
   assert.match(select.text, /snapshot\.finalized=FALSE/);
+  assert.match(select.text, /current_snapshot\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
   assert.match(refresh.text, /ON CONFLICT\(source_usage_id\) DO UPDATE SET/);
   assert.match(refresh.text, /WHERE NOT fact_usage_cost_snapshots\.finalized/);
+  assert.match(refresh.text, /finalized=fact_usage_cost_snapshots\.finalized/);
+  assert.match(refresh.text, /fact_usage_cost_snapshots\.cost_status NOT IN \('priced','free','fixed_cost'\)/);
   assert.equal(refresh.params.length, COST_SNAPSHOT_COLUMN_COUNT);
   assert.equal(refresh.params[14], null);
   assert.equal(refresh.params[16], '2');
   assert.equal(refresh.params[23], 4);
   assert.match(finalize.text, /finalized=TRUE/);
   assert.match(finalize.text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$1\)/);
+});
+
+test('supplier cost refresh defers to an active main synchronization cycle', async () => {
+  const service = new SyncService(null, {
+    connect: async () => assert.fail('cost refresh should not open a competing transaction'),
+  }, { finopsSchema: 'finops', sourceSchema: 'public' });
+  service.running = true;
+  assert.equal(await service.refreshQueuedUsageCosts(), 0);
 });
 
 test('fixed daily snapshots use local midnight boundaries and finalization leaves closed days immutable', async () => {
