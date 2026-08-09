@@ -3719,6 +3719,7 @@ export class PostgresRepository {
 
   async recordSupplierSyncSuccess(connectionId, snapshot, checks) {
     return inTransaction(this.pool, async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('apistation_finops_dimension_writes'))");
       const connectionResult = await client.query(`
         SELECT c.*,s.name AS supplier_name
         FROM ${this.schema}.supplier_connections c

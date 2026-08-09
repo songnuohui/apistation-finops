@@ -240,6 +240,7 @@ test('dimension sync reads only the sanitized upstream billing probe and writes 
   const accountQuery = sourceQueries.find((text) => text.includes('accounts'));
   assert.match(accountQuery, /extra->'upstream_billing_probe'/);
   assert.doesNotMatch(accountQuery, /credentials|SELECT \*/i);
+  assert.ok(finopsQueries.some(({ text }) => text.includes('pg_advisory_xact_lock')));
   assert.ok(finopsQueries.some(({ text }) => text.includes('upstream_billing_snapshots')));
   assert.ok(finopsQueries.every(({ text }) => !/\b(?:INSERT|UPDATE|DELETE)\b[\s\S]*\bpublic\./i.test(text)));
 });

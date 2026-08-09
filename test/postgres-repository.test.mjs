@@ -144,6 +144,7 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   }, []);
 
   const keyInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_keys'));
+  assert.ok(queries.some((query) => query.text.includes('pg_advisory_xact_lock')));
   assert.match(keyInsert.text, /VALUES\(\$1,\$2,\$3,\$4,\$5,\$6::text,\$7/);
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
   const reprice = queries.find((query) => query.text.includes("'supplier_key_changed'"));

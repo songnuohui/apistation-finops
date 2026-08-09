@@ -21,7 +21,7 @@ const USAGE_COLUMNS = [
 // usage batches before constructing the INSERT statement.
 export const USAGE_COLUMN_COUNT = USAGE_COLUMNS.length;
 export const MAX_USAGE_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / USAGE_COLUMN_COUNT));
-export const COST_SNAPSHOT_BATCH_SIZE = 10_000;
+export const COST_SNAPSHOT_BATCH_SIZE = 1_000;
 export const COST_SNAPSHOT_OPEN_DAYS = 3;
 export const USAGE_COST_SNAPSHOT_OPEN_DAYS = 1;
 export const COST_SNAPSHOT_COLUMN_COUNT = 24;
@@ -583,6 +583,7 @@ export class SyncService {
           FROM ${this.source}.accounts`),
       ]);
       await inTransaction(this.finopsPool, async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('apistation_finops_dimension_writes'))");
         for (const row of users.rows) await client.query(`
           INSERT INTO ${this.schema}.dim_users(
             source_user_id,email,username,status,current_balance,total_recharged,balance_currency,
