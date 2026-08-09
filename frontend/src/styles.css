@@ -301,3 +301,43 @@ button:disabled{cursor:not-allowed!important}
   .detail-metrics,.supplier-metrics{grid-template-columns:1fr}
   .modal footer{flex-direction:column-reverse}
 }
+
+/* Keep narrow screens inside the viewport while preserving full table detail. */
+html,body,#app{max-width:100%;overflow-x:hidden}
+
+@media (max-width:760px){
+  .topbar{width:100%;overflow:hidden}
+  .heading{width:100%;min-width:0}
+  .heading > div{min-width:0}
+  .heading h1,.heading p{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .toolbar{width:100%;min-width:0;display:flex;flex-wrap:wrap;align-items:stretch}
+  .range-control{flex:1 1 100%;min-width:0;width:100%}
+  .range-picker{max-width:100%;min-width:0}
+  .custom-range-fields{flex:1 1 180px;min-width:0;max-width:100%;overflow:hidden}
+  .custom-range-fields label{min-width:0;flex:1}
+  .custom-range-fields input{width:100%;min-width:0;max-width:none}
+  .toolbar>.icon-button{flex:0 0 41px}
+  .user-chip{flex:0 0 auto;min-width:0;margin-left:auto}
+  .page-content,.page-view,.panel,.table-panel,.panel-head{min-width:0;max-width:100%}
+  .panel-head{flex-wrap:wrap}
+  .panel-head > div{min-width:0;flex:1 1 180px}
+  .panel-head p{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .table-wrap{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .trend-row{grid-template-columns:62px minmax(0,1fr) auto;gap:8px}
+  .trend-row small{display:none}
+  .runtime-summary{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+  .runtime-summary div{min-width:0;padding:9px 7px}
+  .runtime-summary strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .modal-layer{padding:8px}
+  .modal{width:100%;max-width:100%;max-height:calc(100dvh - 16px);overflow:auto}
+}
+
+@media (max-width:380px){
+  .topbar{padding-left:10px;padding-right:10px}
+  .page-content{padding-left:10px;padding-right:10px}
+  .panel{padding:12px}
+  .table-wrap{margin-left:-12px;margin-right:-12px}
+  .runtime-summary span{font-size:10px}
+  .runtime-summary strong{font-size:14px}
+  .custom-range-fields{gap:4px;padding-left:5px;padding-right:5px}
+}
