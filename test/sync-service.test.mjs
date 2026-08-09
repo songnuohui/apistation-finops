@@ -310,7 +310,7 @@ test('daily account snapshot records deletion and multiplier changes without inf
   assert.match(updates[0].text, /rate_change_count=rate_change_count\+\$14/);
 });
 
-test('cost snapshots prefer a fresh read-only probe, fall back to request multipliers, preserve unknown cost, and classify zero as free', async () => {
+test('cost snapshots prefer supplier-key history, then probes and request multipliers, while preserving unknown cost', async () => {
   const queries = [];
   let selected = false;
   const client = {
@@ -380,8 +380,34 @@ test('cost snapshots prefer a fresh read-only probe, fall back to request multip
               observation_fresh_until: new Date('2026-07-31T05:30:00Z'), observed_resolved_multiplier: '0.7',
               observed_upstream_multiplier: '0.7', observed_peak_enabled: false,
             },
+            {
+              source_usage_id: 6, source_account_id: 11, source_user_id: 3, source_group_id: 2,
+              model: 'gpt-test', occurred_at: new Date('2026-07-31T06:00:00Z'),
+              user_charge_cny: '100', standard_cost_usd_reference: '10',
+              source_selling_multiplier: '2', source_account_multiplier: null,
+              configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
+              selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
+              cost_profile_id: null, account_cost_rule_id: 61, fixed_period_id: null,
+              configured_supplier_key_id: 77, supplier_inventory_multiplier: '0.05',
+              supplier_rate_observation_id: 88, supplier_observed_multiplier: '0.06',
+              rate_observation_id: 53, observation_status: 'ok', observation_source_kind: 'supplier_direct_probe',
+              observation_fresh_until: new Date('2026-07-31T06:30:00Z'), observed_resolved_multiplier: '0.9',
+              observed_upstream_multiplier: '0.9', observed_peak_enabled: false,
+            },
+            {
+              source_usage_id: 7, source_account_id: 12, source_user_id: 3, source_group_id: 2,
+              model: 'gpt-test', occurred_at: new Date('2026-07-31T07:00:00Z'),
+              user_charge_cny: '100', standard_cost_usd_reference: '10',
+              source_selling_multiplier: '2', source_account_multiplier: null,
+              configured_cost_mode: 'probe_multiplier', basis_mode: 'revenue_backsolve',
+              selling_multiplier: '2', manual_upstream_multiplier: null, cny_per_reference_unit: null,
+              cost_profile_id: null, account_cost_rule_id: 62, fixed_period_id: null,
+              configured_supplier_key_id: 78, supplier_inventory_multiplier: '0.04',
+              supplier_rate_observation_id: null, supplier_observed_multiplier: null,
+              rate_observation_id: null, observed_upstream_multiplier: null,
+            },
           ],
-          rowCount: 5,
+          rowCount: 7,
         };
       }
       return { rows: [], rowCount: 0 };
@@ -392,9 +418,9 @@ test('cost snapshots prefer a fresh read-only probe, fall back to request multip
   });
   const total = await service.freezePendingUsageCostSnapshots(client, 'historical_backfill');
   const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".fact_usage_cost_snapshots'));
-  assert.equal(total, 5);
+  assert.equal(total, 7);
   assert.match(insert.text, /ON CONFLICT\(source_usage_id\) DO NOTHING/);
-  assert.equal(insert.params.length, 5 * COST_SNAPSHOT_COLUMN_COUNT);
+  assert.equal(insert.params.length, 7 * COST_SNAPSHOT_COLUMN_COUNT);
   const row = (index) => insert.params.slice(index * COST_SNAPSHOT_COLUMN_COUNT, (index + 1) * COST_SNAPSHOT_COLUMN_COUNT);
   assert.equal(row(0)[17], '0.8');
   assert.equal(row(0)[19], 'probe_observation');
@@ -412,11 +438,22 @@ test('cost snapshots prefer a fresh read-only probe, fall back to request multip
   assert.equal(row(4)[19], 'supplier_direct_probe');
   assert.equal(row(4)[20], 'priced');
   assert.equal(row(4)[21], '35');
+  assert.equal(row(5)[17], '0.06');
+  assert.equal(row(5)[19], 'supplier_key_history');
+  assert.equal(row(5)[20], 'priced');
+  assert.equal(row(5)[21], '3');
+  assert.equal(row(6)[17], '0.04');
+  assert.equal(row(6)[19], 'supplier_key_inventory');
+  assert.equal(row(6)[20], 'priced');
+  assert.equal(row(6)[21], '2');
   const selection = queries.find((query) => query.text.includes('FROM "finops".fact_usage_events f'));
   assert.match(selection.text, /WITH pending_usage AS MATERIALIZED/);
   assert.match(selection.text, /LEFT JOIN "finops"\.fact_usage_cost_snapshots current_snapshot/);
   assert.doesNotMatch(selection.text, /WHERE NOT EXISTS/);
   assert.match(selection.text, /SELECT o\.id,o\.status,o\.source_kind,o\.resolved_rate_multiplier,o\.effective_rate_multiplier/);
+  assert.match(selection.text, /supplier_key_observations key_rate/);
+  assert.doesNotMatch(selection.text, /key_rate\.rate_multiplier IS NOT NULL/);
+  assert.match(selection.text, /COALESCE\(rule\.supplier_key_id,supplier_link\.supplier_key_id\)/);
   assert.doesNotMatch(selection.text, /AND o\.status='ok'/);
   assert.doesNotMatch(selection.text, /COALESCE\(o\.observed_at,o\.received_at,o\.last_attempt_at,o\.captured_at\)/);
   assert.match(selection.text, /GREATEST\(\s+COALESCE\(o\.observed_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.received_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.last_attempt_at,'-infinity'::timestamptz\),\s+COALESCE\(o\.captured_at,'-infinity'::timestamptz\)\s+\)/);
@@ -468,7 +505,7 @@ test('open usage cost snapshots refresh while finalized history remains immutabl
   assert.equal(refresh.params.length, COST_SNAPSHOT_COLUMN_COUNT);
   assert.equal(refresh.params[14], null);
   assert.equal(refresh.params[16], '2');
-  assert.equal(refresh.params[23], 3);
+  assert.equal(refresh.params[23], 4);
   assert.match(finalize.text, /finalized=TRUE/);
   assert.match(finalize.text, /date_trunc\('day', NOW\(\) AT TIME ZONE \$1\)/);
 });

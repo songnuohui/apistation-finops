@@ -172,6 +172,7 @@ export class SyncService {
     this.timer = null;
     this.runtimeRefreshing = false;
     this.runtimeRefreshPromise = null;
+    this.costRefreshPromise = null;
     this.lastRuntimeRefreshAt = 0;
     this.runtimeTimer = null;
     this.channelMonitorReader = null;
@@ -815,8 +816,11 @@ export class SyncService {
             CASE
               WHEN account_profile.cost_type='free' THEN 'free'
               WHEN fixed_period.id IS NOT NULL THEN 'fixed_purchase'
-              -- An account with no FinOps rule may opt into automatic pricing only
-              -- through a confirmed, read-only upstream probe observation.
+              WHEN COALESCE(supplier_rate.rate_multiplier,supplier_key.rate_multiplier) IS NOT NULL
+                AND COALESCE(supplier_rate.rate_multiplier,supplier_key.rate_multiplier)>=0
+                THEN 'probe_multiplier'
+              -- Legacy unlinked accounts may still use a confirmed, read-only
+              -- upstream probe when no supplier-key multiplier is available.
               WHEN observation.status='ok'
                 AND observation.effective_rate_multiplier>=0
                 AND observation.fresh_until>f.occurred_at THEN 'probe_multiplier'
@@ -833,7 +837,10 @@ export class SyncService {
           ) AS cny_per_reference_unit,
           COALESCE(rule.cost_profile_id,rule_profile.id,account_profile.id,fixed_period.cost_profile_id) AS cost_profile_id,
           rule.id AS account_cost_rule_id,
-          rule.supplier_key_id AS configured_supplier_key_id,
+          COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id) AS configured_supplier_key_id,
+          supplier_key.rate_multiplier AS supplier_inventory_multiplier,
+          supplier_rate.id AS supplier_rate_observation_id,
+          supplier_rate.rate_multiplier AS supplier_observed_multiplier,
           NULL::bigint AS selling_rate_rule_id,
           fixed_period.id AS fixed_period_id,
           observation.id AS rate_observation_id,
@@ -874,12 +881,33 @@ export class SyncService {
           ORDER BY p.effective_from DESC,p.id DESC
           LIMIT 1
         ) fixed_period ON TRUE
+        LEFT JOIN ${this.schema}.supplier_account_links supplier_link
+          ON supplier_link.source_account_id=f.source_account_id
+        LEFT JOIN ${this.schema}.supplier_keys supplier_key
+          ON supplier_key.id=COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id)
+          AND supplier_key.status='active'
+          AND supplier_key.removed_at IS NULL
+        LEFT JOIN LATERAL (
+          SELECT key_rate.id,key_rate.rate_multiplier,key_rate.observed_at
+          FROM ${this.schema}.supplier_key_observations key_rate
+          WHERE key_rate.supplier_key_id=supplier_key.id
+            AND key_rate.status='active'
+          ORDER BY
+            CASE WHEN key_rate.observed_at<=f.occurred_at THEN 0 ELSE 1 END,
+            CASE WHEN key_rate.observed_at<=f.occurred_at THEN key_rate.observed_at END DESC,
+            CASE WHEN key_rate.observed_at>f.occurred_at THEN key_rate.observed_at END ASC,
+            key_rate.id DESC
+          LIMIT 1
+        ) supplier_rate ON TRUE
         LEFT JOIN LATERAL (
           SELECT o.id,o.status,o.source_kind,o.resolved_rate_multiplier,o.effective_rate_multiplier,
                  o.peak_rate_enabled,o.peak_rate_multiplier,o.timezone,o.snapshot_data,o.fresh_until
           FROM ${this.schema}.account_rate_observations o
           WHERE o.source_account_id=f.source_account_id
-            AND (rule.supplier_key_id IS NULL OR o.supplier_key_id=rule.supplier_key_id)
+            AND (
+              COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id) IS NULL
+              OR o.supplier_key_id=COALESCE(rule.supplier_key_id,supplier_link.supplier_key_id)
+            )
             AND GREATEST(
               COALESCE(o.observed_at,'-infinity'::timestamptz),
               COALESCE(o.received_at,'-infinity'::timestamptz),
@@ -909,6 +937,10 @@ export class SyncService {
           upstreamMultiplier = row.manual_upstream_multiplier;
           upstreamSource = upstreamMultiplier === null || upstreamMultiplier === undefined ? '' : 'manual_rule';
         } else if (costMode === 'probe_multiplier') {
+          const supplierKeyMultiplier = row.configured_supplier_key_id === null
+            || row.configured_supplier_key_id === undefined
+            ? null
+            : row.supplier_observed_multiplier ?? row.supplier_inventory_multiplier;
           const occurredAt = new Date(row.occurred_at).getTime();
           const freshUntil = new Date(row.observation_fresh_until || 0).getTime();
           const observationFresh = row.observation_status === 'ok'
@@ -922,7 +954,11 @@ export class SyncService {
             peakRateMultiplier: row.observed_peak_multiplier,
             timezone: row.observed_timezone,
           }, row.occurred_at) : null;
-          if (observedMultiplier !== null) {
+          if (supplierKeyMultiplier !== null && supplierKeyMultiplier !== undefined) {
+            upstreamMultiplier = supplierKeyMultiplier;
+            upstreamSource = row.supplier_rate_observation_id
+              ? 'supplier_key_history' : 'supplier_key_inventory';
+          } else if (observedMultiplier !== null) {
             upstreamMultiplier = observedMultiplier;
             upstreamSource = row.observation_source_kind === 'supplier_direct_probe'
               ? 'supplier_direct_probe' : 'probe_observation';
@@ -972,7 +1008,7 @@ export class SyncService {
           cost_status: calculation.status,
           calculated_cost_cny: calculation.costCny,
           snapshot_origin: origin,
-          pricing_version: 3,
+          pricing_version: 4,
         };
       });
       for (let offset = 0; offset < rows.length; offset += MAX_COST_SNAPSHOT_ROWS_PER_INSERT) {
@@ -1033,6 +1069,17 @@ export class SyncService {
       }
     }
     return total;
+  }
+
+  async refreshQueuedUsageCosts(origin = 'supplier_key_refresh') {
+    if (this.costRefreshPromise) return this.costRefreshPromise;
+    this.costRefreshPromise = inTransaction(
+      this.finopsPool,
+      (client) => this.freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay: true }),
+    ).finally(() => {
+      this.costRefreshPromise = null;
+    });
+    return this.costRefreshPromise;
   }
 
   async finalizeUsageCostSnapshots(client) {

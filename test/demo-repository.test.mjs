@@ -218,6 +218,9 @@ test('NewAPI supplier keys are available for account cost linking', async () => 
   const result = await repository.setSupplierKeyAccountLink(catalog.supplierKeys[0].id, 2742, true);
   assert.equal(result.adapterType, 'newapi');
   assert.equal(result.costMode, 'probe_multiplier');
+  const account = repository.accounts.find((item) => Number(item.id) === 2742);
+  assert.equal(account.supplierKeyInventoryMultiplier, catalog.supplierKeys[0].rateMultiplier);
+  assert.equal(account.upstreamMultiplierSource, 'supplier_key_inventory');
 });
 
 test('supplier key listing supports supplier filters and pagination', async () => {

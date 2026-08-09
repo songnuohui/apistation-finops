@@ -31,6 +31,26 @@ test('cost allocation respects standard, token, and no-allocation rules', () => 
   assert.match(standard, /cost\*tokens\/total_tokens/);
 });
 
+test('account ledger treats an active linked supplier-key multiplier as automatic cost input', async () => {
+  let statement = '';
+  const repository = new PostgresRepository({
+    async query(text) {
+      statement = text;
+      return { rows: [], rowCount: 0 };
+    },
+  }, config);
+
+  await repository.listAccounts({
+    start: new Date('2026-08-01T00:00:00Z'),
+    end: new Date('2026-08-02T00:00:00Z'),
+    dailyStart: '2026-08-01', dailyEnd: '2026-08-01', page: 1, pageSize: 20, offset: 0,
+  });
+
+  assert.match(statement, /linked_key\.status='active' AND linked_key\.rate_multiplier IS NOT NULL/);
+  assert.match(statement, /THEN 'supplier_key_inventory'/);
+  assert.match(statement, /THEN linked_key\.rate_multiplier END/);
+});
+
 test('supplier connection profit guard coverage includes linked account policies', async () => {
   let statement = '';
   const repository = new PostgresRepository({
@@ -74,7 +94,13 @@ test('supplier key sync pins the status parameter to text in every SQL context',
           rowCount: 1,
         };
       }
-      if (text.includes('SELECT * FROM "finops".supplier_keys')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT * FROM "finops".supplier_keys')) return {
+        rows: [{
+          id: '77', external_key_id: '596', name: 'upstream-key', masked_key: 'sk-...test',
+          status: 'active', rate_multiplier: '0.05', group_id: '', group_name: '', removed_at: null,
+        }],
+        rowCount: 1,
+      };
       if (text.includes('INSERT INTO "finops".supplier_keys')) {
         return {
           rows: [{
@@ -82,7 +108,7 @@ test('supplier key sync pins the status parameter to text in every SQL context',
             external_key_id: '596',
             name: 'upstream-key',
             status: 'active',
-            rate_multiplier: null,
+            rate_multiplier: '0.06',
           }],
           rowCount: 1,
         };
@@ -106,7 +132,7 @@ test('supplier key sync pins the status parameter to text in every SQL context',
       status: 'active',
       groupId: '',
       groupName: '',
-      rateMultiplier: null,
+      rateMultiplier: '0.06',
       quotaTotal: null,
       quotaUsed: null,
       quotaRemaining: null,
@@ -120,6 +146,9 @@ test('supplier key sync pins the status parameter to text in every SQL context',
   const keyInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_keys'));
   assert.match(keyInsert.text, /VALUES\(\$1,\$2,\$3,\$4,\$5,\$6::text,\$7/);
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
+  const reprice = queries.find((query) => query.text.includes("'supplier_key_changed'"));
+  assert.ok(reprice);
+  assert.deepEqual(reprice.params, ['77']);
 });
 
 test('supplier key listing reads the latest supplier balance snapshot', async () => {

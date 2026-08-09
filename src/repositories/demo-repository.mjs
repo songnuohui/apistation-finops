@@ -1511,12 +1511,14 @@ export class DemoRepository {
       account.supplierKeyName = match.key.name || '';
       account.supplierKeyMasked = match.key.maskedKey || '';
       account.supplierKeyGroupName = match.key.groupName || '';
+      account.supplierKeyInventoryMultiplier = match.key.rateMultiplier;
       account.supplierConnectionId = Number(match.connection.id);
       account.supplierConnectionName = match.connection.name;
       account.linkedSupplierName = match.connection.supplierName;
       account.probeStatus = match.key.lastCheckStatus || 'pending';
       account.upstreamMultiplier = match.key.rateMultiplier;
-      account.upstreamMultiplierSource = match.key.rateMultiplier === null ? '' : 'supplier_direct_probe';
+      account.upstreamMultiplierSource = match.key.rateMultiplier === null ? '' : 'supplier_key_inventory';
+      account.costCoverageStatus = match.key.rateMultiplier === null ? 'missing' : 'complete';
     } else {
       match.key.accountLinks = (match.key.accountLinks || []).filter((item) => Number(item.accountId) !== Number(accountId));
       if (Number(account.supplierKeyId) === Number(keyId)) {
@@ -1524,6 +1526,7 @@ export class DemoRepository {
         account.supplierKeyName = '';
         account.supplierKeyMasked = '';
         account.supplierKeyGroupName = '';
+        account.supplierKeyInventoryMultiplier = null;
         account.supplierConnectionId = null;
         account.supplierConnectionName = '';
         account.linkedSupplierName = '';

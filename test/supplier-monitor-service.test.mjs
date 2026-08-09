@@ -44,6 +44,11 @@ test('supplier monitor limits active checks and passes only sanitized inventory 
     recordSupplierSyncFailure: async () => assert.fail('unexpected sync failure'),
   };
   const service = new SupplierMonitorService(repository, config);
+  let costRefreshes = 0;
+  service.setCostRefreshHandler(async ({ connectionId }) => {
+    assert.equal(connectionId, 9);
+    costRefreshes += 1;
+  });
   const inventory = snapshot();
   const checks = [];
   service.adapters = {
@@ -61,6 +66,7 @@ test('supplier monitor limits active checks and passes only sanitized inventory 
   assert.deepEqual(result, { ok: true, adapterType: 'sub2api', keyCount: 3, checked: 2 });
   assert.deepEqual(checks, ['one', 'two']);
   assert.equal(successes.length, 1);
+  assert.equal(costRefreshes, 1);
   const [, recordedSnapshot, recordedChecks] = successes[0];
   assert.equal(recordedSnapshot.accessToken, undefined);
   assert.equal('rawKey' in recordedSnapshot.keys[0], false);

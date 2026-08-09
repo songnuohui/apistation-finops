@@ -34,6 +34,7 @@ export class SupplierMonitorService {
     this.timer = null;
     this.cycleRunning = false;
     this.profitGuardService = null;
+    this.costRefreshHandler = null;
   }
 
   status() {
@@ -93,6 +94,10 @@ export class SupplierMonitorService {
 
   setProfitGuardService(service) {
     this.profitGuardService = service || null;
+  }
+
+  setCostRefreshHandler(handler) {
+    this.costRefreshHandler = typeof handler === 'function' ? handler : null;
   }
 
   async listSupplierKeyModels(keyId) {
@@ -262,6 +267,13 @@ export class SupplierMonitorService {
       delete sanitizedSnapshot.sessionCookie;
       delete sanitizedSnapshot.userId;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
+      if (this.costRefreshHandler) {
+        try {
+          await this.costRefreshHandler({ connectionId });
+        } catch (error) {
+          console.warn(`[supplier-monitor] linked cost refresh failed for ${connectionId}:`, error?.message || error);
+        }
+      }
       if (this.profitGuardService) {
         try {
           await this.profitGuardService.evaluateSupplierConnection(connectionId);

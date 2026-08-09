@@ -1138,6 +1138,8 @@ export class PostgresRepository {
                    WHEN cp.cost_type='free' THEN 'free'
                    WHEN COALESCE(c.cost_record_count,0)>0 THEN 'fixed_purchase'
                    WHEN NULLIF(m.cost_mode,'unconfigured') IS NOT NULL THEN m.cost_mode
+                   WHEN linked_key.status='active' AND linked_key.rate_multiplier IS NOT NULL
+                     AND linked_key.rate_multiplier>=0 THEN 'probe_multiplier'
                    WHEN probe.status='ok' AND probe.effective_rate_multiplier>0 AND probe.fresh_until>NOW() THEN 'probe_multiplier'
                    ELSE 'unconfigured'
                  END
@@ -1147,6 +1149,8 @@ export class PostgresRepository {
               COALESCE(c.period_cost,0)+COALESCE(m.multiplier_cost_cny,0) AS effective_cost_cny,
               COALESCE(m.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
                COALESCE(rule.upstream_multiplier,m.upstream_multiplier,
+                 CASE WHEN linked_key.status='active' AND linked_key.rate_multiplier>=0
+                   THEN linked_key.rate_multiplier END,
                  CASE WHEN probe.status='ok' AND probe.fresh_until>NOW() THEN probe.effective_rate_multiplier END
                ) AS upstream_multiplier,
                COALESCE(rule.basis_mode,cp.basis_mode,'revenue_backsolve') AS basis_mode,
@@ -1154,6 +1158,8 @@ export class PostgresRepository {
                COALESCE(
                   CASE
                     WHEN rule.cost_mode='manual_multiplier' AND rule.upstream_multiplier IS NOT NULL THEN 'manual_rule'
+                    WHEN rule.cost_mode='probe_multiplier' AND linked_key.status='active'
+                      AND linked_key.rate_multiplier IS NOT NULL THEN 'supplier_key_inventory'
                     WHEN rule.cost_mode='probe_multiplier' AND probe.status='ok' AND probe.fresh_until>NOW()
                       THEN CASE WHEN probe.source_kind='supplier_direct_probe' THEN 'supplier_direct_probe' ELSE 'probe_snapshot' END
                     ELSE NULL
@@ -3779,6 +3785,15 @@ export class PostgresRepository {
           supplier_key_id,status,group_name,rate_multiplier,quota_remaining,change_type,snapshot_data)
           VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
         [key.id,item.status,item.groupName,item.rateMultiplier,item.quotaRemaining,changeType,JSON.stringify(item.sourceData || {})]);
+        if (multiplierChanged || statusChanged) await client.query(`
+          INSERT INTO ${this.schema}.usage_cost_reprice_queue(source_usage_id,reason,queued_at)
+          SELECT snapshot.source_usage_id,'supplier_key_changed',NOW()
+          FROM ${this.schema}.fact_usage_cost_snapshots snapshot
+          JOIN ${this.schema}.supplier_account_links link
+            ON link.source_account_id=snapshot.source_account_id
+          WHERE link.supplier_key_id=$1 AND snapshot.finalized=FALSE
+          ON CONFLICT(source_usage_id) DO UPDATE SET
+            reason=EXCLUDED.reason,queued_at=EXCLUDED.queued_at`, [key.id]);
         if (multiplierChanged) await alert({
           keyId:key.id,dedupeKey:`key:${key.id}:multiplier`,type:'multiplier_changed',title:'密钥倍率发生变化',
           message:`${item.name || item.maskedKey}：${previous.rate_multiplier ?? '--'}x → ${item.rateMultiplier ?? '--'}x`,

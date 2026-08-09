@@ -73,6 +73,13 @@ syncService?.setRuntimeStatusReader(({accessToken,authHeaders})=>Promise.all([
 ]).then(([queue, users])=>({queue,users})));
 syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listRuntimeConcurrency());
 syncService?.setReadCacheInvalidator(()=>responseCache.invalidate('runtime'));
+supplierMonitorService?.setCostRefreshHandler(async()=>{
+  await syncService?.refreshQueuedUsageCosts();
+  await Promise.all([
+    responseCache.invalidate('accounts'),
+    responseCache.invalidate('overview'),
+  ]);
+});
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
 function setHeaders(res,{embeddable=false}={}){
@@ -490,6 +497,11 @@ async function api(request,res,url){
         ? await repository.syncSupplierConnection(link.connectionId)
         : await supplierMonitorService.syncConnection(link.connectionId)
       : null;
+    await syncService?.refreshQueuedUsageCosts();
+    await Promise.all([
+      responseCache.invalidate('accounts'),
+      responseCache.invalidate('overview'),
+    ]);
     return json(res,200,{...link,sync});
   }
   const supplierAlertAck=/^\/api\/supplier-alerts\/(\d+)\/acknowledge$/.exec(url.pathname);

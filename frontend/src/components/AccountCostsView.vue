@@ -48,7 +48,7 @@ function statusClass(value: any) {
 }
 function modeLabel(value: any) {
   return ({
-    probe_multiplier: '自动探测倍率',
+    probe_multiplier: '供应商密钥倍率',
     manual_multiplier: '手动进货倍率',
     fixed_purchase: '固定采购成本',
     free: '免费资源',
@@ -126,7 +126,7 @@ async function saveEditor() {
   try {
     const oldKeyId = current.originalSupplierKeyId;
     if (current.costMode === 'probe_multiplier') {
-      if (!current.supplierKeyId) throw new Error('自动探测倍率必须选择供应商密钥');
+      if (!current.supplierKeyId) throw new Error('供应商密钥倍率必须选择已连接的密钥');
       await send(`/supplier-keys/${current.supplierKeyId}/account-link`, 'PATCH', {
         accountId: Number(current.id), linked: true,
       });
@@ -235,13 +235,13 @@ onMounted(load);
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
     </div>
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>账号成本台账</h2><p>自动探测倍率使用已关联的 Sub2API / NewAPI 密钥；销售倍率来自每笔实际消费记录。</p></div><WalletCards :size="20" class="head-icon" /></div>
+      <div class="panel-head"><div><h2>账号成本台账</h2><p>账号绑定供应商密钥后，直接使用密钥倍率自动计算成本；销售倍率来自每笔实际消费记录。</p></div><WalletCards :size="20" class="head-icon" /></div>
       <div class="table-wrap"><table class="account-table"><thead><tr><th>账号</th><th>平台 / 供应商</th><th>成本模式</th><th class="number">销售额</th><th class="number">总成本</th><th class="number">毛利</th><th>覆盖状态</th><th>操作</th></tr></thead><tbody>
         <tr v-if="loading && !rows.length"><td colspan="8" class="table-empty">正在读取账号成本</td></tr>
         <tr v-for="account in rows" :key="account.id">
           <td><strong>{{ account.name }}</strong><small>ID {{ account.id }} · {{ account.platform }}</small></td>
           <td>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}<small>{{ account.purchaseBatch || account.supplierKeyName || '未关联采购批次' }}</small></td>
-          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ modeLabel(account.costMode) }}</span><small>{{ account.upstreamMultiplier ? `上游 ${account.upstreamMultiplier}x` : account.supplierKeyName || '' }}</small></td>
+          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ modeLabel(account.costMode) }}</span><small>{{ account.supplierKeyInventoryMultiplier != null ? `密钥 ${account.supplierKeyInventoryMultiplier}x` : account.upstreamMultiplier != null ? `上游 ${account.upstreamMultiplier}x` : account.supplierKeyName || '' }}</small></td>
           <td class="number">{{ money(account.userChargeCny) }}</td><td class="number">{{ money(account.bookedCostCny || account.effectiveCostCny) }}</td><td class="number positive">{{ money(account.bookedProfitCny || account.grossProfitCny) }}</td>
           <td><span class="status-pill" :class="statusClass(account.costCoverageStatus)">{{ account.costCoverageStatus === 'complete' ? '已覆盖' : account.costCoverageStatus === 'missing' ? '待补成本' : account.costCoverageStatus || '待检查' }}</span></td>
           <td><div class="row-actions"><button class="small-button" @click="openEditor(account)"><Edit3 :size="14" />成本规则</button><button class="icon-button mini-action" title="登记固定成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button><button class="icon-button mini-action" title="查看历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
@@ -253,9 +253,9 @@ onMounted(load);
 
     <div v-if="editor" class="modal-layer" @click.self="editor = null"><section class="modal form-modal account-editor-modal"><header><div><h2>配置账号成本</h2><p>{{ editor.name }} · {{ editor.platform }}</p></div><button class="icon-button" @click="editor = null"><X :size="19" /></button></header>
       <div class="form-grid">
-        <label>成本模式<select v-model="editor.costMode"><option value="probe_multiplier">自动探测倍率</option><option value="manual_multiplier">手动填写进货倍率</option><option value="fixed_purchase">固定采购成本</option><option value="free">免费资源</option></select></label>
+        <label>成本模式<select v-model="editor.costMode"><option value="probe_multiplier">供应商密钥倍率（自动）</option><option value="manual_multiplier">手动填写进货倍率</option><option value="fixed_purchase">固定采购成本</option><option value="free">免费资源</option></select></label>
         <label>变更范围<select v-model="editor.changeStrategy"><option value="future_only">仅未来用量</option><option value="current_day">从今天 0 点开始</option></select></label>
-        <label v-if="editor.costMode === 'probe_multiplier'" class="full-field">采购批次 / 供应商密钥<select v-model="editor.supplierKeyId"><option value="">请选择已连接的密钥</option><option v-for="key in selectedSupplierKeys" :key="key.id" :value="key.id">{{ key.supplier }} · {{ key.name || key.maskedKey }} · {{ key.groupName || '未分组' }}</option></select><small class="field-hint">选择后会自动关联账号，并由上游密钥倍率计算成本。</small></label>
+        <label v-if="editor.costMode === 'probe_multiplier'" class="full-field">采购批次 / 供应商密钥<select v-model="editor.supplierKeyId"><option value="">请选择已连接的密钥</option><option v-for="key in selectedSupplierKeys" :key="key.id" :value="key.id">{{ key.supplier }} · {{ key.name || key.maskedKey }} · {{ key.groupName || '未分组' }}{{ key.rateMultiplier == null ? ' · 暂无倍率' : ` · ${key.rateMultiplier}x` }}</option></select><small class="field-hint">绑定后直接使用密钥库存倍率自动计价；倍率变化时自动更新未封账成本。</small></label>
         <label v-if="['manual_multiplier','probe_multiplier'].includes(editor.costMode)">倍率成本基础<select v-model="editor.basisMode"><option value="revenue_backsolve">按实际消费记录回推（推荐）</option><option value="reference_cny">目录价乘 CNY 基准</option></select></label>
         <label v-if="editor.costMode === 'manual_multiplier'">进货倍率<input v-model="editor.upstreamMultiplier" type="number" min="0" step="0.0001" placeholder="例如 0.5" /></label>
         <label v-if="editor.costMode === 'manual_multiplier' && editor.basisMode === 'reference_cny'">每目录单位 CNY 基准<input v-model="editor.cnyPerReferenceUnit" type="number" min="0" step="0.0001" /></label>
@@ -263,7 +263,7 @@ onMounted(load);
         <label v-if="editor.costMode === 'fixed_purchase'">采购批次<select v-model="editor.purchaseBatch"><option value="">不选择</option><option v-for="batch in supplierBatches" :key="`${batch.supplier}-${batch.purchaseBatch}`" :value="batch.purchaseBatch">{{ batch.supplier }} · {{ batch.purchaseBatch }}</option></select></label>
         <label class="full-field">账号标签<input v-model="editor.tagsText" placeholder="多个标签用逗号分隔" /></label>
       </div>
-      <div class="form-note">这里不填写销售倍率。销售价格由 sub2api / newapi 的实际消费记录决定；本页只配置进货倍率、供应商密钥或固定采购成本。</div>
+      <div class="form-note">绑定了有效供应商密钥的账号无需探测或手工填写进货倍率；只有密钥没有倍率时才需要选择其他成本方式。</div>
       <footer><button class="secondary-button" @click="editor = null">取消</button><button class="primary-button" :disabled="saving" @click="saveEditor"><Check :size="16" />保存成本规则</button></footer>
     </section></div>
 
