@@ -706,6 +706,65 @@ test('usage source query never treats account statistics pricing as a CNY cost',
   assert.ok(!targetQueries.some((query) => query.text.includes('"public".usage_logs')));
 });
 
+test('affiliate sync preserves microsecond cursors and skips unchanged ledger rebuilds', async () => {
+  const cursorTime = '2026-08-09 02:36:44.469738+00';
+  const nextCursorTime = '2026-08-10 01:16:09.899839+00';
+  const sourceQueries = [];
+  const targetQueries = [];
+  const rebuilt = [];
+  const sourcePool = {
+    async query(text, params = []) {
+      sourceQueries.push({ text, params });
+      return {
+        rows: [{
+          id: 10000114,
+          user_id: 57,
+          action: 'accrue',
+          amount: '0.5',
+          source_user_id: 69,
+          source_order_id: 10000201,
+          created_at: new Date('2026-08-07T13:45:30.879Z'),
+          updated_at: new Date('2026-08-10T01:16:09.899Z'),
+          cursor_time_key: nextCursorTime,
+        }],
+        rowCount: 1,
+      };
+    },
+  };
+  const client = {
+    async query(text, params = []) {
+      targetQueries.push({ text, params });
+      if (text.includes('SELECT cursor_time::text') && text.includes('FOR UPDATE')) {
+        return { rows: [{ cursor_time: cursorTime, cursor_id: 10000116 }], rowCount: 1 };
+      }
+      if (text.includes('INSERT INTO "finops".credit_events')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const targetPool = {
+    async query(text, params = []) {
+      targetQueries.push({ text, params });
+      if (text.includes('SELECT cursor_time::text')) {
+        return { rows: [{ cursor_time: cursorTime, cursor_id: 10000116 }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    connect: async () => client,
+  };
+  const service = new SyncService(sourcePool, targetPool, {
+    finopsSchema: 'finops', sourceSchema: 'public', timezone: 'UTC', syncBatchSize: 1000,
+  });
+  service.rebuildUserLedger = async (_client, userId) => rebuilt.push(userId);
+
+  assert.equal(await service.syncAffiliateLedger(), 1);
+  assert.equal(sourceQueries[0].params[0], cursorTime);
+  assert.match(sourceQueries[0].text, /updated_at::text AS cursor_time_key/);
+  assert.deepEqual(rebuilt, []);
+  const markSuccess = targetQueries.find((query) => query.text.includes('SET cursor_time=$1'));
+  assert.deepEqual(markSuccess.params, [nextCursorTime, 10000114, 1, 'user_affiliate_ledger']);
+});
+
 test('FIFO rebuild applies a later credit lot to an earlier usage deficit', async () => {
   const recognition = [];
   const lotUpdates = [];
@@ -729,10 +788,15 @@ test('FIFO rebuild applies a later credit lot to an earlier usage deficit', asyn
         };
       }
       if (text.includes('INSERT INTO "finops".credit_lots')) {
-        return { rows: [{ id: 70, granted_credit: '10', remaining_credit: '10', cash_basis_cny: '10' }], rowCount: 1 };
+        return {
+          rows: [{
+            id: 70, source_event_id: 7, granted_credit: '10', remaining_credit: '10', cash_basis_cny: '10',
+          }],
+          rowCount: 1,
+        };
       }
       if (text.includes('INSERT INTO "finops".revenue_recognition')) recognition.push(params);
-      if (text.includes('UPDATE "finops".credit_lots SET remaining_credit')) lotUpdates.push(params);
+      if (text.includes('UPDATE "finops".credit_lots AS lot')) lotUpdates.push(params);
       return { rows: [], rowCount: 0 };
     },
   };
@@ -742,7 +806,7 @@ test('FIFO rebuild applies a later credit lot to an earlier usage deficit', asyn
   service.refreshUsageDaily = async () => {};
   await service.rebuildUserLedger(client, 5);
   assert.deepEqual(recognition, [[91, 70, '5', '5']]);
-  assert.deepEqual(lotUpdates.at(-1), ['5', 70]);
+  assert.deepEqual(lotUpdates.at(-1), [70, '5']);
 });
 
 test('wallet reconciliation establishes a baseline then records matching deltas', async () => {

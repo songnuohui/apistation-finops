@@ -26,6 +26,13 @@ export const COST_SNAPSHOT_OPEN_DAYS = 3;
 export const USAGE_COST_SNAPSHOT_OPEN_DAYS = 1;
 export const COST_SNAPSHOT_COLUMN_COUNT = 24;
 export const MAX_COST_SNAPSHOT_ROWS_PER_INSERT = Math.max(1, Math.floor(65000 / COST_SNAPSHOT_COLUMN_COUNT));
+export const LEDGER_LOT_COLUMN_COUNT = 7;
+export const LEDGER_RECOGNITION_COLUMN_COUNT = 4;
+export const MAX_LEDGER_LOTS_PER_INSERT = Math.max(1, Math.floor(65000 / LEDGER_LOT_COLUMN_COUNT));
+export const MAX_LEDGER_RECOGNITIONS_PER_INSERT = Math.min(
+  2_000,
+  Math.max(1, Math.floor(65000 / LEDGER_RECOGNITION_COLUMN_COUNT)),
+);
 
 export const REQUIRED_SOURCE_COLUMNS = {
   usage_logs: [
@@ -96,6 +103,10 @@ function dateKey(value, timeZone) {
 
 function sourceTimestamp(cursor) {
   return cursor?.cursor_time || '1970-01-01 00:00:00+00';
+}
+
+function cursorTimeKey(value) {
+  return value?.cursor_time_key || value?.updated_at || value?.occurred_at || value?.created_at;
 }
 
 function normalizedGroupName(value) {
@@ -618,7 +629,7 @@ export class SyncService {
   async cursor(client, sourceName) {
     await client.query(`INSERT INTO ${this.schema}.sync_cursors(source_name) VALUES($1) ON CONFLICT DO NOTHING`, [sourceName]);
     const result = await client.query(
-      `SELECT cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1 FOR UPDATE`,
+      `SELECT cursor_time::text AS cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1 FOR UPDATE`,
       [sourceName],
     );
     return result.rows[0];
@@ -1196,7 +1207,7 @@ export class SyncService {
 
   async readCursor(sourceName) {
     const result = await this.finopsPool.query(
-      `SELECT cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1`,
+      `SELECT cursor_time::text AS cursor_time,cursor_id FROM ${this.schema}.sync_cursors WHERE source_name=$1`,
       [sourceName],
     );
     return result.rows[0];
@@ -1234,7 +1245,7 @@ export class SyncService {
         total_cost AS standard_cost_usd_reference,actual_cost AS user_charge_cny,
         COALESCE(rate_multiplier,1) AS user_rate_multiplier,
         account_rate_multiplier,
-        duration_ms,first_token_ms,created_at AS occurred_at
+        duration_ms,first_token_ms,created_at AS occurred_at,created_at::text AS cursor_time_key
       FROM ${this.source}.usage_logs
       WHERE (created_at,id)>($1,$2)
       ORDER BY created_at,id LIMIT $3`,
@@ -1247,7 +1258,7 @@ export class SyncService {
       }
       await this.upsertUsageRows(client, sourceRows.rows);
       const last = sourceRows.rows.at(-1);
-      await this.markSuccess(client, 'usage_logs', { time: last.occurred_at, id: last.source_usage_id }, sourceRows.rowCount);
+      await this.markSuccess(client, 'usage_logs', { time: cursorTimeKey(last), id: last.source_usage_id }, sourceRows.rowCount);
       return sourceRows.rowCount;
     });
   }
@@ -1451,7 +1462,7 @@ export class SyncService {
     const sourceRows = await this.sourcePool.query(`
       SELECT id,user_id,pay_amount,amount,COALESCE(provider_snapshot->>'currency','CNY') AS currency,
         provider_snapshot,payment_type,order_type${subscriptionColumns},status,
-        refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at
+        refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at,updated_at::text AS cursor_time_key
       FROM ${this.source}.payment_orders
       WHERE (updated_at,id)>($1,$2)${orderFilter} ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
@@ -1466,7 +1477,7 @@ export class SyncService {
       if (!sourceRows.rowCount) await this.markSuccess(client, 'payment_orders', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
-        await this.markSuccess(client, 'payment_orders', { time: last.updated_at, id: last.id }, sourceRows.rowCount);
+        await this.markSuccess(client, 'payment_orders', { time: cursorTimeKey(last), id: last.id }, sourceRows.rowCount);
       }
       return sourceRows.rowCount;
     });
@@ -1476,8 +1487,9 @@ export class SyncService {
     const previousEvents = await client.query(`
       SELECT DISTINCT source_user_id FROM ${this.schema}.credit_events
       WHERE source_table='payment_orders' AND source_id=$1`, [row.id]);
-    const affectedUsers = new Set([Number(row.user_id)]);
-    for (const previous of previousEvents.rows) affectedUsers.add(Number(previous.source_user_id));
+    const previousUsers = new Set(previousEvents.rows.map((previous) => Number(previous.source_user_id)).filter(Boolean));
+    const affectedUsers = new Set();
+    let ledgerChanged = false;
     const orderType = this.config.subscriptionsEnabled ? (row.order_type || 'balance') : 'balance';
     const currency = String(row.currency || 'CNY').toUpperCase();
     const pay = decimal(row.pay_amount);
@@ -1543,36 +1555,47 @@ export class SyncService {
       [row.id, row.status || '', row.updated_at]);
     }
     if (row.paid_at && orderType === 'balance' && credited.gt(0)) {
-      await this.upsertCreditEvent(client, {
+      const result = await this.upsertCreditEvent(client, {
         sourceTable: 'payment_orders', sourceId: row.id, sourceVersion: 'recharge', sourceUserId: row.user_id,
         eventType: 'recharge', direction: 'in', creditAmount: credited, creditCurrency: 'CNY',
         cashBasisCny: basePaid, originalAmount: pay, originalCurrency: currency, occurredAt: row.paid_at,
         metadata: { order_type: orderType, recharge_code: row.recharge_code || '', cash_status: cashStatus },
       });
+      ledgerChanged ||= result.changed;
     } else {
-      await this.voidCreditEvent(client, 'payment_orders', row.id, 'recharge', 'payment_not_creditable', row.updated_at);
+      const result = await this.voidCreditEvent(client, 'payment_orders', row.id, 'recharge', 'payment_not_creditable', row.updated_at);
+      ledgerChanged ||= result.changed;
     }
     if (row.paid_at && row.refund_at && refund.gt(0) && orderType === 'balance') {
       const refundCash = refundCashAmount(row.amount, row.pay_amount, refund);
-      await this.upsertCreditEvent(client, {
+      const result = await this.upsertCreditEvent(client, {
         sourceTable: 'payment_orders', sourceId: row.id, sourceVersion: 'refund', sourceUserId: row.user_id,
         eventType: 'refund', direction: 'out', creditAmount: refund, creditCurrency: 'CNY',
         cashBasisCny: currency === 'CNY' ? refundCash : 0, originalAmount: refund, originalCurrency: 'CNY',
         occurredAt: row.refund_at, metadata: { order_type: orderType, refund_cash_cny: refundCash.toString() },
       });
+      ledgerChanged ||= result.changed;
     } else {
-      await this.voidCreditEvent(client, 'payment_orders', row.id, 'refund', 'refund_not_effective', row.updated_at);
+      const result = await this.voidCreditEvent(client, 'payment_orders', row.id, 'refund', 'refund_not_effective', row.updated_at);
+      ledgerChanged ||= result.changed;
+    }
+    if (ledgerChanged) {
+      affectedUsers.add(Number(row.user_id));
+      for (const previousUser of previousUsers) affectedUsers.add(previousUser);
     }
     return affectedUsers;
   }
 
   async voidCreditEvent(client, sourceTable, sourceId, sourceVersion, reason, sourceUpdatedAt) {
-    await client.query(`
+    const result = await client.query(`
       UPDATE ${this.schema}.credit_events
       SET credit_amount=0,cash_basis_cny=0,
         metadata=metadata || $4::jsonb,synced_at=NOW()
-      WHERE source_table=$1 AND source_id=$2 AND source_version=$3`,
-    [sourceTable, sourceId, sourceVersion, JSON.stringify({ voided: true, reason, source_updated_at: sourceUpdatedAt || null })]);
+      WHERE source_table=$1 AND source_id=$2 AND source_version=$3
+        AND ROW(credit_amount,cash_basis_cny,metadata || $4::jsonb)
+          IS DISTINCT FROM ROW(0::numeric,0::numeric,metadata)`,
+      [sourceTable, sourceId, sourceVersion, JSON.stringify({ voided: true, reason, source_updated_at: sourceUpdatedAt || null })]);
+    return { changed: result.rowCount > 0 };
   }
 
   async upsertCreditEvent(client, event) {
@@ -1586,17 +1609,29 @@ export class SyncService {
         credit_amount=EXCLUDED.credit_amount,credit_currency=EXCLUDED.credit_currency,cash_basis_cny=EXCLUDED.cash_basis_cny,
         original_amount=EXCLUDED.original_amount,original_currency=EXCLUDED.original_currency,occurred_at=EXCLUDED.occurred_at,
         metadata=EXCLUDED.metadata,synced_at=NOW()
+      WHERE ROW(
+        credit_events.source_user_id,credit_events.event_type,credit_events.direction,
+        credit_events.credit_amount,credit_events.credit_currency,credit_events.cash_basis_cny,
+        credit_events.original_amount,credit_events.original_currency,credit_events.occurred_at,
+        credit_events.metadata
+      ) IS DISTINCT FROM ROW(
+        EXCLUDED.source_user_id,EXCLUDED.event_type,EXCLUDED.direction,
+        EXCLUDED.credit_amount,EXCLUDED.credit_currency,EXCLUDED.cash_basis_cny,
+        EXCLUDED.original_amount,EXCLUDED.original_currency,EXCLUDED.occurred_at,
+        EXCLUDED.metadata
+      )
       RETURNING id`,
     [event.sourceTable, event.sourceId, event.sourceVersion, event.sourceUserId, event.eventType, event.direction,
       numeric(event.creditAmount), 'CNY', numeric(event.cashBasisCny), numeric(event.originalAmount), event.originalCurrency,
       event.occurredAt, JSON.stringify(event.metadata || {})]);
-    return result.rows[0].id;
+    return { id: result.rows[0]?.id, changed: result.rowCount > 0 };
   }
 
   async syncRedeemCodes() {
     const cursor = await this.readCursor('redeem_codes');
     const sourceRows = await this.sourcePool.query(`
-      SELECT rc.id,rc.code,rc.type,rc.value,rc.status,rc.used_by,rc.used_at,rc.notes,rc.created_at,
+        SELECT rc.id,rc.code,rc.type,rc.value,rc.status,rc.used_by,rc.used_at,rc.notes,rc.created_at,
+          COALESCE(rc.used_at,rc.created_at)::text AS cursor_time_key,
         po.id AS payment_order_id,po.amount AS payment_amount,po.pay_amount AS payment_pay_amount,
         COALESCE(po.provider_snapshot->>'currency','CNY') AS payment_currency
       FROM ${this.source}.redeem_codes rc
@@ -1617,7 +1652,7 @@ export class SyncService {
           cashBasis = decimal(row.payment_pay_amount).mul(creditAmount).div(decimal(row.payment_amount));
           if (String(row.payment_currency).toUpperCase() !== 'CNY') cashBasis = new Decimal(0);
         }
-        await this.upsertCreditEvent(client, {
+        const result = await this.upsertCreditEvent(client, {
           sourceTable: 'redeem_codes', sourceId: row.id, sourceVersion: 'used', sourceUserId: row.used_by,
           eventType: row.type === 'admin_balance' ? 'admin_adjustment' : 'redeem', direction,
           creditAmount, creditCurrency: 'CNY', cashBasisCny: cashBasis,
@@ -1627,13 +1662,13 @@ export class SyncService {
             linked_recharge: Boolean(row.payment_order_id), notes: row.notes || '',
           },
         });
-        users.add(Number(row.used_by));
+        if (result.changed) users.add(Number(row.used_by));
       }
       for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       if (!sourceRows.rowCount) await this.markSuccess(client, 'redeem_codes', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
-        await this.markSuccess(client, 'redeem_codes', { time: last.used_at || last.created_at, id: last.id }, sourceRows.rowCount);
+        await this.markSuccess(client, 'redeem_codes', { time: cursorTimeKey(last), id: last.id }, sourceRows.rowCount);
       }
       return sourceRows.rowCount;
     });
@@ -1642,7 +1677,7 @@ export class SyncService {
   async syncAffiliateLedger() {
     const cursor = await this.readCursor('user_affiliate_ledger');
     const sourceRows = await this.sourcePool.query(`
-      SELECT id,user_id,action,amount,source_user_id,source_order_id,created_at,updated_at
+      SELECT id,user_id,action,amount,source_user_id,source_order_id,created_at,updated_at,updated_at::text AS cursor_time_key
       FROM ${this.source}.user_affiliate_ledger
       WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
@@ -1653,7 +1688,7 @@ export class SyncService {
         const amount = decimal(row.amount);
         if (amount.eq(0)) continue;
         const direction = amount.gte(0) ? 'in' : 'out';
-        await this.upsertCreditEvent(client, {
+        const result = await this.upsertCreditEvent(client, {
           sourceTable: 'user_affiliate_ledger', sourceId: row.id, sourceVersion: row.action,
           sourceUserId: row.user_id, eventType: 'affiliate_rebate', direction, creditAmount: amount.abs(),
           creditCurrency: 'CNY', cashBasisCny: 0, originalAmount: amount.abs(), originalCurrency: 'CNY',
@@ -1662,13 +1697,13 @@ export class SyncService {
             accounting_scope: row.action === 'accrue' ? 'affiliate_quota' : 'user_balance',
           },
         });
-        users.add(Number(row.user_id));
+        if (result.changed) users.add(Number(row.user_id));
       }
       for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       if (!sourceRows.rowCount) await this.markSuccess(client, 'user_affiliate_ledger', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
-        await this.markSuccess(client, 'user_affiliate_ledger', { time: last.updated_at, id: last.id }, sourceRows.rowCount);
+        await this.markSuccess(client, 'user_affiliate_ledger', { time: cursorTimeKey(last), id: last.id }, sourceRows.rowCount);
       }
       return sourceRows.rowCount;
     });
@@ -1677,7 +1712,7 @@ export class SyncService {
   async syncPaymentAuditLogs() {
     const cursor = await this.readCursor('payment_audit_logs');
     const rows = await this.sourcePool.query(`
-      SELECT id,order_id,action,detail,operator,created_at
+      SELECT id,order_id,action,detail,operator,created_at,created_at::text AS cursor_time_key
       FROM ${this.source}.payment_audit_logs WHERE (created_at,id)>($1,$2)
       ORDER BY created_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     return inTransaction(this.finopsPool, async (client) => {
@@ -1692,7 +1727,7 @@ export class SyncService {
       if (!rows.rowCount) await this.markSuccess(client, 'payment_audit_logs', null, 0);
       else {
         const last = rows.rows.at(-1);
-        await this.markSuccess(client, 'payment_audit_logs', { time: last.created_at, id: last.id }, rows.rowCount);
+        await this.markSuccess(client, 'payment_audit_logs', { time: cursorTimeKey(last), id: last.id }, rows.rowCount);
       }
       return rows.rowCount;
     });
@@ -1701,7 +1736,7 @@ export class SyncService {
   async syncSubscriptions() {
     const cursor = await this.readCursor('user_subscriptions');
     const rows = await this.sourcePool.query(`
-      SELECT id,user_id,group_id,starts_at,expires_at,status,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,updated_at,deleted_at
+      SELECT id,user_id,group_id,starts_at,expires_at,status,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,updated_at,updated_at::text AS cursor_time_key,deleted_at
       FROM ${this.source}.user_subscriptions WHERE (updated_at,id)>($1,$2)
       ORDER BY updated_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     return inTransaction(this.finopsPool, async (client) => {
@@ -1721,7 +1756,7 @@ export class SyncService {
       if (!rows.rowCount) await this.markSuccess(client, 'user_subscriptions', null, 0);
       else {
         const last = rows.rows.at(-1);
-        await this.markSuccess(client, 'user_subscriptions', { time: last.updated_at, id: last.id }, rows.rowCount);
+        await this.markSuccess(client, 'user_subscriptions', { time: cursorTimeKey(last), id: last.id }, rows.rowCount);
       }
       return rows.rowCount;
     });
@@ -1746,36 +1781,58 @@ export class SyncService {
         FROM ${this.schema}.fact_usage_events WHERE source_user_id=$1 AND billing_type=0
       ) ledger_events
       ORDER BY occurred_at,kind_order,event_id`, [userId]);
+    const lotSpecs = [];
+    for (const item of events.rows) {
+      if (item.kind !== 'credit' || item.direction !== 'in') continue;
+      const amount = decimal(item.credit_amount);
+      const metadata = item.metadata || {};
+      if (amount.lte(0) || metadata.accounting_scope === 'affiliate_quota' || metadata.linked_recharge) continue;
+      const lotType = metadata.order_type === 'balance' ? 'paid' : metadata.redeem_type === 'admin_balance' ? 'admin' : 'gift';
+      lotSpecs.push({
+        sourceEventId: item.event_id,
+        amount: amount.toString(),
+        cashBasisCny: numeric(item.cash_basis_cny),
+        acquiredAt: item.occurred_at,
+        lotType,
+        metadata,
+      });
+    }
+    const lotsByEvent = await this.insertLedgerLots(client, userId, lotSpecs);
     const lots = [];
     const deficits = [];
+    const recognitionRows = [];
+    const flushRecognitions = async () => {
+      if (!recognitionRows.length) return;
+      await this.insertLedgerRecognitions(client, recognitionRows);
+      recognitionRows.length = 0;
+    };
     for (const item of events.rows) {
       const amount = decimal(item.credit_amount);
       if (amount.lte(0)) continue;
       if (item.kind === 'credit') {
         const metadata = item.metadata || {};
         if (item.direction === 'in' && metadata.accounting_scope !== 'affiliate_quota' && !metadata.linked_recharge) {
-          const lotType = metadata.order_type === 'balance' ? 'paid' : metadata.redeem_type === 'admin_balance' ? 'admin' : 'gift';
-          const lot = await client.query(`
-            INSERT INTO ${this.schema}.credit_lots(source_event_id,source_user_id,granted_credit,remaining_credit,cash_basis_cny,credit_currency,acquired_at,lot_type,metadata)
-            VALUES($1,$2,$3,$3,$4,'CNY',$5,$6,$7::jsonb) RETURNING id,granted_credit,remaining_credit,cash_basis_cny`,
-          [item.event_id, userId, amount.toString(), item.cash_basis_cny || 0, item.occurred_at, lotType, JSON.stringify(metadata)]);
-          lots.push({ id: lot.rows[0].id, granted: decimal(lot.rows[0].granted_credit), remaining: decimal(lot.rows[0].remaining_credit), cash: decimal(lot.rows[0].cash_basis_cny) });
+          const lot = lotsByEvent.get(String(item.event_id));
+          if (!lot) throw new Error(`missing rebuilt credit lot for source event ${item.event_id}`);
+          lots.push(lot);
           while (deficits.length && lots.at(-1).remaining.gt(0)) {
             const deficit = deficits[0];
-            const result = await this.consumeLots(client, lots, deficit.remaining, deficit.usageId);
+            const result = await this.consumeLots(lots, deficit.remaining, deficit.usageId, recognitionRows, flushRecognitions);
             deficit.remaining = result.pending;
             if (deficit.remaining.lte(0)) deficits.shift();
             else break;
           }
         } else if (item.direction === 'out') {
-          const result = await this.consumeLots(client, lots, amount, null);
+          const result = await this.consumeLots(lots, amount, null, recognitionRows, flushRecognitions);
           if (result.pending.gt(0)) deficits.push({ usageId: null, remaining: result.pending });
         }
       } else {
-        const result = await this.consumeLots(client, lots, amount, item.event_id);
+        const result = await this.consumeLots(lots, amount, item.event_id, recognitionRows, flushRecognitions);
         if (result.pending.gt(0)) deficits.push({ usageId: item.event_id, remaining: result.pending });
       }
     }
+    await flushRecognitions();
+    await this.updateLedgerLots(client, lots);
     await client.query(`
       UPDATE ${this.schema}.fact_usage_events f
       SET recognized_revenue_cny=rollup.recognized_revenue_cny,
@@ -1798,7 +1855,79 @@ export class SyncService {
     await this.refreshUsageDaily(client, usageDays);
   }
 
-  async consumeLots(client, lots, amount, usageId) {
+  async insertLedgerLots(client, userId, lotSpecs) {
+    const lotsByEvent = new Map();
+    for (let offset = 0; offset < lotSpecs.length; offset += MAX_LEDGER_LOTS_PER_INSERT) {
+      const chunk = lotSpecs.slice(offset, offset + MAX_LEDGER_LOTS_PER_INSERT);
+      const params = [];
+      const values = chunk.map((lot, rowIndex) => {
+        const base = rowIndex * LEDGER_LOT_COLUMN_COUNT;
+        params.push(
+          lot.sourceEventId,
+          userId,
+          lot.amount,
+          lot.cashBasisCny,
+          lot.acquiredAt,
+          lot.lotType,
+          JSON.stringify(lot.metadata || {}),
+        );
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 3},$${base + 4},'CNY',$${base + 5},$${base + 6},$${base + 7}::jsonb)`;
+      });
+      const result = await client.query(`
+        INSERT INTO ${this.schema}.credit_lots(
+          source_event_id,source_user_id,granted_credit,remaining_credit,cash_basis_cny,
+          credit_currency,acquired_at,lot_type,metadata)
+        VALUES ${values.join(',')}
+        RETURNING id,source_event_id,granted_credit,remaining_credit,cash_basis_cny`, params);
+      for (const row of result.rows) {
+        lotsByEvent.set(String(row.source_event_id), {
+          id: row.id,
+          granted: decimal(row.granted_credit),
+          remaining: decimal(row.remaining_credit),
+          cash: decimal(row.cash_basis_cny),
+        });
+      }
+    }
+    return lotsByEvent;
+  }
+
+  async insertLedgerRecognitions(client, rows) {
+    for (let offset = 0; offset < rows.length; offset += MAX_LEDGER_RECOGNITIONS_PER_INSERT) {
+      const chunk = rows.slice(offset, offset + MAX_LEDGER_RECOGNITIONS_PER_INSERT);
+      const params = [];
+      const values = chunk.map((row, rowIndex) => {
+        const base = rowIndex * LEDGER_RECOGNITION_COLUMN_COUNT;
+        params.push(...row);
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},'CNY','fifo')`;
+      });
+      await client.query(`
+        INSERT INTO ${this.schema}.revenue_recognition(
+          source_usage_id,credit_lot_id,allocated_credit,recognized_revenue_cny,revenue_currency,method)
+        VALUES ${values.join(',')}`, params);
+    }
+  }
+
+  async updateLedgerLots(client, lots) {
+    const maxRows = Math.floor(65000 / 2);
+    for (let offset = 0; offset < lots.length; offset += maxRows) {
+      const chunk = lots.slice(offset, offset + maxRows);
+      const params = [];
+      const values = chunk.map((lot, rowIndex) => {
+        const base = rowIndex * 2;
+        params.push(lot.id, lot.remaining.toString());
+        return `($${base + 1}::bigint,$${base + 2}::numeric)`;
+      });
+      await client.query(`
+        UPDATE ${this.schema}.credit_lots AS lot
+        SET remaining_credit=updated.remaining_credit,
+          status=CASE WHEN updated.remaining_credit<=0 THEN 'exhausted' ELSE 'open' END,
+          updated_at=NOW()
+        FROM (VALUES ${values.join(',')}) AS updated(id,remaining_credit)
+        WHERE lot.id=updated.id`, params);
+    }
+  }
+
+  async consumeLots(lots, amount, usageId, recognitionRows, flushRecognitions) {
     let pending = decimal(amount);
     let lotIndex = 0;
     let recognized = new Decimal(0);
@@ -1809,17 +1938,13 @@ export class SyncService {
       if (take.lte(0)) { lotIndex += 1; continue; }
       if (usageId !== null) {
         const revenue = lot.granted.gt(0) ? take.mul(lot.cash).div(lot.granted) : new Decimal(0);
-        await client.query(`
-          INSERT INTO ${this.schema}.revenue_recognition(source_usage_id,credit_lot_id,allocated_credit,recognized_revenue_cny,revenue_currency,method)
-          VALUES($1,$2,$3,$4,'CNY','fifo') ON CONFLICT(source_usage_id,credit_lot_id) DO UPDATE SET
-            allocated_credit=EXCLUDED.allocated_credit,recognized_revenue_cny=EXCLUDED.recognized_revenue_cny`,
-        [usageId, lot.id, take.toString(), revenue.toString()]);
+        recognitionRows.push([usageId, lot.id, take.toString(), revenue.toString()]);
+        if (recognitionRows.length >= MAX_LEDGER_RECOGNITIONS_PER_INSERT) await flushRecognitions();
         recognized = recognized.plus(revenue);
       }
       allocated = allocated.plus(take);
       lot.remaining = lot.remaining.minus(take);
       pending = pending.minus(take);
-      await client.query(`UPDATE ${this.schema}.credit_lots SET remaining_credit=$1,status=CASE WHEN $1::numeric<=0 THEN 'exhausted' ELSE 'open' END,updated_at=NOW() WHERE id=$2`, [lot.remaining.toString(), lot.id]);
       if (lot.remaining.lte(0)) lotIndex += 1;
     }
     return { pending, recognized, allocated };
