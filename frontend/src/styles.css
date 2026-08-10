@@ -255,6 +255,48 @@ button:disabled{cursor:not-allowed!important}
 .danger-action:hover{color:#a82f41!important;border-color:#e3a9b1;background:#fff2f3}
 .custom-range-fields{box-shadow:0 2px 8px rgba(39,67,100,.03)}
 
+.oauth-supply-view{gap:18px}
+.oauth-supply-hero{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:24px;
+  padding:24px 26px;
+  border:1px solid #cfe0f3;
+  border-radius:8px;
+  background:linear-gradient(105deg,#eff6ff 0%,#fff 62%);
+  box-shadow:0 6px 20px rgba(37,91,151,.06);
+}
+.oauth-supply-hero-copy{min-width:0}
+.oauth-supply-eyebrow{display:flex;align-items:center;gap:7px;color:#1769d5;font-size:11px;font-weight:800;letter-spacing:.04em}
+.oauth-supply-hero h2{margin:9px 0 6px;color:var(--ink);font-size:24px}
+.oauth-supply-hero p{max-width:720px;margin:0;color:#6e7f94;font-size:13px;line-height:21px}
+.oauth-supply-hero-status{display:flex;align-items:center;gap:10px;min-width:220px;padding:13px 15px;border:1px solid #d8e5f2;border-radius:8px;background:#fff;color:#1769d5}
+.oauth-supply-hero-status strong,.oauth-supply-hero-status small{display:block}
+.oauth-supply-hero-status strong{color:var(--ink);font-size:13px}
+.oauth-supply-hero-status small{margin-top:4px;color:var(--muted);font-size:11px}
+.oauth-supply-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,.75fr);gap:18px}
+.oauth-supply-form-panel,.oauth-supply-status-panel{min-width:0}
+.oauth-supply-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:20px}
+.password-field{position:relative;display:flex;align-items:center}
+.password-field input{width:100%;padding-right:44px!important}
+.password-field .icon-button{position:absolute;right:4px;width:31px;height:31px;border:0}
+.oauth-supply-status-list{display:grid;gap:0;margin:0;border-top:1px solid #edf2f7}
+.oauth-supply-status-list>div{display:flex;justify-content:space-between;gap:16px;padding:13px 0;border-bottom:1px solid #edf2f7}
+.oauth-supply-status-list dt{color:var(--muted);font-size:12px}
+.oauth-supply-status-list dd{max-width:68%;margin:0;color:#31445d;font-size:12px;text-align:right;overflow-wrap:anywhere}
+.oauth-supply-status-list code{font-size:11px;color:#315c8e}
+.oauth-supply-error dd{color:var(--red)}
+.oauth-supply-status-panel>.full{margin-top:18px}
+.form-note{display:flex;align-items:flex-start;gap:8px}
+.toggle-field strong,.toggle-field small{display:block}
+.toggle-field small{margin-top:4px;color:var(--muted);font-size:11px;font-weight:400;line-height:17px}
+@media(max-width:900px){
+  .oauth-supply-hero{align-items:stretch;flex-direction:column}
+  .oauth-supply-hero-status{min-width:0}
+  .oauth-supply-grid{grid-template-columns:1fr}
+}
+
 @media (max-width:1100px){
   .topbar{padding:15px 23px}
   .page-content{padding:23px}

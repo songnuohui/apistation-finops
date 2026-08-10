@@ -365,6 +365,25 @@ export function normalizeSub2ApiServiceAuthSettings(input) {
   };
 }
 
+export function normalizeOAuthSupplyAuthSettings(input) {
+  const baseUrl = textValue(input.baseUrl || 'https://sogouedu.cc', 'baseUrl', { max: 1000 });
+  let parsed;
+  try { parsed = new URL(baseUrl); }
+  catch { throw badRequest('invalid baseUrl'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw badRequest('baseUrl must be an HTTPS URL without credentials, query, or fragment');
+  }
+  return {
+    enabled: input.enabled === undefined ? false : booleanValue(input.enabled, 'enabled'),
+    baseUrl: parsed.toString().replace(/\/+$/, ''),
+    username: textValue(input.username, 'username', { required: false, max: 255 }),
+    password: textValue(input.password, 'password', { required: false, max: 8192 }),
+    clearCredentials: input.clearCredentials === undefined
+      ? false
+      : booleanValue(input.clearCredentials, 'clearCredentials'),
+  };
+}
+
 export function normalizeAccountProfitGuard(input) {
   const rawMargin = input.minimumMargin === undefined || input.minimumMargin === ''
     ? 0

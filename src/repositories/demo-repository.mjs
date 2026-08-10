@@ -242,6 +242,11 @@ export class DemoRepository {
       enabled:false,authMode:'password',email:'',credentialsConfigured:false,credentialsCiphertext:'',
       lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
     };
+    this.oauthSupplyAuthSettings = {
+      enabled:false,baseUrl:'https://sogouedu.cc',username:'',credentialsConfigured:false,
+      credentialsCiphertext:'',tokenConfigured:false,tokenCiphertext:'',
+      lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
+    };
     this.supplierAlertDeliveries = new Map();
     this.accountProfitGuardPolicies = new Map();
     this.supplierProfitGuardDefaults = new Map();
@@ -1674,6 +1679,46 @@ export class DemoRepository {
       lastError:String(lastError || ''),
       updatedAt:new Date().toISOString(),
     });
+  }
+
+  async getOAuthSupplyAuthSettings({ includeCiphertext = false } = {}) {
+    const result = { ...this.oauthSupplyAuthSettings };
+    if (!includeCiphertext) {
+      delete result.credentialsCiphertext;
+      delete result.tokenCiphertext;
+    }
+    return result;
+  }
+
+  async updateOAuthSupplyAuthSettings(input, credentialsCiphertext, actor = 'admin') {
+    Object.assign(this.oauthSupplyAuthSettings, {
+      enabled:Boolean(input.enabled),
+      baseUrl:input.baseUrl || 'https://sogouedu.cc',
+      username:input.username || '',
+      credentialsCiphertext:credentialsCiphertext || '',
+      credentialsConfigured:Boolean(credentialsCiphertext),
+      tokenConfigured:false,
+      tokenCiphertext:'',
+      lastAuthenticatedAt:null,
+      tokenExpiresAt:null,
+      lastError:'',
+      updatedBy:actor,
+      updatedAt:new Date().toISOString(),
+    });
+    return this.getOAuthSupplyAuthSettings();
+  }
+
+  async recordOAuthSupplyAuthResult({
+    tokenCiphertext = null, lastAuthenticatedAt = null, tokenExpiresAt = null, lastError = '',
+  }) {
+    if (tokenCiphertext !== null) {
+      this.oauthSupplyAuthSettings.tokenCiphertext = tokenCiphertext;
+      this.oauthSupplyAuthSettings.tokenConfigured = Boolean(tokenCiphertext);
+      this.oauthSupplyAuthSettings.tokenExpiresAt = tokenExpiresAt;
+    }
+    if (lastAuthenticatedAt) this.oauthSupplyAuthSettings.lastAuthenticatedAt = lastAuthenticatedAt;
+    this.oauthSupplyAuthSettings.lastError = String(lastError || '');
+    this.oauthSupplyAuthSettings.updatedAt = new Date().toISOString();
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

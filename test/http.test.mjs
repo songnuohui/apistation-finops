@@ -12,6 +12,7 @@ import {
   normalizeAlertNotificationSettings,
   normalizeAccountProfitGuard,
   normalizeSub2ApiServiceAuthSettings,
+  normalizeOAuthSupplyAuthSettings,
 } from '../src/http/validation.mjs';
 
 test('today and month ranges start at midnight in the configured timezone', () => {
@@ -288,6 +289,29 @@ test('Sub2API service authentication validates credentials without exposing a to
   assert.throws(
     () => normalizeSub2ApiServiceAuthSettings({ enabled: 'not-a-boolean' }),
     /invalid enabled/,
+  );
+});
+
+test('OAuth Supply authentication validates an HTTPS customer endpoint without accepting secrets in the URL', () => {
+  assert.deepEqual(normalizeOAuthSupplyAuthSettings({
+    enabled: 'true',
+    baseUrl: 'https://sogouedu.cc/',
+    username: 'customer-1',
+    password: 'customer-password',
+  }), {
+    enabled: true,
+    baseUrl: 'https://sogouedu.cc',
+    username: 'customer-1',
+    password: 'customer-password',
+    clearCredentials: false,
+  });
+  assert.throws(
+    () => normalizeOAuthSupplyAuthSettings({ enabled: true, baseUrl: 'http://sogouedu.cc' }),
+    /HTTPS URL/,
+  );
+  assert.throws(
+    () => normalizeOAuthSupplyAuthSettings({ enabled: true, baseUrl: 'https://sogouedu.cc?token=secret' }),
+    /HTTPS URL/,
   );
 });
 

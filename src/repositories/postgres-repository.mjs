@@ -81,6 +81,26 @@ function sub2ApiServiceAuthSettings(row, { includeCiphertext = false } = {}) {
   return result;
 }
 
+function oauthSupplyAuthSettings(row, { includeCiphertext = false } = {}) {
+  const result = {
+    enabled: Boolean(row?.enabled),
+    baseUrl: row?.base_url || 'https://sogouedu.cc',
+    username: row?.username || '',
+    credentialsConfigured: Boolean(row?.credentials_ciphertext),
+    tokenConfigured: Boolean(row?.token_ciphertext),
+    lastAuthenticatedAt: row?.last_authenticated_at || null,
+    tokenExpiresAt: row?.token_expires_at || null,
+    lastError: row?.last_error || '',
+    updatedBy: row?.updated_by || '',
+    updatedAt: row?.updated_at || null,
+  };
+  if (includeCiphertext) {
+    result.credentialsCiphertext = row?.credentials_ciphertext || '';
+    result.tokenCiphertext = row?.token_ciphertext || '';
+  }
+  return result;
+}
+
 function cnySum(...values) {
   return values.reduce((total, value) => total.plus(value || 0), new Decimal(0)).toString();
 }
@@ -4812,6 +4832,51 @@ export class PostgresRepository {
         last_error=$3,updated_at=NOW()
       WHERE id=1`,
     [lastAuthenticatedAt, tokenExpiresAt, String(lastError || '').slice(0, 1000)]);
+  }
+
+  async getOAuthSupplyAuthSettings({ includeCiphertext = false } = {}) {
+    const result = await this.pool.query(`
+      SELECT enabled,base_url,username,credentials_ciphertext,token_ciphertext,
+             last_authenticated_at,token_expires_at,last_error,updated_by,updated_at
+      FROM ${this.schema}.oauth_supply_auth_settings WHERE id=1`);
+    return oauthSupplyAuthSettings(result.rows[0], { includeCiphertext });
+  }
+
+  async updateOAuthSupplyAuthSettings(input, credentialsCiphertext, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`
+        UPDATE ${this.schema}.oauth_supply_auth_settings SET
+          enabled=$1,base_url=$2,username=$3,credentials_ciphertext=$4,
+          token_ciphertext='',last_authenticated_at=NULL,token_expires_at=NULL,
+          last_error='',updated_by=$5,updated_at=NOW()
+        WHERE id=1
+        RETURNING enabled,base_url,username,credentials_ciphertext,token_ciphertext,
+                  last_authenticated_at,token_expires_at,last_error,updated_by,updated_at`,
+      [Boolean(input.enabled), input.baseUrl, input.username || '', credentialsCiphertext || '', actor]);
+      const row = result.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_oauth_supply_auth','oauth_supply_auth_settings','singleton',$2::jsonb)`,
+      [actor, JSON.stringify({
+        enabled: Boolean(row.enabled),
+        baseUrl: row.base_url,
+        username: row.username,
+        credentialsConfigured: Boolean(row.credentials_ciphertext),
+      })]);
+      return oauthSupplyAuthSettings(row);
+    });
+  }
+
+  async recordOAuthSupplyAuthResult({
+    tokenCiphertext = null, lastAuthenticatedAt = null, tokenExpiresAt = null, lastError = '',
+  }) {
+    await this.pool.query(`
+      UPDATE ${this.schema}.oauth_supply_auth_settings SET
+        token_ciphertext=CASE WHEN $1::text IS NULL THEN token_ciphertext ELSE $1 END,
+        token_expires_at=CASE WHEN $1::text IS NULL THEN token_expires_at ELSE $2::timestamptz END,
+        last_authenticated_at=COALESCE($3::timestamptz,last_authenticated_at),
+        last_error=$4,updated_at=NOW()
+      WHERE id=1`,
+    [tokenCiphertext, tokenExpiresAt, lastAuthenticatedAt, String(lastError || '').slice(0, 1000)]);
   }
 
   async getAlertNotificationSettings({ includeCiphertext = false } = {}) {

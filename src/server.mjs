@@ -20,6 +20,7 @@ import {
   hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
   normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
+  normalizeOAuthSupplyAuthSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
@@ -31,6 +32,7 @@ import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs'
 import { AccountProfitGuardService } from './services/account-profit-guard-service.mjs';
 import { SupplierDeletionService } from './services/supplier-deletion-service.mjs';
 import { Sub2ApiServiceAuthService } from './services/sub2api-service-auth-service.mjs';
+import { OAuthSupplyAuthService } from './services/oauth-supply-auth-service.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -58,6 +60,7 @@ const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
 const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
+const oauthSupplyAuthService=new OAuthSupplyAuthService(repository,config);
 const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
 const supplierDeletionService=new SupplierDeletionService(repository,sub2ApiReadonlyGateway,{demoMode:config.demoMode});
 const pendingLogins=new PendingLoginStore();
@@ -515,6 +518,20 @@ async function api(request,res,url){
     await sub2ApiServiceAuthService.loadSettings();
     return json(res,200,sub2ApiServiceAuthService.status());
   }
+  if(request.method==='GET'&&url.pathname==='/api/oauth-supply-auth'){
+    await oauthSupplyAuthService.loadSettings();
+    return json(res,200,oauthSupplyAuthService.status());
+  }
+  if(request.method==='PATCH'&&url.pathname==='/api/oauth-supply-auth'){
+    const settings=await oauthSupplyAuthService.updateSettings(
+      normalizeOAuthSupplyAuthSettings(await body(request)),
+      auth.actor,
+    );
+    return json(res,200,settings);
+  }
+  if(request.method==='POST'&&url.pathname==='/api/oauth-supply-auth/test'){
+    return json(res,200,await oauthSupplyAuthService.test());
+  }
   if(request.method==='PATCH'&&url.pathname==='/api/sub2api-service-auth'){
     const settings=await sub2ApiServiceAuthService.updateSettings(
       normalizeSub2ApiServiceAuthSettings(await body(request)),
@@ -630,17 +647,18 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth']],
   );
-  if(migration.rowCount < 29)throw new Error('required FinOps migrations through 030_profit_guard_auto_assignment are not applied');
+  if(migration.rowCount < 30)throw new Error('required FinOps migrations through 031_oauth_supply_auth are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),
+    oauthSupplyAuth:oauthSupplyAuthService.status(),
   };
 }
 
