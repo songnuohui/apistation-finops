@@ -78,6 +78,54 @@ test('product mappings derive their internal pool key from the selected Sub2API 
   assert.deepEqual(mapping.targetGroupIds, [3, 9]);
 });
 
+test('replenishment rules can be paused, started, and deleted without losing mappings', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+
+  const paused = await repository.setRuleEnabled(1, false);
+  assert.equal(paused.enabled, false);
+  assert.equal((await repository.listRules({ enabledOnly: true })).length, 0);
+
+  const started = await repository.setRuleEnabled(1, true);
+  assert.equal(started.enabled, true);
+
+  await repository.deleteRule(1);
+  assert.equal((await repository.listRules()).length, 0);
+  assert.equal((await repository.listMappings()).length, 1);
+});
+
+test('product mappings cannot be deleted while a live rule still references them', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+
+  await assert.rejects(
+    repository.deleteMapping(1),
+    (error) => error?.statusCode === 409,
+  );
+
+  await repository.deleteRule(1);
+  await repository.deleteMapping(1);
+  assert.equal((await repository.listMappings()).length, 0);
+});
+
+test('replenishment rules with active orders cannot be deleted', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  await repository.createPlannedOrder({
+    rule,
+    trigger: 'manual',
+    quantity: 1,
+    availableBefore: 0,
+    quotedAmountCny: 1,
+    actor: 'test',
+    status: 'ordering',
+    idempotencyKey: 'active-delete-guard',
+  });
+
+  await assert.rejects(
+    repository.deleteRule(1),
+    (error) => error?.statusCode === 409,
+  );
+});
+
 test('delivery uses per-account charged amount and imports fixed account settings', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);

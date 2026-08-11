@@ -56,8 +56,13 @@
               </div>
             </div>
             <div class="row-actions">
-              <button class="icon-button" title="立即检查并按策略执行" @click="trigger(rule)"><Play :size="15" /></button>
+              <button class="icon-button" :title="rule.enabled ? '暂停策略' : '启动策略'" :disabled="actioningId === `rule-${rule.id}`" @click="toggleRule(rule)">
+                <Pause v-if="rule.enabled" :size="15" />
+                <Play v-else :size="15" />
+              </button>
+              <button class="icon-button" title="立即检查并按策略执行" :disabled="actioningId === `rule-${rule.id}`" @click="trigger(rule)"><Zap :size="15" /></button>
               <button class="icon-button" title="编辑策略" @click="editRule(rule)"><Settings2 :size="15" /></button>
+              <button class="icon-button danger-action" title="删除策略" :disabled="actioningId === `rule-${rule.id}`" @click="removeRule(rule)"><Trash2 :size="15" /></button>
             </div>
           </article>
         </div>
@@ -68,7 +73,11 @@
         <div class="mapping-list">
           <div v-for="mapping in mappings" :key="mapping.id" class="mapping-row">
             <div><strong>{{ mapping.product }}</strong><small>{{ platformText(mapping.platform) }}</small></div>
-            <div class="mapping-actions"><span class="mapping-group-summary" :title="groupSummary(mapping.targetGroupIds)">{{ groupSummary(mapping.targetGroupIds) }}</span><button class="icon-button" title="编辑映射" @click="editMapping(mapping)"><Settings2 :size="14" /></button></div>
+            <div class="mapping-actions">
+              <span class="mapping-group-summary" :title="groupSummary(mapping.targetGroupIds)">{{ groupSummary(mapping.targetGroupIds) }}</span>
+              <button class="icon-button" title="编辑映射" @click="editMapping(mapping)"><Settings2 :size="14" /></button>
+              <button class="icon-button danger-action" title="删除映射" :disabled="actioningId === `mapping-${mapping.id}`" @click="removeMapping(mapping)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <div v-if="!mappings.length" class="empty-state">还没有商品映射</div>
         </div>
@@ -166,13 +175,14 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { ChevronRight, Play, Plus, RefreshCw, Settings2, X } from 'lucide-vue-next';
+import { ChevronRight, Pause, Play, Plus, RefreshCw, Settings2, Trash2, X, Zap } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 const props = defineProps<{ refreshToken: number }>();
 const emit = defineEmits<{ (event: 'toast', message: string): void }>();
 const loading = ref(false);
 const saving = ref(false);
+const actioningId = ref('');
 const error = ref('');
 const editorError = ref('');
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
@@ -284,8 +294,48 @@ async function saveEditor() {
   }
 }
 async function trigger(rule: any) {
+  actioningId.value = `rule-${rule.id}`;
   try { await send('/replenishment/trigger', 'POST', { ruleId: rule.id }); emit('toast', '库存检查已完成'); await load(); }
   catch (err: any) { error.value = err.message || '执行补号失败'; }
+  finally { actioningId.value = ''; }
+}
+async function toggleRule(rule: any) {
+  actioningId.value = `rule-${rule.id}`;
+  try {
+    await send(`/replenishment/rules/${rule.id}/status`, 'PATCH', { enabled: !rule.enabled });
+    emit('toast', rule.enabled ? `策略“${rule.name}”已暂停` : `策略“${rule.name}”已启动`);
+    await load();
+  } catch (err: any) {
+    error.value = err.message || (rule.enabled ? '暂停策略失败' : '启动策略失败');
+  } finally {
+    actioningId.value = '';
+  }
+}
+async function removeRule(rule: any) {
+  if (!window.confirm(`确定删除补号策略“${rule.name}”吗？\n历史订单、成本和修复记录会保留，此操作不可撤销。`)) return;
+  actioningId.value = `rule-${rule.id}`;
+  try {
+    await send(`/replenishment/rules/${rule.id}`, 'DELETE', {});
+    emit('toast', `策略“${rule.name}”已删除`);
+    await load();
+  } catch (err: any) {
+    error.value = err.message || '删除策略失败';
+  } finally {
+    actioningId.value = '';
+  }
+}
+async function removeMapping(mapping: any) {
+  if (!window.confirm(`确定删除商品映射“${mapping.product} · ${platformText(mapping.platform)}”吗？\n仍被策略使用的映射无法删除。`)) return;
+  actioningId.value = `mapping-${mapping.id}`;
+  try {
+    await send(`/replenishment/mappings/${mapping.id}`, 'DELETE', {});
+    emit('toast', `商品映射“${mapping.product}”已删除`);
+    await load();
+  } catch (err: any) {
+    error.value = err.message || '删除商品映射失败';
+  } finally {
+    actioningId.value = '';
+  }
 }
 async function approve(order: any) {
   try { await send(`/replenishment/orders/${order.id}/approve`, 'POST', {}); emit('toast', `订单 #${order.id} 已批准`); await load(); }

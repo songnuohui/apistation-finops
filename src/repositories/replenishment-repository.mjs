@@ -8,6 +8,14 @@ function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
 }
 
+function notFound(message) {
+  return Object.assign(new Error(message), { statusCode: 404 });
+}
+
+function conflict(message) {
+  return Object.assign(new Error(message), { statusCode: 409 });
+}
+
 function mappingPoolKey(platform, groupIds) {
   return `${platform}:groups:${groupIds.join('-')}`;
 }
@@ -267,6 +275,7 @@ export class ReplenishmentRepository {
     if (this.demo) return this.mappings.map((entry) => ({ ...entry, targetGroupIds: [...entry.targetGroupIds] }));
     const result = await this.pool.query(`
       SELECT * FROM ${this.schema}.oauth_supply_product_mappings
+      WHERE deleted_at IS NULL
       ORDER BY enabled DESC, product, platform, target_pool_key, id`);
     return result.rows.map(mapping);
   }
@@ -302,7 +311,7 @@ export class ReplenishmentRepository {
           UPDATE ${this.schema}.oauth_supply_product_mappings SET
             product=$2,platform=$3,target_pool_key=$4,target_group_ids=$5::bigint[],
             enabled=$6,notes=$7,updated_at=NOW()
-          WHERE id=$1 RETURNING *`,
+          WHERE id=$1 AND deleted_at IS NULL RETURNING *`,
         [input.id, values.product, values.platform, values.targetPoolKey, values.targetGroupIds,
           values.enabled, values.notes])
       : await this.pool.query(`
@@ -312,6 +321,7 @@ export class ReplenishmentRepository {
           RETURNING *`,
         [values.product, values.platform, values.targetPoolKey, values.targetGroupIds,
           values.enabled, values.notes, actor]);
+    if (!result.rowCount) throw notFound('商品映射不存在或已删除');
     return mapping(result.rows[0]);
   }
 
@@ -321,7 +331,8 @@ export class ReplenishmentRepository {
       SELECT r.*,m.product,m.platform,m.target_pool_key,m.target_group_ids
       FROM ${this.schema}.replenishment_rules r
       JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
-      ${enabledOnly ? 'WHERE r.enabled AND m.enabled' : ''}
+      WHERE r.deleted_at IS NULL AND m.deleted_at IS NULL
+        ${enabledOnly ? 'AND r.enabled AND m.enabled' : ''}
       ORDER BY r.enabled DESC,r.id`);
     return result.rows.map(rule);
   }
@@ -332,7 +343,7 @@ export class ReplenishmentRepository {
       SELECT r.*,m.product,m.platform,m.target_pool_key,m.target_group_ids
       FROM ${this.schema}.replenishment_rules r
       JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
-      WHERE r.id=$1`, [id]);
+      WHERE r.id=$1 AND r.deleted_at IS NULL AND m.deleted_at IS NULL`, [id]);
     return rule(result.rows[0]);
   }
 
@@ -360,7 +371,7 @@ export class ReplenishmentRepository {
     }
     const productMapping = await this.pool.query(`
       SELECT id FROM ${this.schema}.oauth_supply_product_mappings
-      WHERE id=$1`, [values.productMappingId]);
+      WHERE id=$1 AND deleted_at IS NULL`, [values.productMappingId]);
     if (!productMapping.rowCount) throw badRequest('商品映射不存在，请刷新后重新选择');
     const params = [
       values.name, values.productMappingId, values.mode, values.enabled,
@@ -380,7 +391,7 @@ export class ReplenishmentRepository {
             max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,priority=$17,
             verification_model=$18,verification_prompt=$19,poll_interval_seconds=$20,
             retry_limit=$21,cooldown_seconds=$22,updated_at=NOW()
-          WHERE id=$1 RETURNING id`, [input.id, ...params])
+          WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
             name,product_mapping_id,mode,enabled,min_available_accounts,target_available_accounts,
@@ -390,7 +401,93 @@ export class ReplenishmentRepository {
             retry_limit,cooldown_seconds,created_by)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
           RETURNING id`, [...params, actor]);
+    if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
+  }
+
+  async setRuleEnabled(id, enabled) {
+    const ruleId = Number(id);
+    if (this.demo) {
+      const current = this.rules.find((entry) => entry.id === ruleId);
+      if (!current) throw notFound('补号策略不存在或已删除');
+      current.enabled = Boolean(enabled);
+      current.updatedAt = new Date().toISOString();
+      return { ...current };
+    }
+    const result = await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules r SET
+        enabled=$2,last_error='',updated_at=NOW()
+      FROM ${this.schema}.oauth_supply_product_mappings m
+      WHERE r.id=$1
+        AND r.product_mapping_id=m.id
+        AND r.deleted_at IS NULL
+        AND m.deleted_at IS NULL
+      RETURNING r.id`, [ruleId, Boolean(enabled)]);
+    if (!result.rowCount) throw notFound('补号策略不存在或商品映射已删除');
+    return this.getRule(ruleId);
+  }
+
+  async deleteRule(id) {
+    const ruleId = Number(id);
+    const activeRecoveryStatuses = new Set([
+      'detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+      'updating_sub2api', 'verifying', 'retry_wait',
+    ]);
+    if (this.demo) {
+      const index = this.rules.findIndex((entry) => entry.id === ruleId);
+      if (index < 0) throw notFound('补号策略不存在或已删除');
+      if (await this.hasActiveOrder(ruleId)) throw conflict('策略存在进行中订单，请等待订单完成后再删除');
+      if (this.recoveries.some((entry) => entry.ruleId === ruleId && activeRecoveryStatuses.has(entry.status))) {
+        throw conflict('策略存在进行中的账号修复任务，请等待修复完成后再删除');
+      }
+      this.rules.splice(index, 1);
+      return { deleted: true, id: ruleId };
+    }
+    const activeOrder = await this.pool.query(`
+      SELECT 1 FROM ${this.schema}.oauth_supply_orders
+      WHERE rule_id=$1
+        AND status=ANY($2::text[])
+      LIMIT 1`,
+    [ruleId, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
+    if (activeOrder.rowCount) throw conflict('策略存在进行中订单，请等待订单完成后再删除');
+    const activeRecovery = await this.pool.query(`
+      SELECT 1 FROM ${this.schema}.replenishment_recoveries
+      WHERE rule_id=$1
+        AND status=ANY($2::text[])
+      LIMIT 1`, [ruleId, [...activeRecoveryStatuses]]);
+    if (activeRecovery.rowCount) throw conflict('策略存在进行中的账号修复任务，请等待修复完成后再删除');
+    const result = await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules SET
+        enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
+      WHERE id=$1 AND deleted_at IS NULL
+      RETURNING id`, [ruleId]);
+    if (!result.rowCount) throw notFound('补号策略不存在或已删除');
+    return { deleted: true, id: ruleId };
+  }
+
+  async deleteMapping(id) {
+    const mappingId = Number(id);
+    if (this.demo) {
+      const index = this.mappings.findIndex((entry) => entry.id === mappingId);
+      if (index < 0) throw notFound('商品映射不存在或已删除');
+      if (this.rules.some((entry) => entry.productMappingId === mappingId)) {
+        throw conflict('商品映射仍被补号策略使用，请先删除关联策略');
+      }
+      this.mappings.splice(index, 1);
+      return { deleted: true, id: mappingId };
+    }
+    const referenced = await this.pool.query(`
+      SELECT 1 FROM ${this.schema}.replenishment_rules
+      WHERE product_mapping_id=$1 AND deleted_at IS NULL
+      LIMIT 1`, [mappingId]);
+    if (referenced.rowCount) throw conflict('商品映射仍被补号策略使用，请先删除关联策略');
+    const result = await this.pool.query(`
+      UPDATE ${this.schema}.oauth_supply_product_mappings SET
+        enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
+      WHERE id=$1 AND deleted_at IS NULL
+      RETURNING id`, [mappingId]);
+    if (!result.rowCount) throw notFound('商品映射不存在或已删除');
+    return { deleted: true, id: mappingId };
   }
 
   async markRuleInventory(id, { error = '' } = {}) {

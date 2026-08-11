@@ -263,6 +263,13 @@ test('replenishment inventory and recovery state remains FinOps-owned and encryp
   assert.doesNotMatch(migration, /\b(?:access_token|refresh_token|password|claim_url)\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('replenishment lifecycle deletion remains FinOps-owned and preserves history', () => {
+  const migration = read('migrations/034_replenishment_lifecycle.sql');
+  assert.match(migration, /ALTER TABLE .*replenishment_rules[\s\S]*deleted_at TIMESTAMPTZ/);
+  assert.match(migration, /ALTER TABLE .*oauth_supply_product_mappings[\s\S]*deleted_at TIMESTAMPTZ/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);
