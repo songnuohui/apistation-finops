@@ -8,6 +8,10 @@ function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
 }
 
+function mappingPoolKey(platform, groupIds) {
+  return `${platform}:groups:${groupIds.join('-')}`;
+}
+
 function mapping(row) {
   if (!row) return null;
   return {
@@ -189,17 +193,19 @@ export class ReplenishmentRepository {
   }
 
   async upsertMapping(input, actor = 'admin') {
+    const targetGroupIds = [...new Set((input.targetGroupIds || []).map(Number))].sort((left, right) => left - right);
+    const platform = String(input.platform || '').trim();
     const values = {
       product: String(input.product || '').trim(),
-      platform: String(input.platform || '').trim(),
-      targetPoolKey: String(input.targetPoolKey || '').trim(),
-      targetGroupIds: [...new Set((input.targetGroupIds || []).map(Number))],
+      platform,
+      targetPoolKey: mappingPoolKey(platform, targetGroupIds),
+      targetGroupIds,
       enabled: input.enabled !== false,
       notes: String(input.notes || '').trim(),
     };
     if (!values.product) throw badRequest('请输入商品编码');
     if (!values.platform) throw badRequest('请输入平台');
-    if (!values.targetPoolKey) throw badRequest('请输入目标账号池');
+    if (!values.targetGroupIds.length) throw badRequest('请至少选择一个 Sub2API 正式分组');
     if (values.targetGroupIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
       throw badRequest('Sub2API 分组 ID 必须是正整数');
     }

@@ -142,6 +142,37 @@ function authFailure(error){
   }
   return {status:500,error:'internal server error'};
 }
+
+function replenishmentCatalog(groups) {
+  return {
+    groups,
+    platforms: [...new Set(groups.map((group) => group.platform).filter(Boolean))].sort(),
+  };
+}
+
+function validatedReplenishmentMapping(input, groups) {
+  const groupIds = [...new Set((input.targetGroupIds || []).map(Number))]
+    .filter((id) => Number.isSafeInteger(id) && id > 0)
+    .sort((left, right) => left - right);
+  if (!groupIds.length) {
+    throw Object.assign(new Error('请至少选择一个 Sub2API 正式分组'), { statusCode: 400 });
+  }
+  const byId = new Map(groups.map((group) => [Number(group.id), group]));
+  const selected = groupIds.map((id) => byId.get(id));
+  if (selected.some((group) => !group)) {
+    throw Object.assign(new Error('所选 Sub2API 分组不存在，请刷新后重新选择'), { statusCode: 400 });
+  }
+  if (selected.some((group) => group.status && group.status !== 'active')) {
+    throw Object.assign(new Error('停用的 Sub2API 分组不能用于自动补号'), { statusCode: 400 });
+  }
+  const selectedPlatforms = [...new Set(selected.map((group) => group.platform).filter(Boolean))];
+  const platform = String(input.platform || '').trim();
+  if (selectedPlatforms.length !== 1 || selectedPlatforms[0] !== platform) {
+    throw Object.assign(new Error('所选分组必须属于当前平台'), { statusCode: 400 });
+  }
+  return { ...input, platform, targetGroupIds: groupIds };
+}
+
 async function refreshSourceGroupCatalog(accessToken,request){
   if(config.demoMode||!accessToken)return;
   try{
@@ -561,9 +592,16 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/replenishment/mappings'){
     return json(res,200,await replenishmentRepository.listMappings());
   }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/catalog'){
+    return json(res,200,replenishmentCatalog(await sub2ApiAccountImportGateway.listGroups()));
+  }
   if((request.method==='POST'||request.method==='PATCH')&&url.pathname==='/api/replenishment/mappings'){
     const input=await body(request);
-    return json(res,200,await replenishmentRepository.upsertMapping(input,auth.actor));
+    const groups=await sub2ApiAccountImportGateway.listGroups();
+    return json(res,200,await replenishmentRepository.upsertMapping(
+      validatedReplenishmentMapping(input,groups),
+      auth.actor,
+    ));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/rules'){
     return json(res,200,await replenishmentRepository.listRules());

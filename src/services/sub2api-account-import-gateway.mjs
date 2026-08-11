@@ -15,6 +15,19 @@ function unwrap(payload) {
   return Object.hasOwn(payload, 'data') ? payload.data : payload;
 }
 
+function groupCatalogEntry(group) {
+  const id = Number(group?.id ?? group?.group_id ?? group?.source_group_id);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  return {
+    id,
+    name: String(group?.name || '').trim().slice(0, 160),
+    platform: String(group?.platform || '').trim().slice(0, 50),
+    status: String(group?.status || '').trim().slice(0, 24),
+    rateMultiplier: group?.rate_multiplier ?? group?.rateMultiplier ?? null,
+    sortOrder: Number.parseInt(group?.sort_order ?? group?.sortOrder, 10) || 0,
+  };
+}
+
 export class Sub2ApiAccountImportGateway {
   constructor(config, logger = console, fetchImpl = fetch) {
     this.config = config;
@@ -109,6 +122,20 @@ export class Sub2ApiAccountImportGateway {
       },
     });
     return payload?.account || payload;
+  }
+
+  async listGroups({ includeInactive = true } = {}) {
+    const payload = await this.jsonRequest(
+      `/api/v1/admin/groups/all${includeInactive ? '?include_inactive=true' : ''}`,
+    );
+    const groups = Array.isArray(payload) ? payload : payload?.items;
+    if (!Array.isArray(groups)) {
+      throw Object.assign(new Error('Sub2API returned an invalid group catalog'), { statusCode: 502 });
+    }
+    return groups
+      .map(groupCatalogEntry)
+      .filter(Boolean)
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.id - right.id);
   }
 
   async updateAccountConfiguration(accountId, { groupIds, concurrency, priority }) {

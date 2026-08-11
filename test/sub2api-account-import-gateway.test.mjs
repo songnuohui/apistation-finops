@@ -7,6 +7,29 @@ const config = {
   sub2apiAuthTimeoutMs: 1_000,
 };
 
+test('Sub2API group catalog returns sanitized groups for platform and multi-select controls', async () => {
+  const gateway = new Sub2ApiAccountImportGateway(config, console, async (url, options) => {
+    assert.equal(url, 'https://sub2api.example/api/v1/admin/groups/all?include_inactive=true');
+    assert.equal(options.headers['x-api-key'], 'admin-key');
+    return new Response(JSON.stringify({
+      data: [
+        { id: 9, name: 'OpenAI 主力', platform: 'openai', status: 'active', sort_order: 2, secret: 'omit' },
+        { id: 3, name: 'OpenAI 备用', platform: 'openai', status: 'disabled', sort_order: 1 },
+      ],
+    }), { status: 200 });
+  });
+  gateway.setAccessTokenProvider({
+    async getAuthentication() {
+      return { credential: 'admin-key', headers: { 'x-api-key': 'admin-key' } };
+    },
+  });
+
+  assert.deepEqual(await gateway.listGroups(), [
+    { id: 3, name: 'OpenAI 备用', platform: 'openai', status: 'disabled', rateMultiplier: null, sortOrder: 1 },
+    { id: 9, name: 'OpenAI 主力', platform: 'openai', status: 'active', rateMultiplier: null, sortOrder: 2 },
+  ]);
+});
+
 test('Sub2API import fixes and verifies groups, concurrency and priority', async () => {
   const requests = [];
   const gateway = new Sub2ApiAccountImportGateway(config, console, async (url, options) => {

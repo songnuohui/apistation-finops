@@ -386,6 +386,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .empty-state{padding:24px 0;color:var(--muted);font-size:12px;text-align:center}
 .replenishment-editor{max-width:720px}
 .form-error-banner{margin-top:16px;padding:10px 12px;border:1px solid #f1b8c0;border-radius:6px;color:#a63443;background:#fff1f3;font-size:12px;line-height:18px}
+.catalog-field{display:grid;gap:7px}.field-label{color:#54657a;font-size:12px}.group-selector{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#fbfcfe}.group-option{display:flex!important;grid-template-columns:none!important;align-items:center;gap:9px!important;min-width:0;padding:10px 11px;border-bottom:1px solid #edf1f6;cursor:pointer}.group-option:nth-child(odd){border-right:1px solid #edf1f6}.group-option input{width:16px!important;height:16px!important;min-width:16px;padding:0!important;margin:0;accent-color:#2563eb}.group-option span{min-width:0}.group-option strong,.group-option small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.group-option strong{color:#35445a;font-size:12px}.group-option small{margin-top:3px;color:var(--muted);font-size:10px}.group-option.disabled{cursor:not-allowed;opacity:.55}.group-selector-empty{padding:22px;border:1px dashed var(--line);border-radius:6px;color:var(--muted);background:#fbfcfe;text-align:center;font-size:12px}.mapping-group-summary{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .order-detail-modal{max-width:620px}
 .order-detail-error{padding:11px 12px;border:1px solid #ffd2d8;border-radius:6px;background:#fff3f4;color:#a63443;font-size:12px}
 .event-note{padding:12px 13px;border-left:3px solid #4d85e8;background:#f6f9ff;color:#536b8e;font-size:12px;line-height:19px}
@@ -411,6 +412,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .panel-head{flex-wrap:wrap}
   .panel-head > div{min-width:0;flex:1 1 180px}
   .panel-head p{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .group-selector{grid-template-columns:1fr}.group-option:nth-child(odd){border-right:0}.mapping-group-summary{max-width:180px}
   .table-wrap{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
   .trend-row{grid-template-columns:62px minmax(0,1fr) auto;gap:8px}
   .trend-row small{display:none}

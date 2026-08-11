@@ -65,6 +65,19 @@ test('replenishment rules reject a missing product mapping before writing', asyn
   assert.equal((await repository.listRules()).length, 1);
 });
 
+test('product mappings derive their internal pool key from the selected Sub2API groups', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const mapping = await repository.upsertMapping({
+    product: 'oauth_30d',
+    platform: 'openai',
+    targetGroupIds: [9, 3, 9],
+    notes: '',
+  });
+
+  assert.equal(mapping.targetPoolKey, 'openai:groups:3-9');
+  assert.deepEqual(mapping.targetGroupIds, [3, 9]);
+});
+
 test('delivery uses per-account charged amount and imports fixed account settings', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);

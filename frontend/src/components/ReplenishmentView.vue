@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow-line"><RefreshCw :size="15" /> 供应链自动化</div>
         <h2>自动补号</h2>
-        <p>按“商品 + 平台 + 目标账号池”管理库存、下单、验号、导入和采购成本。</p>
+        <p>按商品、平台和 Sub2API 正式分组管理库存、下单、验号、导入和采购成本。</p>
       </div>
       <div class="replenishment-hero-actions">
         <button class="icon-text-button" :disabled="loading" @click="load"><RefreshCw :size="15" :class="{ spinning: loading }" />刷新</button>
@@ -33,7 +33,7 @@
           <article v-for="rule in rules" :key="rule.id" class="rule-row">
             <div class="rule-main">
               <div class="rule-title"><strong>{{ rule.name }}</strong><span class="status-pill" :class="rule.enabled ? 'success' : 'warning'">{{ rule.enabled ? '启用' : '停用' }}</span><span class="mode-pill">{{ modeLabel(rule.mode) }}</span></div>
-              <small>{{ rule.product }} · {{ rule.platform }} · {{ rule.targetPoolKey }}</small>
+              <small>{{ rule.product }} · {{ platformText(rule.platform) }} · {{ groupSummary(rule.targetGroupIds) }}</small>
               <div class="rule-facts"><span>库存低于 {{ rule.minAvailableAccounts }} 触发</span><span>每次 {{ rule.replenishQuantity }} 个</span><span>并发 {{ rule.concurrency }}</span><span>优先级 {{ rule.priority }}</span><span>模型 {{ rule.verificationModel }}</span></div>
             </div>
             <div class="row-actions">
@@ -48,8 +48,8 @@
         <div class="panel-head"><div><h2>商品映射</h2><p>第一版默认 oauth_30d，后续可扩展更多商品。</p></div><button class="secondary-button" @click="newMapping"><Plus :size="15" />新增映射</button></div>
         <div class="mapping-list">
           <div v-for="mapping in mappings" :key="mapping.id" class="mapping-row">
-            <div><strong>{{ mapping.product }}</strong><small>{{ mapping.platform }} · {{ mapping.targetPoolKey }}</small></div>
-            <div class="mapping-actions"><span>{{ (mapping.targetGroupIds || []).map((id: number) => `#${id}`).join('、') || '未绑定分组' }}</span><button class="icon-button" title="编辑映射" @click="editMapping(mapping)"><Settings2 :size="14" /></button></div>
+            <div><strong>{{ mapping.product }}</strong><small>{{ platformText(mapping.platform) }}</small></div>
+            <div class="mapping-actions"><span class="mapping-group-summary" :title="groupSummary(mapping.targetGroupIds)">{{ groupSummary(mapping.targetGroupIds) }}</span><button class="icon-button" title="编辑映射" @click="editMapping(mapping)"><Settings2 :size="14" /></button></div>
           </div>
           <div v-if="!mappings.length" class="empty-state">还没有商品映射</div>
         </div>
@@ -60,11 +60,11 @@
       <div class="panel-head"><div><h2>补号订单</h2><p>审批模式的订单需要人工确认；自动模式会按策略直接创建并轮询取货。</p></div><span class="table-note">最近 {{ orders.length }} 条</span></div>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table">
-          <thead><tr><th>订单</th><th>商品 / 账号池</th><th>状态</th><th>数量</th><th>成本</th><th>创建时间</th><th></th></tr></thead>
+          <thead><tr><th>订单</th><th>商品 / 正式分组</th><th>状态</th><th>数量</th><th>成本</th><th>创建时间</th><th></th></tr></thead>
           <tbody>
             <tr v-for="order in orders" :key="order.id">
               <td><strong>#{{ order.id }}</strong><small>{{ order.externalOrderId || '等待创建' }}</small></td>
-              <td><strong>{{ order.product }}</strong><small>{{ order.targetPoolKey }}</small></td>
+              <td><strong>{{ order.product }}</strong><small>{{ orderGroupSummary(order) }}</small></td>
               <td><span class="status-pill" :class="orderStatusClass(order.status)">{{ orderStatusLabel(order.status) }}</span></td>
               <td>{{ order.validQuantity || 0 }} / {{ order.requestedQuantity }}</td>
               <td>{{ money(order.actualPaidAmountCny ?? order.quotedAmountCny) }}</td>
@@ -93,14 +93,22 @@
         <header><div><h2>{{ editor.kind === 'rule' ? (editor.id ? '编辑补号策略' : '新增补号策略') : (editor.id ? '编辑商品映射' : '新增商品映射') }}</h2><p>配置保存后会立即用于下一轮检查。</p></div><button class="icon-button" @click="editor = null"><X :size="18" /></button></header>
         <div v-if="editor.kind === 'mapping'" class="form-grid">
           <label>商品编码<input v-model.trim="editor.product" placeholder="oauth_30d" /></label>
-          <label>平台<input v-model.trim="editor.platform" placeholder="openai" /></label>
-          <label>目标账号池<input v-model.trim="editor.targetPoolKey" placeholder="openai-team-primary" /></label>
-          <label>Sub2API 正式分组 ID<input v-model.trim="editor.groupIdsText" placeholder="1, 2, 3" /></label>
+          <label>平台<select v-model="editor.platform" @change="onMappingPlatformChange"><option value="" disabled>请选择平台</option><option v-for="platform in catalog.platforms" :key="platform" :value="platform">{{ platformText(platform) }}</option></select></label>
+          <div class="catalog-field full-field">
+            <span class="field-label">Sub2API 正式分组</span>
+            <div v-if="mappingGroups.length" class="group-selector">
+              <label v-for="group in mappingGroups" :key="group.id" class="group-option" :class="{ disabled: group.status && group.status !== 'active' }">
+                <input v-model="editor.targetGroupIds" type="checkbox" :value="group.id" :disabled="group.status && group.status !== 'active'" />
+                <span><strong>{{ group.name || `分组 #${group.id}` }}</strong><small>ID {{ group.id }}<template v-if="group.status && group.status !== 'active'"> · 已停用</template></small></span>
+              </label>
+            </div>
+            <div v-else class="group-selector-empty">当前平台没有可选正式分组</div>
+          </div>
           <label class="full-field">备注<textarea v-model.trim="editor.notes" rows="3" /></label>
         </div>
         <div v-else class="form-grid">
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
-          <label>商品映射<select v-model.number="editor.productMappingId"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ mapping.targetPoolKey }}</option></select></label>
+          <label>商品映射<select v-model.number="editor.productMappingId"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
           <label>库存低于<input v-model.number="editor.minAvailableAccounts" type="number" min="0" /></label>
           <label>每次补号数量<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
@@ -119,7 +127,7 @@
     </section>
 
     <section v-if="selectedOrder" class="modal-layer" @click.self="selectedOrder = null">
-      <div class="modal order-detail-modal"><header><div><h2>补号订单 #{{ selectedOrder.id }}</h2><p>{{ selectedOrder.product }} · {{ selectedOrder.targetPoolKey }}</p></div><button class="icon-button" @click="selectedOrder = null"><X :size="18" /></button></header><div class="detail-metrics"><Metric title="状态" :value="orderStatusLabel(selectedOrder.status)" /><Metric title="有效账号" :value="`${selectedOrder.validQuantity || 0} / ${selectedOrder.requestedQuantity}`" /><Metric title="实际成本" :value="money(selectedOrder.actualPaidAmountCny ?? selectedOrder.quotedAmountCny)" tone="good" /></div><p class="order-detail-error" v-if="selectedOrder.lastError">{{ selectedOrder.lastError }}</p><div class="event-note">账号导入后会固定写入策略中的正式分组、并发数和优先级，验号模型为 {{ selectedRule?.verificationModel || 'gpt-5.6-luna' }}。</div></div>
+      <div class="modal order-detail-modal"><header><div><h2>补号订单 #{{ selectedOrder.id }}</h2><p>{{ selectedOrder.product }} · {{ orderGroupSummary(selectedOrder) }}</p></div><button class="icon-button" @click="selectedOrder = null"><X :size="18" /></button></header><div class="detail-metrics"><Metric title="状态" :value="orderStatusLabel(selectedOrder.status)" /><Metric title="有效账号" :value="`${selectedOrder.validQuantity || 0} / ${selectedOrder.requestedQuantity}`" /><Metric title="实际成本" :value="money(selectedOrder.actualPaidAmountCny ?? selectedOrder.quotedAmountCny)" tone="good" /></div><p class="order-detail-error" v-if="selectedOrder.lastError">{{ selectedOrder.lastError }}</p><div class="event-note">账号导入后会固定写入策略中的正式分组、并发数和优先级，验号模型为 {{ selectedRule?.verificationModel || 'gpt-5.6-luna' }}。</div></div>
     </section>
   </div>
 </template>
@@ -136,6 +144,7 @@ const saving = ref(false);
 const error = ref('');
 const editorError = ref('');
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
+const catalog = ref<any>({ groups: [], platforms: [] });
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
 const orders = ref<any[]>([]);
@@ -145,6 +154,13 @@ const selectedOrder = ref<any | null>(null);
 
 const connected = computed(() => Boolean(dashboard.value.oauthSupply?.balance && !dashboard.value.oauthSupply.balance.error));
 const selectedRule = computed(() => selectedOrder.value ? rules.value.find((rule) => rule.id === selectedOrder.value.ruleId) : null);
+const groupById = computed<Map<number, any>>(
+  () => new Map<number, any>((catalog.value.groups || []).map((group: any) => [Number(group.id), group])),
+);
+const mappingGroups = computed(() => {
+  if (!editor.value || editor.value.kind !== 'mapping' || !editor.value.platform) return [];
+  return (catalog.value.groups || []).filter((group: any) => group.platform === editor.value.platform);
+});
 const money = (value: any) => value === null || value === undefined ? '--' : `¥${Number(value || 0).toFixed(2)}`;
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
@@ -152,13 +168,19 @@ const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', a
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusClass = (value: string) => ['completed'].includes(value) ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
 const copyRule = (rule: any) => ({ ...rule, kind: 'rule' });
+const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
+const groupSummary = (ids: any[] = []) => ids.length
+  ? ids.map((id) => groupById.value.get(Number(id))?.name || `分组 #${id}`).join('、')
+  : '未选择正式分组';
+const orderGroupSummary = (order: any) => groupSummary(rules.value.find((rule) => Number(rule.id) === Number(order.ruleId))?.targetGroupIds || []);
 
 async function load() {
   loading.value = true;
   error.value = '';
   try {
-    const [nextDashboard, nextMappings, nextRules, nextOrders, nextRecoveries] = await Promise.all([
+    const [nextDashboard, nextCatalog, nextMappings, nextRules, nextOrders, nextRecoveries] = await Promise.all([
       get('/replenishment/dashboard'),
+      get('/replenishment/catalog'),
       get('/replenishment/mappings'),
       get('/replenishment/rules'),
       get('/replenishment/orders?limit=50'),
@@ -168,6 +190,7 @@ async function load() {
       })),
     ]);
     dashboard.value = nextDashboard;
+    catalog.value = nextCatalog;
     mappings.value = nextMappings;
     rules.value = nextRules;
     orders.value = nextOrders;
@@ -185,7 +208,13 @@ async function load() {
 function newMapping() {
   error.value = '';
   editorError.value = '';
-  editor.value = { kind: 'mapping', product: 'oauth_30d', platform: 'openai', targetPoolKey: '', groupIdsText: '', notes: '' };
+  editor.value = {
+    kind: 'mapping',
+    product: 'oauth_30d',
+    platform: catalog.value.platforms?.[0] || '',
+    targetGroupIds: [],
+    notes: '',
+  };
 }
 function newRule() {
   const first = mappings.value[0];
@@ -205,13 +234,14 @@ function newRule() {
   };
 }
 function editRule(rule: any) { error.value = ''; editorError.value = ''; editor.value = copyRule(rule); }
-function editMapping(mapping: any) { error.value = ''; editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', groupIdsText: (mapping.targetGroupIds || []).join(', ') }; }
+function editMapping(mapping: any) { error.value = ''; editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', targetGroupIds: [...(mapping.targetGroupIds || [])] }; }
+function onMappingPlatformChange() { editor.value.targetGroupIds = []; editorError.value = ''; }
 
 function validateEditor() {
   if (editor.value.kind === 'mapping') {
     if (!editor.value.product) return '请输入商品编码。';
-    if (!editor.value.platform) return '请输入平台。';
-    if (!editor.value.targetPoolKey) return '请输入目标账号池。';
+    if (!editor.value.platform) return '请选择平台。';
+    if (!editor.value.targetGroupIds?.length) return '请至少选择一个 Sub2API 正式分组。';
     return '';
   }
   if (!editor.value.name) return '请输入策略名称。';
@@ -235,8 +265,7 @@ async function saveEditor() {
         id: editor.value.id,
         product: editor.value.product,
         platform: editor.value.platform,
-        targetPoolKey: editor.value.targetPoolKey,
-        targetGroupIds: String(editor.value.groupIdsText || '').split(',').map(Number).filter((id: number) => Number.isSafeInteger(id) && id > 0),
+        targetGroupIds: editor.value.targetGroupIds,
         notes: editor.value.notes,
         enabled: true,
       });
