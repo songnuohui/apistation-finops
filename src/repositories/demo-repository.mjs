@@ -326,6 +326,58 @@ export class DemoRepository {
     return groups.length;
   }
 
+  async listSupplierGroupSummaries() {
+    const counts = new Map();
+    for (const key of this.supplierKeys || []) {
+      const groupId = Number(key.groupId);
+      if (!Number.isSafeInteger(groupId) || groupId <= 0) continue;
+      const current = counts.get(groupId) || {
+        groupId, keyCount: 0, supplierCount: new Set(), linkedAccountCount: new Set(),
+        supplierNames: new Set(),
+        minimumUpstreamMultiplier: null, maximumUpstreamMultiplier: null,
+      };
+      current.keyCount += 1;
+      current.supplierCount.add(key.supplierName || '');
+      current.supplierNames.add(key.supplierName || '');
+      for (const link of key.accountLinks || []) current.linkedAccountCount.add(Number(link.accountId));
+      const rate = Number(key.rateMultiplier);
+      if (Number.isFinite(rate)) {
+        current.minimumUpstreamMultiplier = current.minimumUpstreamMultiplier === null ? rate : Math.min(current.minimumUpstreamMultiplier, rate);
+        current.maximumUpstreamMultiplier = current.maximumUpstreamMultiplier === null ? rate : Math.max(current.maximumUpstreamMultiplier, rate);
+      }
+      counts.set(groupId, current);
+    }
+    return [...counts.values()].map((item) => ({
+      ...item,
+      supplierCount: item.supplierCount.size,
+      supplierNames: [...item.supplierNames].filter(Boolean),
+      linkedAccountCount: item.linkedAccountCount.size,
+    }));
+  }
+
+  async listSupplierGroupKeysForAccounts(accountIds = []) {
+    const ids = new Set(accountIds.map(Number));
+    return (this.supplierKeys || []).flatMap((key) => (key.accountLinks || [])
+      .filter((link) => ids.has(Number(link.accountId)))
+      .map((link) => ({
+        accountId: Number(link.accountId),
+        id: Number(key.id),
+        externalId: key.externalId || '',
+        name: key.name || '',
+        maskedKey: key.maskedKey || '',
+        status: key.status || '',
+        groupId: key.groupId ? Number(key.groupId) : null,
+        groupName: key.groupName || '',
+        platform: key.platform || '',
+        supplierName: key.supplierName || '',
+        connectionName: key.connectionName || '',
+        baseUrl: key.baseUrl || '',
+        rateMultiplier: key.rateMultiplier ?? null,
+        lastCheckStatus: key.lastCheckStatus || 'pending',
+        lastCheckAt: key.lastCheckAt || null,
+      })));
+  }
+
   async createMonitorGroup(input) {
     if (this.monitorGroups.some((group) => Number(group.sourceGroupId) === Number(input.sourceGroupId))) {
       throw Object.assign(new Error('source group is already configured'), { statusCode: 409 });

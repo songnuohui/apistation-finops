@@ -236,6 +236,11 @@ test('supplier key listing reads the latest supplier balance snapshot', async ()
   assert.equal(result.items[0].usageAmountCny, 8.25);
   assert.match(queries[0], /supplier_balance_snapshots/);
   assert.doesNotMatch(queries[0], /c\.balance\s+AS\s+supplier_balance/);
+  assert.doesNotMatch(queries[0], /fact_usage_events/);
+
+  await repository.listSupplierKeys({ page: 1, pageSize: 20, sortBy: 'usage_amount' });
+  const usageSortedQuery = queries.filter((text) => text.includes('FROM key_rows'))[1];
+  assert.match(usageSortedQuery, /fact_usage_events/);
 });
 
 test('removed supplier keys detach local account links and stop future automatic pricing', async () => {

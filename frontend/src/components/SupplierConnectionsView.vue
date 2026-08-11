@@ -93,6 +93,18 @@ const unconfiguredProfitGuardCount = computed(() => connectionItems.value
 const items = computed(() => showUnconfiguredProfitGuard.value
   ? connectionItems.value.filter((item) => !item.profitGuardFullyEnabled)
   : connectionItems.value);
+const connectionSummary = computed(() => ({
+  healthy: connectionItems.value.filter((item) => item.connectionStatus === 'ok').length,
+  total: connectionItems.value.length,
+  activeKeys: connectionItems.value.reduce((sum, item) => sum + Number(item.activeKeyCount || 0), 0),
+  totalKeys: connectionItems.value.reduce((sum, item) => sum + Number(item.keyCount || 0), 0),
+  alerts: connectionItems.value.reduce((sum, item) => sum + Number(item.openAlertCount || 0), 0),
+  lowBalance: connectionItems.value.filter((item) => {
+    const balance = Number(item.balance);
+    const threshold = Number(item.lowBalanceThreshold);
+    return Number.isFinite(balance) && Number.isFinite(threshold) && balance <= threshold;
+  }).length,
+}));
 const calculatedMinimumSaleMultiplier = computed(() => {
   const current = profitGuardEditor.value;
   if (!current || current.thresholdMode !== 'margin') return null;
@@ -882,27 +894,38 @@ onMounted(async () => {
         <ServerCog :size="17" />
         <input v-model="search" placeholder="搜索供应商、连接名称或站点地址" />
       </label>
-      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       <button class="secondary-button profit-guard-filter" :class="{ active: showUnconfiguredProfitGuard }" title="显示仍有账号未启用利润保护的供应商连接" @click="showUnconfiguredProfitGuard = !showUnconfiguredProfitGuard"><AlertTriangle :size="16" />利润保护未覆盖 <span v-if="unconfiguredProfitGuardCount" class="filter-count">{{ unconfiguredProfitGuardCount }}</span></button>
-      <button class="secondary-button" @click="openServiceAuthSettings"><KeyRound :size="16" />Sub2API 自动认证</button>
-      <button class="secondary-button" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
+      <details class="supplier-settings-menu">
+        <summary class="secondary-button"><Settings2 :size="16" />供应商设置<ChevronDown :size="14" /></summary>
+        <div class="supplier-settings-popover">
+          <button @click="openServiceAuthSettings"><KeyRound :size="16" /><span><strong>Sub2API 自动认证</strong><small>后台同步与利润保护凭据</small></span></button>
+          <button @click="openQqSettings"><Bell :size="16" /><span><strong>QQ 告警</strong><small>连接、余额和密钥异常通知</small></span></button>
+        </div>
+      </details>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
-      <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
+      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
     </div>
 
-    <section class="panel table-panel">
+    <div class="supplier-summary-grid">
+      <div><span>正常连接</span><strong>{{ connectionSummary.healthy }} / {{ connectionSummary.total }}</strong><small>当前供应商连接</small></div>
+      <div><span>可用密钥</span><strong>{{ connectionSummary.activeKeys }} / {{ connectionSummary.totalKeys }}</strong><small>上游库存状态</small></div>
+      <div :class="{ attention: connectionSummary.alerts }"><span>待处理告警</span><strong>{{ connectionSummary.alerts }}</strong><small>连接、密钥与倍率</small></div>
+      <div :class="{ attention: connectionSummary.lowBalance }"><span>低余额连接</span><strong>{{ connectionSummary.lowBalance }}</strong><small>已达到告警阈值</small></div>
+    </div>
+
+    <section class="panel table-panel supplier-resource-panel">
       <div class="panel-head">
         <div>
-          <h2>供应商连接</h2>
-          <p>连接凭据仅加密保存在 FinOps；同步、巡检和关联不会修改供应商或 sub2api 数据。</p>
+          <h2>连接运行状态</h2>
+          <p>主表聚焦余额、密钥健康、告警和同步状态；地址、备注及认证配置在详情中查看。</p>
         </div>
-        <KeyRound :size="20" class="head-icon" />
+        <ServerCog :size="20" class="head-icon" />
       </div>
       <div class="table-wrap">
         <table class="supplier-table">
-          <thead><tr><th>供应商 / 连接</th><th>供应商地址</th><th>备注</th><th>连接状态</th><th class="number">余额</th><th>密钥 / 异常</th><th>告警</th><th>最近同步</th><th>操作</th></tr></thead>
+          <thead><tr><th>供应商 / 连接</th><th>连接状态</th><th class="number">余额</th><th>密钥健康</th><th>告警</th><th>最近同步</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-if="loading && !items.length"><td colspan="9" class="table-empty">正在读取供应商连接</td></tr>
+            <tr v-if="loading && !items.length"><td colspan="7" class="table-empty">正在读取供应商连接</td></tr>
             <tr v-for="item in items" :key="item.id">
               <td>
                 <button class="link-button supplier-name-button" @click="openDetails(item.id)">
@@ -911,8 +934,6 @@ onMounted(async () => {
                 <small>{{ item.name || '默认连接' }} · {{ adapterLabel(item.detectedAdapterType || item.adapterType) }} · {{ authLabel(item.authMode) }}</small>
                 <small :class="{ 'profit-guard-on': item.profitGuardFullyEnabled, 'profit-guard-missing': !item.profitGuardFullyEnabled }">利润保护：{{ connectionProfitGuardHint(item) }}</small>
               </td>
-              <td class="supplier-address"><span class="supplier-cell-text" :title="item.baseUrl || ''">{{ item.baseUrl || '--' }}</span></td>
-              <td class="supplier-notes"><span class="supplier-cell-text" :title="item.supplierNotes || ''">{{ item.supplierNotes || '--' }}</span></td>
               <td>
                 <span class="status-pill" :class="statusClass(item.connectionStatus)">{{ statusLabel(item.connectionStatus) }}</span>
                 <small>{{ connectionHint(item) }}</small>
@@ -935,14 +956,14 @@ onMounted(async () => {
               </td>
               <td>
                 <div class="row-actions">
-                  <button class="icon-button mini-action danger-action" title="删除供应商连接" :disabled="deletingResource === `connection:${item.id}`" @click="deleteConnection(item)"><Trash2 :size="16" /></button>
                   <button class="icon-button mini-action" title="查看详情" @click="openDetails(item.id)"><Activity :size="16" /></button>
                   <button class="icon-button mini-action" title="编辑连接" @click="openEdit(item)"><Edit3 :size="16" /></button>
                   <button class="icon-button mini-action" title="立即同步" :disabled="!item.enabled || syncingId === item.id" @click="syncConnection(item.id)"><RefreshCw :size="16" :class="{ spin: syncingId === item.id }" /></button>
+                  <button class="icon-button mini-action danger-action" title="删除供应商连接" :disabled="deletingResource === `connection:${item.id}`" @click="deleteConnection(item)"><Trash2 :size="16" /></button>
                 </div>
               </td>
             </tr>
-            <tr v-if="!loading && !items.length"><td colspan="9" class="table-empty">没有找到供应商连接</td></tr>
+            <tr v-if="!loading && !items.length"><td colspan="7" class="table-empty">没有找到供应商连接</td></tr>
           </tbody>
         </table>
       </div>

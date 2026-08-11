@@ -7,10 +7,8 @@ import {
   ShieldCheck, Users, WalletCards, X, KeyRound, PlugZap,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from './api';
-import SupplierConnectionsView from './components/SupplierConnectionsView.vue';
-import SupplierKeysView from './components/SupplierKeysView.vue';
+import SupplierManagementView from './components/SupplierManagementView.vue';
 import AccountCostsView from './components/AccountCostsView.vue';
-import SupplierQualityView from './components/SupplierQualityView.vue';
 import UsageView from './components/UsageView.vue';
 import UserFinanceView from './components/UserFinanceView.vue';
 import OverviewView from './components/OverviewView.vue';
@@ -62,9 +60,7 @@ const nav = [
   { id: 'users', label: '用户财务', icon: Users, group: '经营分析' },
   { id: 'usage', label: '总消耗', icon: BarChart3, group: '经营分析' },
   { id: 'accounts', label: '账号成本', icon: WalletCards, group: '资源与成本' },
-  { id: 'suppliers', label: '供应商连接', icon: ServerCog, group: '资源与成本' },
-  { id: 'supplier-keys', label: '供应商密钥', icon: KeyRound, group: '资源与成本' },
-  { id: 'supplier-quality', label: '供应商评分', icon: ShieldCheck, group: '资源与成本' },
+  { id: 'suppliers', label: '供应商管理', icon: ServerCog, group: '资源与成本' },
   { id: 'oauth-supply', label: 'OAuth Supply', icon: PlugZap, group: '自动化接入' },
   { id: 'replenishment', label: '自动补号', icon: RefreshCw, group: '自动化接入' },
 ];
@@ -73,13 +69,12 @@ const pageMeta: Record<string, [string, string]> = {
   users: ['用户财务', '充值、实际消费、余额和用户贡献'],
   usage: ['总消耗', '用户和模型两个维度查看实际消耗、成本与利润'],
   accounts: ['账号成本', '账号采购、成本归属、实时成本和毛利'],
-  suppliers: ['供应商连接', '读取上游余额、密钥库存、同步状态和关联关系'],
-  'supplier-keys': ['供应商密钥', '跨供应商查看上游密钥、账号关联、利润控制和巡检状态'],
-  'supplier-quality': ['供应商评分', '价格、可用性、首字延迟和稳定性评分'],
+  suppliers: ['供应商管理', '连接、密钥、账号分组和供应商质量统一管理'],
   'oauth-supply': ['OAuth Supply 接入', '独立配置客户账号，登录并安全取得采购 Token'],
   replenishment: ['自动补号', '库存、订单、验号、Sub2API 导入和采购成本统一管理'],
 };
 
+const supplierTab = computed(() => String(route.query.tab || 'connections'));
 const title = computed(() => pageMeta[page.value]?.[0] || 'FinOps');
 const subtitle = computed(() => pageMeta[page.value]?.[1] || '');
 const formatCny = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -89,6 +84,7 @@ const percent = (value: any) => value === null || value === undefined ? '--' : `
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 const escape = (value: any) => String(value ?? '');
 const statusClass = (value: any) => ['ok', 'healthy', 'active', 'complete', 'priced'].includes(String(value)) ? 'success' : ['error', 'failed', 'missing'].includes(String(value)) ? 'danger' : 'warning';
+const showRangeControl = computed(() => page.value !== 'suppliers' || supplierTab.value === 'quality');
 
 function showToast(message: string) {
   toast.value = message;
@@ -337,7 +333,7 @@ function syncBodyScrollLock() {
           <div><span class="eyebrow">管理控制台 · 财务核算</span><h1>{{ title }}</h1><p>{{ subtitle }}</p></div>
         </div>
         <div class="toolbar">
-          <div class="range-control">
+          <div v-if="showRangeControl" class="range-control">
             <span class="toolbar-label">数据范围</span>
             <div class="range-picker" role="group" aria-label="数据范围">
               <button v-for="item in [['today','今天'],['7d','近 7 天'],['30d','近 30 天'],['month','本月']]" :key="item[0]" type="button" :class="{ active: range === item[0] }" @click="range = item[0]">{{ item[1] }}</button>
@@ -434,9 +430,7 @@ function syncBodyScrollLock() {
           </section>
         </div>
         <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
-        <SupplierConnectionsView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
-        <SupplierKeysView v-else-if="page === 'supplier-keys'" :refresh-token="supplierKeyRefreshToken" @toast="showToast" />
-        <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
+        <SupplierManagementView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken + supplierKeyRefreshToken + qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <OAuthSupplyView v-else-if="page === 'oauth-supply'" :refresh-token="oauthSupplyRefreshToken" @toast="showToast" />
         <ReplenishmentView v-else-if="page === 'replenishment'" :refresh-token="replenishmentRefreshToken" @toast="showToast" />
         <div v-else-if="false" class="page-view">

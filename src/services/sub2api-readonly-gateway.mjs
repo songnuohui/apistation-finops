@@ -125,6 +125,21 @@ export class Sub2ApiReadonlyGateway {
     });
   }
 
+  async listAccounts({ page = 1, pageSize = 100, group = '', search = '', status = 'active' } = {}) {
+    const params = new URLSearchParams({
+      page: String(Math.max(1, Number(page) || 1)),
+      page_size: String(Math.min(100, Math.max(1, Number(pageSize) || 100))),
+      ...(group ? { group: String(group) } : {}),
+      ...(search ? { search: String(search) } : {}),
+      ...(status ? { status: String(status) } : {}),
+      lite: 'true',
+    });
+    return this.request(`/api/v1/admin/accounts?${params}`, {
+      cacheKey: `accounts:${params}`,
+      ttlMs: 10_000,
+    });
+  }
+
   async updateAccountGroups(accountId, groupIds) {
     const payload = await this.request(`/api/v1/admin/accounts/${Number(accountId)}`, {
       method: 'PUT',

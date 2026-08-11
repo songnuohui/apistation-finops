@@ -156,3 +156,24 @@ test('sub2api group updates bypass the read cache and invalidate account data', 
   });
   assert.equal(gateway.cache.has('account:8'), false);
 });
+
+test('group account lookup uses the read-only filtered account list with a bounded page size', async () => {
+  const calls = [];
+  const gateway = new Sub2ApiReadonlyGateway({
+    sub2apiAuthUrl: 'http://127.0.0.1:8080',
+    sub2apiAuthTimeoutMs: 1_000,
+  }, console, async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({ code: 0, data: { items: [] } }), { status: 200 });
+  });
+  gateway.setAccessToken('token');
+  await gateway.listAccounts({ group: '12', page: 2, pageSize: 500, search: 'oauth', status: '' });
+  const request = new URL(calls[0].url);
+  assert.equal(request.pathname, '/api/v1/admin/accounts');
+  assert.equal(request.searchParams.get('group'), '12');
+  assert.equal(request.searchParams.get('page'), '2');
+  assert.equal(request.searchParams.get('page_size'), '100');
+  assert.equal(request.searchParams.get('search'), 'oauth');
+  assert.equal(request.searchParams.get('lite'), 'true');
+  assert.equal(calls[0].options.method, 'GET');
+});

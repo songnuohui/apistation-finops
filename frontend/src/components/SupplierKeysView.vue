@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Activity, ArrowDownUp, Check, CheckSquare, ChevronDown, ChevronUp, ExternalLink, KeyRound, Pencil, RefreshCw, Search, Square, Trash2, X } from 'lucide-vue-next';
+import { Activity, ArrowDownUp, Check, CheckSquare, ChevronDown, ChevronUp, ExternalLink, KeyRound, Layers3, Pencil, RefreshCw, Search, Square, Trash2, Users, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -10,13 +10,22 @@ const emit = defineEmits<{ toast: [message: string] }>();
 const search = ref('');
 const supplier = ref('');
 const platform = ref('');
+const groupId = ref('');
+const viewMode = ref<'keys' | 'groups'>('keys');
 const page = ref(1);
 const pageSize = ref(20);
+const groupPage = ref(1);
+const groupPageSize = ref(20);
 const sortBy = ref('last_check_at');
 const sortOrder = ref('desc');
 const loading = ref(false);
 const data = ref<AnyRecord>({ items: [], total: 0, pageSize: 20, suppliers: [], platforms: [] });
+const groupData = ref<AnyRecord>({ items: [], total: 0, pageSize: 20, suppliers: [], platforms: [] });
+const groupCatalog = ref<AnyRecord[]>([]);
+const groupsLoading = ref(false);
 const detail = ref<AnyRecord | null>(null);
+const groupDetail = ref<AnyRecord | null>(null);
+const groupDetailLoading = ref(false);
 const detailLoading = ref(false);
 const deleting = ref<number | null>(null);
 const selectedKeyIds = ref<number[]>([]);
@@ -30,10 +39,38 @@ const accountGroupsLoading = ref(false);
 let timer: number | undefined;
 
 const rows = computed(() => data.value.items || []);
-const suppliers = computed(() => data.value.suppliers || []);
-const platforms = computed(() => data.value.platforms || []);
+const groupRows = computed(() => groupData.value.items || []);
+const groupPages = computed(() => Math.max(1, Math.ceil(Number(groupData.value.total || 0) / Number(groupData.value.pageSize || 20))));
+const suppliers = computed(() => [...new Set([
+  ...(data.value.suppliers || []),
+  ...(groupData.value.suppliers || []),
+])]);
+const platforms = computed(() => [...new Set([
+  ...(data.value.platforms || []),
+  ...(groupData.value.platforms || []),
+])]);
 const total = computed(() => Number(data.value.total || 0));
 const pages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
+const keySummary = computed(() => ({
+  total: total.value,
+  linkedAccounts: rows.value.reduce((sum: number, row: AnyRecord) => sum + Number(row.accountCount || 0), 0),
+  protectedAccounts: rows.value.reduce((sum: number, row: AnyRecord) => sum + Number(row.profitGuardAccountCount || 0), 0),
+  unhealthy: rows.value.filter((row: AnyRecord) => !['ok', 'active'].includes(String(row.lastCheckStatus || row.status))).length,
+}));
+const groupSummary = computed(() => ({
+  total: Number(groupData.value.total || 0),
+  accounts: groupRows.value.reduce((sum: number, row: AnyRecord) => sum + Number(row.accountCount || 0), 0),
+  keys: groupRows.value.reduce((sum: number, row: AnyRecord) => sum + Number(row.keyCount || 0), 0),
+  active: groupRows.value.filter((row: AnyRecord) => row.status === 'active').length,
+}));
+const groupDetailStats = computed(() => {
+  const accounts = groupDetail.value?.accounts || [];
+  return {
+    total: Number(groupDetail.value?.total || accounts.length),
+    active: accounts.filter((item: AnyRecord) => item.status === 'active').length,
+    keys: new Set(accounts.flatMap((item: AnyRecord) => (item.keys || []).map((key: AnyRecord) => Number(key.id)))).size,
+  };
+});
 const selectedKeyCount = computed(() => selectedKeyIds.value.length);
 const allKeysSelected = computed(() => Boolean(rows.value.length)
   && rows.value.every((item: AnyRecord) => selectedKeyIds.value.includes(Number(item.id))));
@@ -160,10 +197,11 @@ function policySeed(account: AnyRecord | null) {
 }
 
 async function load() {
+  if (viewMode.value !== 'keys') return loadGroups();
   loading.value = true;
   try {
     const result = await get(`/supplier-keys?${query({
-      search: search.value, supplier: supplier.value, platform: platform.value, status: 'active',
+      search: search.value, supplier: supplier.value, platform: platform.value, group_id: groupId.value, status: 'active',
       sort_by: sortBy.value, sort_order: sortOrder.value,
       page: page.value, page_size: pageSize.value,
     })}`);
@@ -201,6 +239,34 @@ function toggleAllKeys() {
   } else {
     selectedKeyIds.value = [...new Set([...selectedKeyIds.value, ...currentIds])];
   }
+}
+
+async function loadGroupCatalog() {
+  groupsLoading.value = true;
+  try {
+    const result = await get(`/supplier-groups?${query({ page: 1, page_size: 100 })}`);
+    groupCatalog.value = result.items || [];
+  } catch (error: any) { notify(error.message); }
+  finally { groupsLoading.value = false; }
+}
+
+async function loadGroups() {
+  groupsLoading.value = true;
+  try {
+    groupData.value = await get(`/supplier-groups?${query({
+      search: search.value, supplier: supplier.value, platform: platform.value,
+      page: groupPage.value, page_size: groupPageSize.value,
+    })}`);
+  } catch (error: any) { notify(error.message); }
+  finally { groupsLoading.value = false; }
+}
+
+async function openGroupDetails(row: AnyRecord) {
+  groupDetailLoading.value = true;
+  try {
+    groupDetail.value = await get(`/supplier-groups/${row.id}/details?${query({ page: 1, page_size: 100 })}`);
+  } catch (error: any) { notify(error.message); }
+  finally { groupDetailLoading.value = false; }
 }
 function keyPolicySeed(row: AnyRecord | null) {
   return {
@@ -343,71 +409,164 @@ function changePageSize() {
   page.value = 1;
   load();
 }
+function moveGroupPage(delta: number) {
+  groupPage.value = Math.min(groupPages.value, Math.max(1, groupPage.value + delta));
+  loadGroups();
+}
+function changeGroupPageSize() {
+  groupPage.value = 1;
+  loadGroups();
+}
 
 watch(() => props.refreshToken, () => load());
 watch(search, () => {
   window.clearTimeout(timer);
   page.value = 1;
+  groupPage.value = 1;
   timer = window.setTimeout(load, 250);
 });
-watch(supplier, () => { page.value = 1; load(); });
-watch(platform, () => { page.value = 1; load(); });
-onMounted(load);
+watch(supplier, () => { page.value = 1; groupPage.value = 1; load(); });
+watch(platform, () => { page.value = 1; groupPage.value = 1; load(); });
+watch(groupId, () => { page.value = 1; if (viewMode.value === 'keys') load(); });
+watch(viewMode, () => {
+  selectedKeyIds.value = [];
+  detail.value = null;
+  groupDetail.value = null;
+  load();
+});
+onMounted(() => Promise.all([load(), loadGroupCatalog()]));
 </script>
 
 <template>
   <div class="page-view supplier-view">
+    <div class="view-segmented" role="tablist" aria-label="密钥与分组查看方式">
+      <button :class="{ active: viewMode === 'keys' }" role="tab" :aria-selected="viewMode === 'keys'" @click="viewMode = 'keys'"><KeyRound :size="16" />密钥视图</button>
+      <button :class="{ active: viewMode === 'groups' }" role="tab" :aria-selected="viewMode === 'groups'" @click="viewMode = 'groups'"><Layers3 :size="16" />分组视图</button>
+    </div>
+
     <div class="toolbar-row">
-      <label class="search-box"><Search :size="17" /><input v-model="search" placeholder="搜索供应商、密钥名称、连接或地址" /></label>
+      <label class="search-box"><Search :size="17" /><input v-model="search" :placeholder="viewMode === 'keys' ? '搜索密钥、供应商或连接' : '搜索分组名称、平台或 ID'" /></label>
       <select v-model="supplier" class="toolbar-select"><option value="">全部供应商</option><option v-for="item in suppliers" :key="item" :value="item">{{ item }}</option></select>
       <select v-model="platform" class="toolbar-select"><option value="">全部平台</option><option v-for="item in platforms" :key="item" :value="item">{{ platformText(item) }}</option></select>
-      <button class="secondary-button" :disabled="!selectedKeyCount" @click="openKeyBatchEditor"><CheckSquare :size="16" />统一配置<span v-if="selectedKeyCount">（{{ selectedKeyCount }}）</span></button>
-      <select v-model.number="pageSize" class="toolbar-select" @change="changePageSize"><option :value="20">20 条/页</option><option :value="50">50 条/页</option><option :value="100">100 条/页</option></select>
-      <button class="icon-button" title="刷新密钥列表" aria-label="刷新密钥列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
-      <span class="loading-note" v-if="loading"><RefreshCw :size="15" class="spin" />更新中</span>
+      <select v-if="viewMode === 'keys'" v-model="groupId" class="toolbar-select group-filter"><option value="">全部分组</option><option v-for="item in groupCatalog" :key="item.id" :value="String(item.id)">{{ item.name || `分组 #${item.id}` }}</option></select>
+      <button v-if="viewMode === 'keys'" class="secondary-button" :disabled="!selectedKeyCount" @click="openKeyBatchEditor"><CheckSquare :size="16" />统一配置<span v-if="selectedKeyCount">（{{ selectedKeyCount }}）</span></button>
+      <select v-if="viewMode === 'keys'" v-model.number="pageSize" class="toolbar-select" @change="changePageSize"><option :value="20">20 条/页</option><option :value="50">50 条/页</option><option :value="100">100 条/页</option></select>
+      <select v-else v-model.number="groupPageSize" class="toolbar-select" @change="changeGroupPageSize"><option :value="20">20 条/页</option><option :value="50">50 条/页</option><option :value="100">100 条/页</option></select>
+      <button class="icon-button" title="刷新当前视图" aria-label="刷新当前视图" @click="load"><RefreshCw :size="17" :class="{ spin: loading || groupsLoading }" /></button>
     </div>
-    <section class="panel table-panel">
-      <div class="panel-head"><div><h2>上游供应商密钥</h2><p>支持供应商筛选、分页查看、关联账号分组详情和批量利润控制。</p></div><KeyRound :size="20" class="head-icon" /></div>
+
+    <div v-if="viewMode === 'keys'" class="supplier-summary-grid">
+      <div><span>供应商密钥</span><strong>{{ keySummary.total }}</strong><small>当前筛选结果</small></div>
+      <div><span>关联账号</span><strong>{{ keySummary.linkedAccounts }}</strong><small>当前页关联数量</small></div>
+      <div><span>利润保护</span><strong>{{ keySummary.protectedAccounts }}</strong><small>当前页已覆盖账号</small></div>
+      <div :class="{ attention: keySummary.unhealthy }"><span>需要关注</span><strong>{{ keySummary.unhealthy }}</strong><small>当前页巡检异常</small></div>
+    </div>
+    <div v-else class="supplier-summary-grid">
+      <div><span>正式分组</span><strong>{{ groupSummary.total }}</strong><small>当前筛选结果</small></div>
+      <div><span>分组账号</span><strong>{{ groupSummary.accounts }}</strong><small>当前页账号总数</small></div>
+      <div><span>关联密钥</span><strong>{{ groupSummary.keys }}</strong><small>当前页上游密钥</small></div>
+      <div><span>启用分组</span><strong>{{ groupSummary.active }}</strong><small>当前页正常状态</small></div>
+    </div>
+
+    <section v-if="viewMode === 'keys'" class="panel table-panel supplier-resource-panel">
+      <div class="panel-head"><div><h2>供应商密钥</h2><p>主表只展示成本、账号关联、利润策略和健康状态；地址与巡检明细在详情中查看。</p></div><KeyRound :size="20" class="head-icon" /></div>
       <div class="table-wrap">
         <table class="supplier-key-table">
           <thead><tr>
             <th><button class="icon-button mini-action" title="全选当前页" aria-label="全选当前页" @click="toggleAllKeys"><CheckSquare v-if="allKeysSelected" :size="16" /><Square v-else :size="16" /></button></th>
             <th><button class="sort-button" @click="sortColumn('name')">密钥 <component :is="sortIcon('name')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('supplier')">供应商 / 余额 <component :is="sortIcon('supplier')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('base_url')">上游地址 <component :is="sortIcon('base_url')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('platform')">平台 <component :is="sortIcon('platform')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('rate_multiplier')">倍率 <component :is="sortIcon('rate_multiplier')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('profit_range')">利润控制区间 <component :is="sortIcon('profit_range')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('minimum_margin')">最低毛利率控制 <component :is="sortIcon('minimum_margin')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('supplier')">供应商 <component :is="sortIcon('supplier')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('platform')">平台 / 分组 <component :is="sortIcon('platform')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('rate_multiplier')">成本倍率 <component :is="sortIcon('rate_multiplier')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('account_count')">关联账号 <component :is="sortIcon('account_count')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('profit_range')">利润策略 <component :is="sortIcon('profit_range')" :size="14" /></button></th>
             <th><button class="sort-button" @click="sortColumn('status')">状态 <component :is="sortIcon('status')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('usage_amount')">使用量 <component :is="sortIcon('usage_amount')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('account_count')">关联账号个数 <component :is="sortIcon('account_count')" :size="14" /></button></th>
-            <th><button class="sort-button" @click="sortColumn('last_check_at')">最近同步时间 <component :is="sortIcon('last_check_at')" :size="14" /></button></th>
+            <th><button class="sort-button" @click="sortColumn('last_check_at')">最近同步 <component :is="sortIcon('last_check_at')" :size="14" /></button></th>
             <th>操作</th>
           </tr></thead>
           <tbody>
-            <tr v-if="loading && !rows.length"><td colspan="13" class="table-empty">正在读取供应商密钥</td></tr>
+            <tr v-if="loading && !rows.length"><td colspan="10" class="table-empty">正在读取供应商密钥</td></tr>
             <tr v-for="row in rows" :key="row.id">
               <td><input type="checkbox" :checked="selectedKeyIds.includes(Number(row.id))" @change="toggleKey(row.id)" /></td>
               <td class="key-name-cell"><strong>{{ row.name || row.maskedKey || `密钥 #${row.id}` }}</strong><small>{{ row.maskedKey || row.externalId || '--' }}</small></td>
               <td class="supplier-cell"><strong>{{ row.supplierName || '--' }}</strong><small>{{ row.connectionName || '--' }} · 余额 {{ supplierBalance(row) }}</small></td>
-              <td class="supplier-address"><span class="supplier-cell-text" :title="row.baseUrl">{{ row.baseUrl || '--' }}</span></td>
               <td class="platform-cell"><span class="status-pill">{{ platformText(row.platform) }}</span><small>{{ row.groupName || '未分组' }}</small></td>
-              <td class="multiplier-cell"><strong>{{ multiplier(row.rateMultiplier) }}</strong><small>{{ row.groupName || '未分组' }}</small></td>
-              <td class="profit-range-cell"><strong>{{ profitRangeText(row) }}</strong><small>{{ row.profitGuardAccountCount ? `${row.profitGuardAccountCount} 个账号已启用自动控制` : '未配置自动归组' }}</small></td>
-              <td class="minimum-margin-cell"><strong>{{ minimumMarginText(row) }}</strong><small>{{ row.profitGuardAccountCount ? `${row.profitGuardAccountCount} 个账号已启用` : '未配置' }}</small></td>
+              <td class="multiplier-cell"><strong>{{ multiplier(row.rateMultiplier) }}</strong><small>上游采购倍率</small></td>
+              <td class="account-count-cell"><button class="link-button account-count-button" @click="openDetails(row.id)"><strong>{{ row.accountCount }} 个</strong></button><small>{{ row.profitGuardAccountCount }} 个已启用保护</small></td>
+              <td class="profit-range-cell"><strong>{{ profitRangeText(row) }}</strong><small>移除阈值 {{ minimumMarginText(row) }}</small></td>
               <td class="status-cell"><span class="status-pill" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span><small><span class="status-pill" :class="statusClass(row.lastCheckStatus)">{{ statusLabel(row.lastCheckStatus) }}</span></small></td>
-              <td class="usage-cell"><strong>{{ amountCny(row.usageAmountCny) }}</strong><small>累计消费金额</small></td>
-              <td class="account-count-cell"><button class="link-button account-count-button" @click="openDetails(row.id)"><strong>{{ row.accountCount }} 个</strong></button><small>{{ row.profitGuardAccountCount }} 个已启用利润控制</small></td>
               <td class="sync-cell">{{ dateTime(row.lastCheckAt) }}</td>
               <td><div class="row-actions supplier-row-actions"><button class="icon-button mini-action" title="查看详情" aria-label="查看详情" @click="openDetails(row.id)"><Activity :size="16" /></button><button class="icon-button mini-action" title="修改相关利润" aria-label="修改相关利润" @click="openProfitEditor(row.id)"><Pencil :size="16" /></button><button class="icon-button mini-action danger-action" title="删除密钥" aria-label="删除密钥" :disabled="deleting === row.id" @click="deleteKey(row)"><Trash2 :size="16" /></button></div></td>
             </tr>
-            <tr v-if="!loading && !rows.length"><td colspan="13" class="table-empty">没有找到供应商密钥</td></tr>
+            <tr v-if="!loading && !rows.length"><td colspan="10" class="table-empty">没有找到供应商密钥</td></tr>
           </tbody>
         </table>
       </div>
       <div v-if="total > pageSize" class="pager"><button class="small-button" :disabled="page <= 1" @click="movePage(-1)">上一页</button><span>第 {{ page }} 页，共 {{ total }} 个密钥</span><button class="small-button" :disabled="page >= pages" @click="movePage(1)">下一页</button></div>
     </section>
+
+    <section v-else class="panel table-panel supplier-resource-panel">
+      <div class="panel-head"><div><h2>Sub2API 正式分组</h2><p>列表读取分组摘要；只有打开分组详情时才查询该组账号和关联密钥。</p></div><Layers3 :size="20" class="head-icon" /></div>
+      <div class="table-wrap">
+        <table class="supplier-group-table">
+          <thead><tr><th>分组</th><th>平台</th><th>销售倍率</th><th>账号</th><th>关联密钥</th><th>供应商</th><th>成本范围</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-if="groupsLoading && !groupRows.length"><td colspan="9" class="table-empty">正在读取分组</td></tr>
+            <tr v-for="row in groupRows" :key="row.id">
+              <td><button class="link-button" @click="openGroupDetails(row)">{{ row.name || `分组 #${row.id}` }}</button><small>ID {{ row.id }}<template v-if="row.description"> · {{ row.description }}</template></small></td>
+              <td><span class="status-pill">{{ platformText(row.platform) }}</span></td>
+              <td><strong>{{ multiplier(row.rateMultiplier) }}</strong><small>对客销售倍率</small></td>
+              <td><strong>{{ row.accountCount }}</strong><small>{{ row.activeAccountCount }} 个正常</small></td>
+              <td><strong>{{ row.keyCount }}</strong><small>{{ row.linkedAccountCount }} 个本地关联账号</small></td>
+              <td><strong>{{ row.supplierCount }}</strong><small>{{ (row.supplierNames || []).slice(0, 2).join('、') || '暂无关联' }}</small></td>
+              <td><strong>{{ multiplier(row.minimumUpstreamMultiplier) }} - {{ multiplier(row.maximumUpstreamMultiplier) }}</strong><small>上游采购倍率</small></td>
+              <td><span class="status-pill" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span><small v-if="row.rateLimitedAccountCount">{{ row.rateLimitedAccountCount }} 个限流</small></td>
+              <td><button class="icon-button mini-action" title="查看分组账号与密钥" aria-label="查看分组账号与密钥" @click="openGroupDetails(row)"><Users :size="16" /></button></td>
+            </tr>
+            <tr v-if="!groupsLoading && !groupRows.length"><td colspan="9" class="table-empty">没有找到符合条件的分组</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-if="Number(groupData.total || 0) > groupPageSize" class="pager"><button class="small-button" :disabled="groupPage <= 1" @click="moveGroupPage(-1)">上一页</button><span>第 {{ groupPage }} 页，共 {{ groupData.total }} 个分组</span><button class="small-button" :disabled="groupPage >= groupPages" @click="moveGroupPage(1)">下一页</button></div>
+    </section>
+
+    <div v-if="groupDetail || groupDetailLoading" class="modal-layer supplier-drawer-layer" @click.self="groupDetail = null">
+      <section class="modal supplier-side-drawer">
+        <header>
+          <div><h2>{{ groupDetail?.group?.name || '分组详情' }}</h2><p v-if="groupDetail">{{ platformText(groupDetail.group.platform) }} · ID {{ groupDetail.group.id }} · 销售倍率 {{ multiplier(groupDetail.group.rateMultiplier) }}</p></div>
+          <button class="icon-button" title="关闭" aria-label="关闭" @click="groupDetail = null"><X :size="19" /></button>
+        </header>
+        <div v-if="groupDetailLoading && !groupDetail" class="table-empty">正在读取分组账号和关联密钥</div>
+        <template v-else-if="groupDetail">
+          <div class="supplier-metrics group-detail-metrics">
+            <div><span>分组账号</span><strong>{{ groupDetailStats.total }}</strong><small>本次读取 {{ groupDetail.accounts.length }} 个</small></div>
+            <div><span>正常账号</span><strong>{{ groupDetailStats.active }}</strong><small>可调度状态按账号显示</small></div>
+            <div><span>关联密钥</span><strong>{{ groupDetailStats.keys }}</strong><small>FinOps 已建立成本关联</small></div>
+            <div><span>销售倍率</span><strong>{{ multiplier(groupDetail.group.rateMultiplier) }}</strong><small>{{ groupDetail.group.status === 'active' ? '分组已启用' : '分组未启用' }}</small></div>
+          </div>
+          <section class="detail-section">
+            <div class="detail-section-head"><div><h3>账号与供应商密钥</h3><p>账号信息来自 Sub2API 只读接口，密钥关联来自 FinOps 数据库。</p></div></div>
+            <div class="table-wrap compact-table group-account-table"><table><thead><tr><th>账号</th><th>运行配置</th><th>状态</th><th>供应商密钥与成本</th></tr></thead><tbody>
+              <tr v-for="account in groupDetail.accounts" :key="account.id">
+                <td><strong>{{ account.name || `账号 #${account.id}` }}</strong><small>{{ platformText(account.platform) }} · ID {{ account.id }}</small></td>
+                <td><strong>并发 {{ account.concurrency }}</strong><small>优先级 {{ account.priority }} · 当前 {{ account.currentConcurrency }}</small></td>
+                <td><span class="status-pill" :class="statusClass(account.status)">{{ statusLabel(account.status) }}</span><small>{{ account.schedulable ? '可调度' : '不可调度' }}<template v-if="account.errorMessage"> · {{ account.errorMessage }}</template></small></td>
+                <td>
+                  <div v-if="account.keys.length" class="group-key-list">
+                    <button v-for="key in account.keys" :key="key.id" class="group-key-item" @click="openDetails(key.id)">
+                      <span><strong>{{ key.name || key.maskedKey || `密钥 #${key.id}` }}</strong><small>{{ key.supplierName }} · {{ key.connectionName }}</small></span>
+                      <span><strong>{{ multiplier(key.rateMultiplier) }}</strong><small>{{ statusLabel(key.lastCheckStatus) }}</small></span>
+                    </button>
+                  </div>
+                  <span v-else class="muted-text">尚未关联供应商密钥</span>
+                </td>
+              </tr>
+              <tr v-if="!groupDetail.accounts.length"><td colspan="4" class="table-empty">该分组下没有账号</td></tr>
+            </tbody></table></div>
+          </section>
+        </template>
+      </section>
+    </div>
 
     <div v-if="detail || detailLoading" class="modal-layer" @click.self="detail = null">
       <section class="modal supplier-detail-modal">

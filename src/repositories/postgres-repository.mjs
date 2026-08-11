@@ -4063,8 +4063,80 @@ export class PostgresRepository {
     };
   }
 
+  async listSupplierGroupSummaries() {
+    const result = await this.pool.query(`
+      SELECT
+        CASE WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint ELSE NULL END AS source_group_id,
+        COUNT(DISTINCT k.id)::int AS key_count,
+        COUNT(DISTINCT s.id)::int AS supplier_count,
+        ARRAY_AGG(DISTINCT s.name) AS supplier_names,
+        COUNT(DISTINCT l.source_account_id)::int AS linked_account_count,
+        MIN(k.rate_multiplier) AS minimum_upstream_multiplier,
+        MAX(k.rate_multiplier) AS maximum_upstream_multiplier
+      FROM ${this.schema}.supplier_keys k
+      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
+      WHERE k.removed_at IS NULL
+        AND k.status='active'
+        AND k.group_id ~ '^[0-9]+$'
+      GROUP BY CASE WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint ELSE NULL END
+    `);
+    return result.rows.map((row) => ({
+      groupId: Number(row.source_group_id),
+      keyCount: Number(row.key_count || 0),
+      supplierCount: Number(row.supplier_count || 0),
+      supplierNames: Array.isArray(row.supplier_names) ? row.supplier_names.filter(Boolean) : [],
+      linkedAccountCount: Number(row.linked_account_count || 0),
+      minimumUpstreamMultiplier: nullableNumber(row.minimum_upstream_multiplier),
+      maximumUpstreamMultiplier: nullableNumber(row.maximum_upstream_multiplier),
+    })).filter((row) => Number.isSafeInteger(row.groupId) && row.groupId > 0);
+  }
+
+  async listSupplierGroupKeysForAccounts(accountIds = []) {
+    const ids = [...new Set(accountIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+    if (!ids.length) return [];
+    const result = await this.pool.query(`
+      SELECT
+        l.source_account_id,
+        k.id,k.external_key_id,k.name,k.masked_key,k.status,k.group_id,k.group_name,
+        k.rate_multiplier,k.last_check_status,k.last_check_at,
+        s.name AS supplier_name,c.name AS connection_name,c.base_url,
+        COALESCE(NULLIF(gc.platform,''), '') AS platform
+      FROM ${this.schema}.supplier_account_links l
+      JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+      JOIN ${this.schema}.supplier_connections c ON c.id=k.connection_id
+      JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+      LEFT JOIN ${this.schema}.source_group_catalog gc
+        ON gc.source_group_id = CASE
+          WHEN k.group_id ~ '^[0-9]+$' THEN k.group_id::bigint
+          ELSE NULL
+        END
+      WHERE l.source_account_id=ANY($1::bigint[])
+        AND k.removed_at IS NULL
+      ORDER BY l.source_account_id,s.name,c.name,k.name,k.id
+    `, [ids]);
+    return result.rows.map((row) => ({
+      accountId: Number(row.source_account_id),
+      id: Number(row.id),
+      externalId: row.external_key_id || '',
+      name: row.name || '',
+      maskedKey: row.masked_key || '',
+      status: row.status || '',
+      groupId: row.group_id ? Number(row.group_id) : null,
+      groupName: row.group_name || '',
+      platform: row.platform || '',
+      supplierName: row.supplier_name || '',
+      connectionName: row.connection_name || '',
+      baseUrl: row.base_url || '',
+      rateMultiplier: nullableNumber(row.rate_multiplier),
+      lastCheckStatus: row.last_check_status || 'pending',
+      lastCheckAt: row.last_check_at || null,
+    }));
+  }
+
   async listSupplierKeys({
-    search = '', supplier = '', platform = '', status = 'active',
+    search = '', supplier = '', platform = '', groupId = '', status = 'active',
     page = 1, pageSize = 20, offset = 0, sortBy = 'last_check_at', sortOrder = 'desc',
   } = {}) {
     const normalizedStatus = String(status || '').trim().toLowerCase();
@@ -4085,8 +4157,9 @@ export class PostgresRepository {
     };
     const sortColumn = sortColumns[String(sortBy || '')] || sortColumns.last_check_at;
     const direction = String(sortOrder || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-    const result = await this.pool.query(`
-      WITH usage_by_account AS (
+    const includeUsage = String(sortBy || '') === 'usage_amount';
+    const usageCte = includeUsage ? `
+      usage_by_account AS (
         SELECT source_account_id,
                COUNT(*)::int AS usage_request_count,
                COALESCE(SUM(
@@ -4098,7 +4171,19 @@ export class PostgresRepository {
                COALESCE(SUM(user_charge_cny),0)::numeric AS usage_amount_cny
         FROM ${this.schema}.fact_usage_events
         GROUP BY source_account_id
-      ),
+      ),` : '';
+    const usageColumns = includeUsage ? `
+               COALESCE(SUM(u.usage_request_count),0)::int AS usage_request_count,
+               COALESCE(SUM(u.usage_token_count),0)::numeric AS usage_token_count,
+               COALESCE(SUM(u.usage_amount_cny),0)::numeric AS usage_amount_cny,` : `
+               0::int AS usage_request_count,
+               0::numeric AS usage_token_count,
+               0::numeric AS usage_amount_cny,`;
+    const usageJoin = includeUsage
+      ? `LEFT JOIN usage_by_account u ON u.source_account_id=l.source_account_id`
+      : '';
+    const result = await this.pool.query(`
+      WITH ${usageCte}
       key_rows AS (
         SELECT k.id,k.connection_id,k.external_key_id,k.name,k.masked_key,k.status,k.group_id,k.group_name,
                k.rate_multiplier,k.quota_total,k.quota_used,k.quota_remaining,k.quota_currency,k.expires_at,
@@ -4110,9 +4195,7 @@ export class PostgresRepository {
                COALESCE(NULLIF(gc.platform,''), MAX(NULLIF(a.platform,'')), '') AS platform,
                COUNT(DISTINCT l.source_account_id)::int AS account_count,
                COUNT(DISTINCT l.source_account_id) FILTER (WHERE p.enabled)::int AS profit_guard_account_count,
-               COALESCE(SUM(u.usage_request_count),0)::int AS usage_request_count,
-               COALESCE(SUM(u.usage_token_count),0)::numeric AS usage_token_count,
-               COALESCE(SUM(u.usage_amount_cny),0)::numeric AS usage_amount_cny,
+               ${usageColumns}
                MIN(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_min,
                MAX(p.minimum_margin) FILTER (WHERE p.enabled) AS minimum_margin_max,
                COUNT(DISTINCT p.minimum_margin) FILTER (WHERE p.enabled)::int AS minimum_margin_variant_count,
@@ -4128,7 +4211,7 @@ export class PostgresRepository {
         LEFT JOIN ${this.schema}.supplier_account_links l ON l.supplier_key_id=k.id
         LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
         LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
-        LEFT JOIN usage_by_account u ON u.source_account_id=l.source_account_id
+        ${usageJoin}
         LEFT JOIN LATERAL (
           SELECT balance,currency
           FROM ${this.schema}.supplier_balance_snapshots
@@ -4151,8 +4234,9 @@ export class PostgresRepository {
       SELECT key_rows.*,COUNT(*) OVER()::int AS total_count
       FROM key_rows
       WHERE ($4='' OR platform=$4)
+        AND ($5='' OR group_id=$5)
       ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
-      LIMIT $5 OFFSET $6`, [search, supplier, normalizedStatus, normalizedPlatform, pageSize, offset]);
+      LIMIT $6 OFFSET $7`, [search, supplier, normalizedStatus, normalizedPlatform, String(groupId || ''), pageSize, offset]);
     const supplierResult = await this.pool.query(`
       SELECT DISTINCT s.name
       FROM ${this.schema}.supplier_keys k

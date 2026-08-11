@@ -173,6 +173,34 @@ function validatedReplenishmentMapping(input, groups) {
   return { ...input, platform, targetGroupIds: groupIds };
 }
 
+function payloadItems(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.accounts)) return payload.accounts;
+  return [];
+}
+
+function supplierGroupItem(group, local = {}) {
+  return {
+    id: Number(group?.id ?? group?.group_id ?? group?.source_group_id),
+    name: group?.name || '',
+    description: group?.description || '',
+    platform: group?.platform || '',
+    status: group?.status || '',
+    rateMultiplier: group?.rate_multiplier ?? group?.rateMultiplier ?? null,
+    accountCount: Number(group?.account_count ?? group?.accountCount ?? local.linkedAccountCount ?? 0),
+    activeAccountCount: Number(group?.active_account_count ?? group?.activeAccountCount ?? 0),
+    rateLimitedAccountCount: Number(group?.rate_limited_account_count ?? group?.rateLimitedAccountCount ?? 0),
+    keyCount: Number(local.keyCount || 0),
+    supplierCount: Number(local.supplierCount || 0),
+    linkedAccountCount: Number(local.linkedAccountCount || 0),
+    supplierNames: Array.isArray(local.supplierNames) ? local.supplierNames : [],
+    minimumUpstreamMultiplier: local.minimumUpstreamMultiplier ?? null,
+    maximumUpstreamMultiplier: local.maximumUpstreamMultiplier ?? null,
+  };
+}
+
 async function refreshSourceGroupCatalog(accessToken,request){
   if(config.demoMode||!accessToken)return;
   try{
@@ -346,16 +374,84 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/purchase-catalog')return json(res,200,await cached('purchase-catalog',config.listCacheTtlSeconds,()=>repository.listPurchaseCatalog()));
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-connections')return json(res,200,await cached('supplier-connections',config.listCacheTtlSeconds,()=>repository.listSupplierConnections({search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/supplier-groups'){
+    return json(res,200,await cached('supplier-groups',Math.min(10,config.listCacheTtlSeconds),async()=>{
+      const paging=page();
+      const [groupsPayload,localRows]=await Promise.all([
+        config.demoMode?Promise.resolve([]):sub2ApiReadonlyGateway.listGroups(),
+        repository.listSupplierGroupSummaries(),
+      ]);
+      const localById=new Map(localRows.map((item)=>[Number(item.groupId),item]));
+      const groups=payloadItems(groupsPayload).map((group)=>supplierGroupItem(group,localById.get(Number(group?.id))));
+      const search=searchTerm(url.searchParams).toLowerCase();
+      const supplier=String(url.searchParams.get('supplier')||'').trim();
+      const platform=String(url.searchParams.get('platform')||'').trim();
+      const status=String(url.searchParams.get('status')||'').trim();
+      const filtered=groups.filter((group)=>{
+        if(search&&!`${group.name} ${group.description} ${group.platform} ${group.id}`.toLowerCase().includes(search))return false;
+        if(supplier&&!group.supplierNames.includes(supplier))return false;
+        if(platform&&group.platform!==platform)return false;
+        if(status&&group.status!==status)return false;
+        return true;
+      }).sort((left,right)=>{
+        if(left.status!==right.status)return left.status==='active'?-1:right.status==='active'?1:0;
+        return left.platform.localeCompare(right.platform,'zh-CN')||left.name.localeCompare(right.name,'zh-CN');
+      });
+      return {
+        items:filtered.slice(paging.offset,paging.offset+paging.pageSize),
+        total:filtered.length,page:paging.page,pageSize:paging.pageSize,
+        platforms:[...new Set(groups.map((group)=>group.platform).filter(Boolean))].sort(),
+        suppliers:[...new Set(groups.flatMap((group)=>group.supplierNames).filter(Boolean))].sort(),
+      };
+    }));
+  }
   if(request.method==='GET'&&url.pathname==='/api/supplier-keys'){
     return json(res,200,await repository.listSupplierKeys({
       search:searchTerm(url.searchParams),
       supplier:String(url.searchParams.get('supplier') || '').trim(),
       platform:String(url.searchParams.get('platform') || '').trim(),
+      groupId:String(url.searchParams.get('group_id') || '').trim(),
       status:url.searchParams.get('status') || 'active',
       sortBy:String(url.searchParams.get('sort_by') || 'last_check_at').trim(),
       sortOrder:String(url.searchParams.get('sort_order') || 'desc').trim().toLowerCase(),
       ...page(),
     }));
+  }
+  const supplierGroupDetails=/^\/api\/supplier-groups\/(\d+)\/details$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierGroupDetails){
+    const groupId=Number(supplierGroupDetails[1]);
+    const groupPaging=page();
+    const requestedPage=groupPaging.page;
+    const requestedPageSize=groupPaging.pageSize;
+    const [groupsPayload,accountsPayload]=await Promise.all([
+      sub2ApiReadonlyGateway.listGroups(),
+      sub2ApiReadonlyGateway.listAccounts({
+        group:String(groupId),page:requestedPage,pageSize:requestedPageSize,status:'',
+      }),
+    ]);
+    const group=payloadItems(groupsPayload).find((item)=>Number(item?.id??item?.group_id)===groupId);
+    if(!group)throw Object.assign(new Error('supplier group not found'),{statusCode:404});
+    const accounts=payloadItems(accountsPayload);
+    const keys=await repository.listSupplierGroupKeysForAccounts(accounts.map((account)=>Number(account.id)));
+    const keysByAccount=new Map();
+    for(const key of keys){
+      const list=keysByAccount.get(key.accountId)||[];
+      list.push(key);
+      keysByAccount.set(key.accountId,list);
+    }
+    return json(res,200,{
+      group:supplierGroupItem(group),
+      accounts:accounts.map((account)=>({
+        id:Number(account.id),name:account.name||'',platform:account.platform||'',type:account.type||'',
+        status:account.status||'',concurrency:Number(account.concurrency||0),priority:Number(account.priority||0),
+        currentConcurrency:Number(account.current_concurrency||0),schedulable:Boolean(account.schedulable),
+        errorMessage:account.error_message||'',lastUsedAt:account.last_used_at||null,
+        keys:keysByAccount.get(Number(account.id))||[],
+      })),
+      total:Number(accountsPayload?.total||accounts.length),
+      page:Number(accountsPayload?.page||requestedPage),
+      pageSize:Number(accountsPayload?.page_size||accountsPayload?.pageSize||requestedPageSize),
+    });
   }
   if(request.method==='GET'&&url.pathname==='/api/supplier-quality-overview'){
     return json(res,200,await cached('supplier-quality-overview',config.listCacheTtlSeconds,()=>repository.listSupplierQualityOverview(range())));
