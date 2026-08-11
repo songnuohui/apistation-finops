@@ -52,6 +52,21 @@ test('observe mode reports a shortage without creating an order', async () => {
   const result = await service.createOrderForRule(rule);
   assert.equal(result.status, 'observed_need');
   assert.equal((await repository.listOrders()).length, 0);
+  const events = await repository.listEvents({ ruleId: rule.id });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, 'observed_replenishment');
+  assert.match(events[0].message, /观察模式/);
+  assert.equal(events[0].details.inventory.trackedAccounts, 0);
+  assert.equal(events[0].details.inventory.accounts, undefined);
+});
+
+test('blank recovery retry limit is stored as unlimited', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  const saved = await repository.saveRule({ ...current, recoveryRetryLimit: '' });
+
+  assert.equal(saved.recoveryRetryLimit, null);
 });
 
 test('replenishment rules reject a missing product mapping before writing', async () => {
@@ -418,12 +433,14 @@ test('recovery saves claimed credentials before retrying Sub2API and verifies th
     sub2apiAccountId: 106,
     accountKey: tracked.externalAccountKey,
     status: 'claimable',
+    attemptCount: 20,
     claimUrlCiphertext: service.vault.encrypt({ claimUrl: '/api/customer/recoveries/6/claim?ticket=ticket' }),
   });
 
   await assert.rejects(service.claimRecovery(job.id), /temporary Sub2API failure/);
   let saved = await repository.getRecovery(job.id);
   assert.equal(saved.status, 'retry_wait');
+  assert.equal(saved.attemptCount, 21);
   assert.ok(saved.credentialCiphertext);
   assert.equal(claimCalls, 1);
 

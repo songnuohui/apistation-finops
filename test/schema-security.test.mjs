@@ -270,6 +270,14 @@ test('replenishment lifecycle deletion remains FinOps-owned and preserves histor
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
 
+test('replenishment execution logs and unlimited retries remain FinOps-owned', () => {
+  const migration = read('migrations/035_replenishment_execution_logs.sql');
+  assert.match(migration, /replenishment_events[\s\S]*rule_id BIGINT/);
+  assert.match(migration, /recovery_retry_limit DROP NOT NULL/);
+  assert.match(migration, /recovery_retry_limit IS NULL/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

@@ -49,7 +49,8 @@ function rule(row) {
     quotaWindow: row.quota_window || 'any',
     quotaUnknownPolicy: row.quota_unknown_policy || 'warn',
     repairGraceSeconds: Number(row.repair_grace_seconds ?? 900),
-    recoveryRetryLimit: Number(row.recovery_retry_limit ?? 6),
+    recoveryRetryLimit: row.recovery_retry_limit === null || row.recovery_retry_limit === undefined
+      ? null : Number(row.recovery_retry_limit),
     maxOrderAmountCny: number(row.max_order_amount_cny),
     maxDailyAmountCny: number(row.max_daily_amount_cny),
     concurrency: Number(row.concurrency || 1),
@@ -157,7 +158,25 @@ function recovery(row) {
     mode: row.mode || '',
     verificationModel: row.verification_model || '',
     verificationPrompt: row.verification_prompt || '',
-    recoveryRetryLimit: Number(row.recovery_retry_limit ?? 6),
+    recoveryRetryLimit: row.recovery_retry_limit === null || row.recovery_retry_limit === undefined
+      ? null : Number(row.recovery_retry_limit),
+  };
+}
+
+function event(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    ruleId: number(row.resolved_rule_id ?? row.rule_id),
+    ruleName: row.rule_name || '',
+    runId: number(row.run_id),
+    orderId: number(row.order_id),
+    itemId: number(row.item_id),
+    eventType: row.event_type || '',
+    message: row.message || '',
+    details: row.details || {},
+    actor: row.created_by || row.actor || 'system',
+    createdAt: row.created_at || row.createdAt || null,
   };
 }
 
@@ -174,7 +193,10 @@ function normalizeRuleInput(input) {
     quotaWindow: String(input.quotaWindow || 'any'),
     quotaUnknownPolicy: String(input.quotaUnknownPolicy || 'warn'),
     repairGraceSeconds: Number(input.repairGraceSeconds ?? 900),
-    recoveryRetryLimit: Number(input.recoveryRetryLimit ?? 6),
+    recoveryRetryLimit: input.recoveryRetryLimit === null
+      || input.recoveryRetryLimit === undefined
+      || input.recoveryRetryLimit === ''
+      ? null : Number(input.recoveryRetryLimit),
     maxOrderAmountCny: input.maxOrderAmountCny === null || input.maxOrderAmountCny === '' ? null : Number(input.maxOrderAmountCny),
     maxDailyAmountCny: input.maxDailyAmountCny === null || input.maxDailyAmountCny === '' ? null : Number(input.maxDailyAmountCny),
     concurrency: Number(input.concurrency || 1),
@@ -209,7 +231,9 @@ function normalizeRuleInput(input) {
   if (!Number.isSafeInteger(values.repairGraceSeconds) || values.repairGraceSeconds < 0 || values.repairGraceSeconds > 86400) {
     throw badRequest('修复等待时间必须在 0 到 86400 秒之间');
   }
-  if (!Number.isSafeInteger(values.recoveryRetryLimit) || values.recoveryRetryLimit < 0 || values.recoveryRetryLimit > 20) {
+  if (values.recoveryRetryLimit !== null
+    && (!Number.isSafeInteger(values.recoveryRetryLimit)
+      || values.recoveryRetryLimit < 0 || values.recoveryRetryLimit > 20)) {
     throw badRequest('修复重试次数必须在 0 到 20 之间');
   }
   return values;
@@ -244,7 +268,7 @@ export class ReplenishmentRepository {
       quotaWindow: 'any',
       quotaUnknownPolicy: 'warn',
       repairGraceSeconds: 900,
-      recoveryRetryLimit: 6,
+      recoveryRetryLimit: null,
       maxOrderAmountCny: 100,
       maxDailyAmountCny: 300,
       concurrency: 5,
@@ -405,13 +429,19 @@ export class ReplenishmentRepository {
     return this.getRule(result.rows[0]?.id);
   }
 
-  async setRuleEnabled(id, enabled) {
+  async setRuleEnabled(id, enabled, actor = 'admin') {
     const ruleId = Number(id);
     if (this.demo) {
       const current = this.rules.find((entry) => entry.id === ruleId);
       if (!current) throw notFound('补号策略不存在或已删除');
       current.enabled = Boolean(enabled);
       current.updatedAt = new Date().toISOString();
+      await this.addEvent({
+        ruleId,
+        eventType: enabled ? 'rule_enabled' : 'rule_disabled',
+        message: enabled ? '策略已启动' : '策略已暂停',
+        actor,
+      });
       return { ...current };
     }
     const result = await this.pool.query(`
@@ -424,7 +454,14 @@ export class ReplenishmentRepository {
         AND m.deleted_at IS NULL
       RETURNING r.id`, [ruleId, Boolean(enabled)]);
     if (!result.rowCount) throw notFound('补号策略不存在或商品映射已删除');
-    return this.getRule(ruleId);
+    const updated = await this.getRule(ruleId);
+    await this.addEvent({
+      ruleId,
+      eventType: enabled ? 'rule_enabled' : 'rule_disabled',
+      message: enabled ? '策略已启动' : '策略已暂停',
+      actor,
+    });
+    return updated;
   }
 
   async deleteRule(id) {
@@ -947,20 +984,50 @@ export class ReplenishmentRepository {
       String(updates.errorMessage || '').slice(0, 1000)]);
   }
 
-  async addEvent({ runId = null, orderId = null, itemId = null, eventType, message = '', details = {}, actor = 'system' }) {
+  async addEvent({ ruleId = null, runId = null, orderId = null, itemId = null, eventType, message = '', details = {}, actor = 'system' }) {
     if (this.demo) {
-      this.events.push({
-        id: ++this.sequence, runId, orderId, itemId, eventType, message, details, actor,
+      const created = {
+        id: ++this.sequence, ruleId, runId, orderId, itemId, eventType, message, details, actor,
         createdAt: new Date().toISOString(),
-      });
-      return;
+      };
+      this.events.push(created);
+      return { ...created };
     }
-    await this.pool.query(`
+    const result = await this.pool.query(`
       INSERT INTO ${this.schema}.replenishment_events(
-        run_id,order_id,item_id,event_type,message,details,created_by)
-      VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`,
-    [runId, orderId, itemId, eventType, String(message || '').slice(0, 2000),
+        rule_id,run_id,order_id,item_id,event_type,message,details,created_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+      RETURNING *`,
+    [ruleId, runId, orderId, itemId, eventType, String(message || '').slice(0, 2000),
       JSON.stringify(details || {}), actor]);
+    return event(result.rows[0]);
+  }
+
+  async listEvents({ ruleId = null, limit = 100 } = {}) {
+    const selectedRuleId = ruleId === null || ruleId === undefined || ruleId === '' ? null : Number(ruleId);
+    const selectedLimit = Math.min(200, Math.max(1, Number(limit) || 100));
+    if (this.demo) {
+      return [...this.events]
+        .filter((entry) => selectedRuleId === null || Number(entry.ruleId) === selectedRuleId)
+        .sort((left, right) => right.id - left.id)
+        .slice(0, selectedLimit)
+        .map((entry) => ({
+          ...entry,
+          ruleName: this.rules.find((ruleEntry) => Number(ruleEntry.id) === Number(entry.ruleId))?.name || '',
+        }));
+    }
+    const result = await this.pool.query(`
+      SELECT e.*,COALESCE(e.rule_id,run.rule_id,replenishment_order.rule_id) AS resolved_rule_id,
+        replenishment_rule.name AS rule_name
+      FROM ${this.schema}.replenishment_events e
+      LEFT JOIN ${this.schema}.replenishment_runs run ON run.id=e.run_id
+      LEFT JOIN ${this.schema}.oauth_supply_orders replenishment_order ON replenishment_order.id=e.order_id
+      LEFT JOIN ${this.schema}.replenishment_rules replenishment_rule
+        ON replenishment_rule.id=COALESCE(e.rule_id,run.rule_id,replenishment_order.rule_id)
+      WHERE ($1::bigint IS NULL OR COALESCE(e.rule_id,run.rule_id,replenishment_order.rule_id)=$1)
+      ORDER BY e.created_at DESC,e.id DESC
+      LIMIT $2`, [selectedRuleId, selectedLimit]);
+    return result.rows.map(event);
   }
 
   async dashboard() {

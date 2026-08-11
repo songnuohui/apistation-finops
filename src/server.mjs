@@ -713,6 +713,13 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/replenishment/rules'){
     return json(res,200,await replenishmentRepository.listRules());
   }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/events'){
+    const ruleId=url.searchParams.get('ruleId');
+    return json(res,200,await replenishmentRepository.listEvents({
+      ruleId:ruleId?Number(ruleId):null,
+      limit:Math.min(200,Math.max(1,Number(url.searchParams.get('limit')||100))),
+    }));
+  }
   if(request.method==='POST'&&url.pathname==='/api/replenishment/rules'){
     return json(res,201,await replenishmentRepository.saveRule(await body(request),auth.actor));
   }
@@ -729,6 +736,7 @@ async function api(request,res,url){
     return json(res,200,await replenishmentRepository.setRuleEnabled(
       Number(replenishmentRuleStatus[1]),
       Boolean(input.enabled),
+      auth.actor,
     ));
   }
   if(request.method==='DELETE'&&replenishmentRuleId){
@@ -878,14 +886,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth', '032_oauth_supply_replenishment', '033_replenishment_inventory_recovery', '034_replenishment_lifecycle']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth', '032_oauth_supply_replenishment', '033_replenishment_inventory_recovery', '034_replenishment_lifecycle', '035_replenishment_execution_logs']],
   );
-  if(migration.rowCount < 33)throw new Error('required FinOps migrations through 034_replenishment_lifecycle are not applied');
+  if(migration.rowCount < 34)throw new Error('required FinOps migrations through 035_replenishment_execution_logs are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),

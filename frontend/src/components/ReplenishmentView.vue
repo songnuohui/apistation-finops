@@ -46,6 +46,7 @@
                 <span>补到 {{ rule.targetAvailableAccounts }}</span>
                 <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
                 <span>修复等待 {{ duration(rule.repairGraceSeconds) }}</span>
+                <span>修复重试 {{ retryLimitLabel(rule.recoveryRetryLimit) }}</span>
               </div>
               <div v-if="rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
                 <span>跟踪 {{ rule.lastInventorySnapshot.trackedAccounts || 0 }}</span>
@@ -56,6 +57,7 @@
               </div>
             </div>
             <div class="row-actions">
+              <button class="icon-button" title="查看执行日志" @click="openRuleLogs(rule)"><History :size="15" /></button>
               <button class="icon-button" :title="rule.enabled ? '暂停策略' : '启动策略'" :disabled="actioningId === `rule-${rule.id}`" @click="toggleRule(rule)">
                 <Pause v-if="rule.enabled" :size="15" />
                 <Play v-else :size="15" />
@@ -83,6 +85,40 @@
         </div>
       </section>
     </div>
+
+    <section ref="executionLogPanel" class="panel execution-log-panel">
+      <div class="panel-head execution-log-head">
+        <div><h2>执行日志</h2><p>记录策略库存检查、跳过或阻止原因、下单、导入和账号修复操作。</p></div>
+        <div class="execution-log-actions">
+          <select v-model="eventRuleId" aria-label="筛选补号策略" @change="loadEvents">
+            <option value="">全部策略</option>
+            <option v-for="rule in rules" :key="rule.id" :value="String(rule.id)">{{ rule.name }}</option>
+          </select>
+          <button class="icon-button" title="刷新执行日志" :disabled="eventsLoading" @click="loadEvents"><RefreshCw :size="15" :class="{ spinning: eventsLoading }" /></button>
+        </div>
+      </div>
+      <div v-if="eventsLoading && !executionEvents.length" class="empty-state">正在读取执行日志…</div>
+      <div v-else-if="!executionEvents.length" class="empty-state">暂无执行日志，策略下一次检查后会显示在这里</div>
+      <div v-else class="execution-log-list">
+        <article v-for="event in executionEvents" :key="event.id" class="execution-log-row">
+          <span class="execution-log-marker" :class="eventTone(event.eventType)" />
+          <div class="execution-log-main">
+            <div class="execution-log-title">
+              <strong>{{ event.ruleName || (event.ruleId ? `策略 #${event.ruleId}` : '补号任务') }}</strong>
+              <span class="status-pill" :class="eventTone(event.eventType)">{{ eventTypeLabel(event.eventType) }}</span>
+            </div>
+            <p>{{ event.message || '操作已完成' }}</p>
+            <small>
+              <span v-if="event.orderId">订单 #{{ event.orderId }}</span>
+              <span v-if="event.itemId">账号项 #{{ event.itemId }}</span>
+              <span>{{ triggerLabel(event.details?.trigger) }}</span>
+              <span>{{ event.actor || 'system' }}</span>
+            </small>
+          </div>
+          <time :datetime="event.createdAt">{{ dateTimeWithSeconds(event.createdAt) }}</time>
+        </article>
+      </div>
+    </section>
 
     <section class="panel">
       <div class="panel-head"><div><h2>补号订单</h2><p>购买数量已经扣除有效库存和在途账号，避免重复或超量下单。</p></div><span class="table-note">最近 {{ orders.length }} 条</span></div>
@@ -152,7 +188,7 @@
           <label>额度判断窗口<select v-model="editor.quotaWindow"><option value="any">任一窗口</option><option value="short">短窗口（5小时）</option><option value="long">长窗口（7天）</option></select></label>
           <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
           <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
-          <label>修复最大重试<input v-model.number="editor.recoveryRetryLimit" type="number" min="0" max="20" /></label>
+          <label>修复最大重试<input v-model="editor.recoveryRetryLimit" type="number" min="0" max="20" placeholder="留空为无限制" /><small class="field-hint">不填写时会持续重试，直到修复成功或人工处理。</small></label>
           <label>固定并发数<input v-model.number="editor.concurrency" type="number" min="1" /></label>
           <label>固定优先级<input v-model.number="editor.priority" type="number" min="0" /></label>
           <label>单次成本上限<input v-model.number="editor.maxOrderAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
@@ -174,8 +210,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { ChevronRight, Pause, Play, Plus, RefreshCw, Settings2, Trash2, X, Zap } from 'lucide-vue-next';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { ChevronRight, History, Pause, Play, Plus, RefreshCw, Settings2, Trash2, X, Zap } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 const props = defineProps<{ refreshToken: number }>();
@@ -185,12 +221,16 @@ const saving = ref(false);
 const actioningId = ref('');
 const error = ref('');
 const editorError = ref('');
+const eventsLoading = ref(false);
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
 const catalog = ref<any>({ groups: [], platforms: [] });
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
 const orders = ref<any[]>([]);
 const recoveries = ref<any[]>([]);
+const executionEvents = ref<any[]>([]);
+const eventRuleId = ref('');
+const executionLogPanel = ref<HTMLElement | null>(null);
 const editor = ref<any | null>(null);
 const selectedOrder = ref<any | null>(null);
 
@@ -201,6 +241,7 @@ const mappingGroups = computed(() => !editor.value?.platform ? [] : (catalog.val
 const money = (value: any) => value === null || value === undefined ? '--' : `¥${Number(value || 0).toFixed(2)}`;
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
+const dateTimeWithSeconds = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '--';
 const duration = (seconds: any) => Number(seconds) >= 3600 ? `${Math.round(Number(seconds) / 3600)} 小时` : `${Math.round(Number(seconds) / 60)} 分钟`;
 const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', auto: '全自动' } as Record<string, string>)[value] || value;
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
@@ -208,6 +249,20 @@ const orderStatusLabel = (value: string) => ({ approval_required: '待审批', o
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
 const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
+const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
+const eventTypeLabel = (value: string) => ({
+  inventory_healthy: '库存正常', order_skipped: '已跳过', rule_blocked: '已阻止',
+  observed_replenishment: '观察记录', rule_execution_failed: '执行失败',
+  rule_enabled: '策略启动', rule_disabled: '策略暂停',
+  approval_required: '等待审批', order_planned: '准备下单', order_created: '订单已创建',
+  delivery_processed: '导入完成', import_failed: '导入失败',
+  account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
+  recovery_manual_required: '人工处理', recovery_verified: '修复完成',
+} as Record<string, string>)[value] || value || '操作记录';
+const eventTone = (value: string) => ['rule_execution_failed', 'import_failed', 'recovery_manual_required'].includes(value)
+  ? 'danger' : ['rule_blocked', 'order_skipped', 'approval_required', 'recovery_retry_scheduled', 'account_recovery_detected', 'rule_disabled'].includes(value)
+    ? 'warning' : 'success';
+const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : value === 'scheduled' ? '自动检查' : '系统任务';
 const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
 const groupSummary = (ids: any[] = []) => ids.length ? ids.map((id) => groupById.value.get(Number(id))?.name || `分组 #${id}`).join('、') : '未选择正式分组';
 const orderGroupSummary = (order: any) => groupSummary(rules.value.find((rule) => Number(rule.id) === Number(order.ruleId))?.targetGroupIds || []);
@@ -233,6 +288,26 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  await loadEvents();
+}
+
+async function loadEvents() {
+  eventsLoading.value = true;
+  try {
+    const filter = eventRuleId.value ? `&ruleId=${encodeURIComponent(eventRuleId.value)}` : '';
+    executionEvents.value = await get(`/replenishment/events?limit=100${filter}`);
+  } catch (err: any) {
+    error.value = err.message || '执行日志读取失败';
+  } finally {
+    eventsLoading.value = false;
+  }
+}
+
+async function openRuleLogs(rule: any) {
+  eventRuleId.value = String(rule.id);
+  await loadEvents();
+  await nextTick();
+  executionLogPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function newMapping() {
@@ -247,7 +322,7 @@ function newRule() {
     kind: 'rule', name: '', productMappingId: first.id, mode: 'observe', enabled: false,
     minAvailableAccounts: 2, targetAvailableAccounts: 5, replenishQuantity: 3,
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
-    repairGraceSeconds: 900, recoveryRetryLimit: 6,
+    repairGraceSeconds: 900, recoveryRetryLimit: null,
     maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, priority: 20,
     verificationModel: 'gpt-5.6-luna',
     verificationPrompt: 'Reply with a short success marker if this account can complete a basic request.',
@@ -282,7 +357,11 @@ async function saveEditor() {
         targetGroupIds: editor.value.targetGroupIds, notes: editor.value.notes, enabled: true,
       });
     } else {
-      await send(editor.value.id ? `/replenishment/rules/${editor.value.id}` : '/replenishment/rules', editor.value.id ? 'PATCH' : 'POST', { ...editor.value, kind: undefined });
+      await send(editor.value.id ? `/replenishment/rules/${editor.value.id}` : '/replenishment/rules', editor.value.id ? 'PATCH' : 'POST', {
+        ...editor.value,
+        kind: undefined,
+        recoveryRetryLimit: editor.value.recoveryRetryLimit === '' ? null : editor.value.recoveryRetryLimit,
+      });
     }
     editor.value = null;
     emit('toast', '补号配置已保存');

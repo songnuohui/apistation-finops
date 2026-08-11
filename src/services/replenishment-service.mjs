@@ -142,6 +142,12 @@ function retryDelayMs(attempt) {
   return Math.min(15 * 60_000, 15_000 * (2 ** Math.max(0, attempt - 1)));
 }
 
+function inventoryEventSummary(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return snapshot;
+  const { accounts: _accounts, ...summary } = snapshot;
+  return summary;
+}
+
 export class ReplenishmentService {
   constructor(repository, oauthSupplyAuthService, sub2ApiGateway, config, logger = console, {
     client,
@@ -355,6 +361,7 @@ export class ReplenishmentService {
         recoveredAt: new Date(this.now()).toISOString(),
       });
       await this.repository.addEvent({
+        ruleId: job.ruleId,
         orderId: (await this.repository.getOrderItem(job.orderItemId))?.orderId || null,
         itemId: job.orderItemId,
         eventType: 'recovery_verified',
@@ -370,7 +377,9 @@ export class ReplenishmentService {
       };
     } catch (error) {
       const attempts = Number(job.attemptCount || 0) + 1;
-      const exhausted = attempts > Number(job.recoveryRetryLimit ?? 6);
+      const retryLimit = job.recoveryRetryLimit === null || job.recoveryRetryLimit === undefined
+        ? null : Number(job.recoveryRetryLimit);
+      const exhausted = retryLimit !== null && attempts > retryLimit;
       await this.repository.upsertRecovery({
         ...job,
         status: exhausted ? 'manual_required' : 'retry_wait',
@@ -379,11 +388,12 @@ export class ReplenishmentService {
         lastError: String(error?.message || error),
       });
       await this.repository.addEvent({
+        ruleId: job.ruleId,
         orderId: (await this.repository.getOrderItem(job.orderItemId))?.orderId || null,
         itemId: job.orderItemId,
         eventType: exhausted ? 'recovery_manual_required' : 'recovery_retry_scheduled',
         message: String(error?.message || error),
-        details: { recoveryId: job.id, attempts, exhausted },
+        details: { recoveryId: job.id, attempts, retryLimit, exhausted },
       });
       throw error;
     }
@@ -434,6 +444,7 @@ export class ReplenishmentService {
           deliveryStatus: '401 detected',
         });
         await this.repository.addEvent({
+          ruleId: rule.id,
           orderId: tracked.orderId,
           itemId: tracked.id,
           eventType: 'account_recovery_detected',
@@ -512,84 +523,123 @@ export class ReplenishmentService {
 
   async createOrderForRule(rule, { trigger = 'scheduled', actor = 'system', force = false } = {}) {
     if (!rule?.enabled && !force) return { status: 'disabled' };
-    if (!rule.product || !rule.platform || !rule.targetPoolKey) {
-      throw errorWithStatus('补号策略缺少商品映射', 400);
-    }
-    const snapshot = await this.inspectRuleInventory(rule);
-    if (!force && snapshot.effectiveAccounts > rule.minAvailableAccounts) {
-      return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
-    }
-    if (await this.repository.hasActiveOrder(rule.id)) return { status: 'already_active', inventory: snapshot };
-    if (!force && snapshot.effectiveAccounts > 0
-      && snapshot.effectiveAccounts + snapshot.graceRepairingAccounts > rule.minAvailableAccounts) {
-      return { status: 'repair_grace', inventory: snapshot };
-    }
-    if (!force && rule.lastTriggeredAt && this.now() - Date.parse(rule.lastTriggeredAt) < rule.cooldownSeconds * 1000) {
-      return { status: 'cooldown', inventory: snapshot };
-    }
-    const desired = Math.max(0,
-      Number(rule.targetAvailableAccounts) - snapshot.effectiveAccounts - snapshot.pendingAccounts);
-    if (!desired) return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
-    let quantity = Math.max(1, Math.min(desired, rule.replenishQuantity, 1000));
-    let inventoryResponse = await this.inventory(rule.product, quantity);
-    let inventory = payloadOf(inventoryResponse) || {};
-    const supplierAvailable = numeric(inventory.available, numeric(inventory.available_count, 0)) || 0;
-    if (supplierAvailable <= 0) {
-      await this.repository.saveInventorySnapshot(rule.id, snapshot, { error: '供应商当前无可售账号' });
-      return { status: 'blocked_supplier_inventory', supplierAvailable, inventory: snapshot };
-    }
-    if (supplierAvailable < quantity) {
-      quantity = supplierAvailable;
-      inventoryResponse = await this.inventory(rule.product, quantity);
-      inventory = payloadOf(inventoryResponse) || {};
-    }
-    const quotedCny = centsToCny(inventory.estimated_total_fen ?? inventory.estimatedTotalFen);
-    if ((rule.maxOrderAmountCny !== null || rule.maxDailyAmountCny !== null) && quotedCny === null) {
-      await this.repository.markRuleInventory(rule.id, { error: '供应商未返回报价，成本上限开启时禁止下单' });
-      return { status: 'blocked_cost_unknown' };
-    }
-    if (rule.maxOrderAmountCny !== null && quotedCny !== null && quotedCny > rule.maxOrderAmountCny) {
-      await this.repository.markRuleInventory(rule.id, { error: `报价 ${quotedCny} CNY 超过单次上限` });
-      return { status: 'blocked_cost', quotedCny };
-    }
-    const dailySpend = await this.repository.dailySpend(rule.id);
-    if (rule.maxDailyAmountCny !== null && quotedCny !== null && dailySpend + quotedCny > rule.maxDailyAmountCny) {
-      await this.repository.markRuleInventory(rule.id, { error: `今日累计报价将超过 ${rule.maxDailyAmountCny} CNY` });
-      return { status: 'blocked_daily_cost', dailySpend, quotedCny };
-    }
-    if (rule.mode === 'observe') {
-      await this.repository.saveInventorySnapshot(rule.id, snapshot, {
-        error: `有效库存 ${snapshot.effectiveAccounts}，已达到补号阈值 ${rule.minAvailableAccounts}`,
+    const recordDecision = async (eventType, message, details = {}) => this.repository.addEvent({
+      ruleId: rule?.id || null,
+      eventType,
+      message,
+      details: {
+        trigger,
+        ...details,
+        ...(details.inventory ? { inventory: inventoryEventSummary(details.inventory) } : {}),
+      },
+      actor,
+    });
+    try {
+      if (!rule.product || !rule.platform || !rule.targetPoolKey) {
+        throw errorWithStatus('补号策略缺少商品映射', 400);
+      }
+      const snapshot = await this.inspectRuleInventory(rule);
+      if (!force && snapshot.effectiveAccounts > rule.minAvailableAccounts) {
+        await recordDecision('inventory_healthy', `库存检查完成：有效 ${snapshot.effectiveAccounts}，无需补号`, { inventory: snapshot });
+        return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
+      }
+      if (await this.repository.hasActiveOrder(rule.id)) {
+        await recordDecision('order_skipped', '已有进行中的补号订单，本轮不重复下单', { reason: 'already_active', inventory: snapshot });
+        return { status: 'already_active', inventory: snapshot };
+      }
+      if (!force && snapshot.effectiveAccounts > 0
+        && snapshot.effectiveAccounts + snapshot.graceRepairingAccounts > rule.minAvailableAccounts) {
+        await recordDecision('order_skipped', '账号仍在修复等待期，本轮暂不补号', { reason: 'repair_grace', inventory: snapshot });
+        return { status: 'repair_grace', inventory: snapshot };
+      }
+      if (!force && rule.lastTriggeredAt && this.now() - Date.parse(rule.lastTriggeredAt) < rule.cooldownSeconds * 1000) {
+        await recordDecision('order_skipped', '策略处于下单冷却期，本轮暂不补号', { reason: 'cooldown', inventory: snapshot });
+        return { status: 'cooldown', inventory: snapshot };
+      }
+      const desired = Math.max(0,
+        Number(rule.targetAvailableAccounts) - snapshot.effectiveAccounts - snapshot.pendingAccounts);
+      if (!desired) {
+        await recordDecision('inventory_healthy', `库存检查完成：有效 ${snapshot.effectiveAccounts}、在途 ${snapshot.pendingAccounts}，无需补号`, { inventory: snapshot });
+        return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
+      }
+      let quantity = Math.max(1, Math.min(desired, rule.replenishQuantity, 1000));
+      let inventoryResponse = await this.inventory(rule.product, quantity);
+      let inventory = payloadOf(inventoryResponse) || {};
+      const supplierAvailable = numeric(inventory.available, numeric(inventory.available_count, 0)) || 0;
+      if (supplierAvailable <= 0) {
+        await this.repository.saveInventorySnapshot(rule.id, snapshot, { error: '供应商当前无可售账号' });
+        await recordDecision('rule_blocked', '供应商当前无可售账号，本轮无法补号', { reason: 'supplier_inventory', supplierAvailable, inventory: snapshot });
+        return { status: 'blocked_supplier_inventory', supplierAvailable, inventory: snapshot };
+      }
+      if (supplierAvailable < quantity) {
+        quantity = supplierAvailable;
+        inventoryResponse = await this.inventory(rule.product, quantity);
+        inventory = payloadOf(inventoryResponse) || {};
+      }
+      const quotedCny = centsToCny(inventory.estimated_total_fen ?? inventory.estimatedTotalFen);
+      if ((rule.maxOrderAmountCny !== null || rule.maxDailyAmountCny !== null) && quotedCny === null) {
+        await this.repository.markRuleInventory(rule.id, { error: '供应商未返回报价，成本上限开启时禁止下单' });
+        await recordDecision('rule_blocked', '供应商未返回报价，成本保护已阻止下单', { reason: 'cost_unknown', inventory: snapshot });
+        return { status: 'blocked_cost_unknown' };
+      }
+      if (rule.maxOrderAmountCny !== null && quotedCny !== null && quotedCny > rule.maxOrderAmountCny) {
+        await this.repository.markRuleInventory(rule.id, { error: `报价 ${quotedCny} CNY 超过单次上限` });
+        await recordDecision('rule_blocked', `报价 ${quotedCny} CNY 超过单次成本上限`, { reason: 'order_cost', quotedCny, inventory: snapshot });
+        return { status: 'blocked_cost', quotedCny };
+      }
+      const dailySpend = await this.repository.dailySpend(rule.id);
+      if (rule.maxDailyAmountCny !== null && quotedCny !== null && dailySpend + quotedCny > rule.maxDailyAmountCny) {
+        await this.repository.markRuleInventory(rule.id, { error: `今日累计报价将超过 ${rule.maxDailyAmountCny} CNY` });
+        await recordDecision('rule_blocked', `今日累计报价将超过 ${rule.maxDailyAmountCny} CNY`, { reason: 'daily_cost', dailySpend, quotedCny, inventory: snapshot });
+        return { status: 'blocked_daily_cost', dailySpend, quotedCny };
+      }
+      if (rule.mode === 'observe') {
+        await this.repository.saveInventorySnapshot(rule.id, snapshot, {
+          error: `有效库存 ${snapshot.effectiveAccounts}，已达到补号阈值 ${rule.minAvailableAccounts}`,
+        });
+        await recordDecision('observed_replenishment', `观察模式：建议购买 ${quantity} 个账号，未创建订单`, { available: snapshot.effectiveAccounts, quotedCny, quantity, inventory: snapshot });
+        return { status: 'observed_need', available: snapshot.effectiveAccounts, quotedCny, quantity, inventory: snapshot };
+      }
+      const balance = await this.balance().catch(() => null);
+      const availableBalanceCny = centsToCny(balance?.available_fen ?? balance?.availableFen);
+      if (quotedCny !== null && availableBalanceCny !== null && quotedCny > availableBalanceCny) {
+        await this.repository.markRuleInventory(rule.id, { error: 'OAuth Supply 可用余额不足' });
+        await recordDecision('rule_blocked', 'OAuth Supply 可用余额不足，本轮无法下单', { reason: 'balance', quotedCny, availableBalanceCny, inventory: snapshot });
+        return { status: 'blocked_balance', quotedCny, availableBalanceCny };
+      }
+      const idempotencyKey = `finops-replenishment-${rule.id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const planned = await this.repository.createPlannedOrder({
+        rule,
+        trigger,
+        quantity,
+        availableBefore: snapshot.effectiveAccounts,
+        quotedAmountCny: quotedCny,
+        actor,
+        status: rule.mode === 'approval' ? 'approval_required' : 'ordering',
+        idempotencyKey,
       });
-      return { status: 'observed_need', available: snapshot.effectiveAccounts, quotedCny, quantity, inventory: snapshot };
+      await this.repository.addEvent({
+        ruleId: rule.id,
+        runId: planned.runId,
+        orderId: planned.id,
+        eventType: rule.mode === 'approval' ? 'approval_required' : 'order_planned',
+        message: rule.mode === 'approval' ? '订单等待审批' : '订单开始创建',
+        details: {
+          available: snapshot.effectiveAccounts,
+          quantity,
+          quotedCny,
+          trigger,
+          inventory: inventoryEventSummary(snapshot),
+        },
+        actor,
+      });
+      if (rule.mode === 'approval') return planned;
+      return this.submitOrder(planned, rule);
+    } catch (error) {
+      await recordDecision('rule_execution_failed', String(error?.message || error), { error: String(error?.message || error) })
+        .catch(() => {});
+      throw error;
     }
-    const balance = await this.balance().catch(() => null);
-    const availableBalanceCny = centsToCny(balance?.available_fen ?? balance?.availableFen);
-    if (quotedCny !== null && availableBalanceCny !== null && quotedCny > availableBalanceCny) {
-      await this.repository.markRuleInventory(rule.id, { error: 'OAuth Supply 可用余额不足' });
-      return { status: 'blocked_balance', quotedCny, availableBalanceCny };
-    }
-    const idempotencyKey = `finops-replenishment-${rule.id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const planned = await this.repository.createPlannedOrder({
-      rule,
-      trigger,
-      quantity,
-      availableBefore: snapshot.effectiveAccounts,
-      quotedAmountCny: quotedCny,
-      actor,
-      status: rule.mode === 'approval' ? 'approval_required' : 'ordering',
-      idempotencyKey,
-    });
-    await this.repository.addEvent({
-      runId: planned.runId,
-      orderId: planned.id,
-      eventType: rule.mode === 'approval' ? 'approval_required' : 'order_planned',
-      message: rule.mode === 'approval' ? '订单等待审批' : '订单开始创建',
-      details: { available: snapshot.effectiveAccounts, quantity, quotedCny, trigger, inventory: snapshot },
-      actor,
-    });
-    if (rule.mode === 'approval') return planned;
-    return this.submitOrder(planned, rule);
   }
 
   async approveOrder(orderId, actor = 'admin') {
@@ -627,6 +677,7 @@ export class ReplenishmentService {
       failureCount: 0,
     });
     await this.repository.addEvent({
+      ruleId: rule.id,
       runId: order.runId,
       orderId: order.id,
       eventType: 'order_created',
@@ -787,6 +838,7 @@ export class ReplenishmentService {
           errorMessage: String(error?.message || error),
         });
         await this.repository.addEvent({
+          ruleId: rule.id,
           runId: order.runId,
           orderId: order.id,
           itemId: current.id,
@@ -826,6 +878,7 @@ export class ReplenishmentService {
       errorMessage: failedQuantity ? `${failedQuantity} 个账号导入或验号失败` : '',
     });
     await this.repository.addEvent({
+      ruleId: rule.id,
       runId: order.runId,
       orderId: order.id,
       eventType: 'delivery_processed',
