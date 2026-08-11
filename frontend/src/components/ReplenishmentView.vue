@@ -100,7 +100,7 @@
         </div>
         <div v-else class="form-grid">
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
-          <label>商品映射<select v-model.number="editor.productMappingId"><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ mapping.targetPoolKey }}</option></select></label>
+          <label>商品映射<select v-model.number="editor.productMappingId"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ mapping.targetPoolKey }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
           <label>库存低于<input v-model.number="editor.minAvailableAccounts" type="number" min="0" /></label>
           <label>每次补号数量<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
@@ -113,6 +113,7 @@
           <label class="full-field">验号提示词<textarea v-model.trim="editor.verificationPrompt" rows="3" /></label>
           <label class="switch-row full-field"><input v-model="editor.enabled" type="checkbox" /><span><strong>启用策略</strong><small>观察模式只查库存和报价，不会创建订单。</small></span></label>
         </div>
+        <div v-if="editorError" class="form-error-banner" role="alert">{{ editorError }}</div>
         <footer><button class="secondary-button" @click="editor = null">取消</button><button class="primary-button" :disabled="saving" @click="saveEditor">{{ saving ? '保存中…' : '保存' }}</button></footer>
       </div>
     </section>
@@ -133,6 +134,7 @@ const emit = defineEmits<{ (event: 'toast', message: string): void }>();
 const loading = ref(false);
 const saving = ref(false);
 const error = ref('');
+const editorError = ref('');
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
@@ -181,10 +183,19 @@ async function load() {
 }
 
 function newMapping() {
+  error.value = '';
+  editorError.value = '';
   editor.value = { kind: 'mapping', product: 'oauth_30d', platform: 'openai', targetPoolKey: '', groupIdsText: '', notes: '' };
 }
 function newRule() {
   const first = mappings.value[0];
+  if (!first) {
+    newMapping();
+    editorError.value = '请先创建商品映射，再新增补号策略。';
+    return;
+  }
+  error.value = '';
+  editorError.value = '';
   editor.value = {
     kind: 'rule', name: '', productMappingId: first?.id || null, mode: 'observe', enabled: false,
     minAvailableAccounts: 3, replenishQuantity: 2, maxOrderAmountCny: null, maxDailyAmountCny: null,
@@ -193,10 +204,31 @@ function newRule() {
     pollIntervalSeconds: 5, retryLimit: 3, cooldownSeconds: 300,
   };
 }
-function editRule(rule: any) { editor.value = copyRule(rule); }
-function editMapping(mapping: any) { editor.value = { ...mapping, kind: 'mapping', groupIdsText: (mapping.targetGroupIds || []).join(', ') }; }
+function editRule(rule: any) { error.value = ''; editorError.value = ''; editor.value = copyRule(rule); }
+function editMapping(mapping: any) { error.value = ''; editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', groupIdsText: (mapping.targetGroupIds || []).join(', ') }; }
+
+function validateEditor() {
+  if (editor.value.kind === 'mapping') {
+    if (!editor.value.product) return '请输入商品编码。';
+    if (!editor.value.platform) return '请输入平台。';
+    if (!editor.value.targetPoolKey) return '请输入目标账号池。';
+    return '';
+  }
+  if (!editor.value.name) return '请输入策略名称。';
+  if (!Number.isSafeInteger(Number(editor.value.productMappingId)) || Number(editor.value.productMappingId) <= 0) {
+    return '请选择商品映射。';
+  }
+  return '';
+}
+
 async function saveEditor() {
+  const validationError = validateEditor();
+  if (validationError) {
+    editorError.value = validationError;
+    return;
+  }
   saving.value = true;
+  editorError.value = '';
   try {
     if (editor.value.kind === 'mapping') {
       await send('/replenishment/mappings', editor.value.id ? 'PATCH' : 'POST', {
@@ -218,7 +250,7 @@ async function saveEditor() {
     emit('toast', '补号配置已保存');
     await load();
   } catch (err: any) {
-    error.value = err.message || '保存失败';
+    editorError.value = err.message || '保存失败';
   } finally {
     saving.value = false;
   }

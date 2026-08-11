@@ -385,6 +385,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .empty-cell{text-align:center!important;color:var(--muted);padding:30px!important}
 .empty-state{padding:24px 0;color:var(--muted);font-size:12px;text-align:center}
 .replenishment-editor{max-width:720px}
+.form-error-banner{margin-top:16px;padding:10px 12px;border:1px solid #f1b8c0;border-radius:6px;color:#a63443;background:#fff1f3;font-size:12px;line-height:18px}
 .order-detail-modal{max-width:620px}
 .order-detail-error{padding:11px 12px;border:1px solid #ffd2d8;border-radius:6px;background:#fff3f4;color:#a63443;font-size:12px}
 .event-note{padding:12px 13px;border-left:3px solid #4d85e8;background:#f6f9ff;color:#536b8e;font-size:12px;line-height:19px}

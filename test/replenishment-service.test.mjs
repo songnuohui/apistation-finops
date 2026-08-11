@@ -54,6 +54,17 @@ test('observe mode reports a shortage without creating an order', async () => {
   assert.equal((await repository.listOrders()).length, 0);
 });
 
+test('replenishment rules reject a missing product mapping before writing', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+
+  await assert.rejects(
+    repository.saveRule({ ...rule, id: undefined, productMappingId: 9999 }),
+    (error) => error?.statusCode === 400 && /商品映射不存在/.test(error.message),
+  );
+  assert.equal((await repository.listRules()).length, 1);
+});
+
 test('delivery uses per-account charged amount and imports fixed account settings', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);

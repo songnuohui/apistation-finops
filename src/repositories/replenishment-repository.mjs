@@ -4,6 +4,10 @@ function number(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function badRequest(message) {
+  return Object.assign(new Error(message), { statusCode: 400 });
+}
+
 function mapping(row) {
   if (!row) return null;
   return {
@@ -103,7 +107,7 @@ function item(row) {
 }
 
 function normalizeRuleInput(input) {
-  return {
+  const values = {
     name: String(input.name || '').trim(),
     productMappingId: Number(input.productMappingId),
     mode: input.mode,
@@ -120,6 +124,12 @@ function normalizeRuleInput(input) {
     retryLimit: Number(input.retryLimit ?? 3),
     cooldownSeconds: Number(input.cooldownSeconds ?? 300),
   };
+  if (!values.name) throw badRequest('请输入策略名称');
+  if (!Number.isSafeInteger(values.productMappingId) || values.productMappingId <= 0) {
+    throw badRequest('请选择有效的商品映射');
+  }
+  if (!['observe', 'approval', 'auto'].includes(values.mode)) throw badRequest('运行模式无效');
+  return values;
 }
 
 export class ReplenishmentRepository {
@@ -187,6 +197,12 @@ export class ReplenishmentRepository {
       enabled: input.enabled !== false,
       notes: String(input.notes || '').trim(),
     };
+    if (!values.product) throw badRequest('请输入商品编码');
+    if (!values.platform) throw badRequest('请输入平台');
+    if (!values.targetPoolKey) throw badRequest('请输入目标账号池');
+    if (values.targetGroupIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw badRequest('Sub2API 分组 ID 必须是正整数');
+    }
     if (this.demo) {
       let current = input.id ? this.mappings.find((entry) => entry.id === Number(input.id)) : null;
       if (!current) {
@@ -238,12 +254,13 @@ export class ReplenishmentRepository {
   async saveRule(input, actor = 'admin') {
     const values = normalizeRuleInput(input);
     if (this.demo) {
+      const productMapping = this.mappings.find((entry) => entry.id === values.productMappingId);
+      if (!productMapping) throw badRequest('商品映射不存在，请刷新后重新选择');
       let current = input.id ? this.rules.find((entry) => entry.id === Number(input.id)) : null;
       if (!current) {
         current = { id: ++this.sequence };
         this.rules.push(current);
       }
-      const productMapping = this.mappings.find((entry) => entry.id === values.productMappingId);
       Object.assign(current, values, {
         product: productMapping?.product || '',
         platform: productMapping?.platform || '',
@@ -256,6 +273,10 @@ export class ReplenishmentRepository {
       });
       return { ...current };
     }
+    const productMapping = await this.pool.query(`
+      SELECT id FROM ${this.schema}.oauth_supply_product_mappings
+      WHERE id=$1`, [values.productMappingId]);
+    if (!productMapping.rowCount) throw badRequest('商品映射不存在，请刷新后重新选择');
     const params = [
       values.name, values.productMappingId, values.mode, values.enabled,
       values.minAvailableAccounts, values.replenishQuantity, values.maxOrderAmountCny,
