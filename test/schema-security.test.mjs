@@ -242,6 +242,16 @@ test('OAuth Supply authentication remains FinOps-owned and stores only encrypted
   assert.doesNotMatch(migration, /\b(?:password|access_token|refresh_token|token)\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('OAuth Supply replenishment remains FinOps-owned and keeps account credentials encrypted', () => {
+  const migration = read('migrations/032_oauth_supply_replenishment.sql');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*oauth_supply_orders/s);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*oauth_supply_order_items/s);
+  assert.match(migration, /credential_ciphertext TEXT NOT NULL/);
+  assert.match(migration, /cost_ledger_status VARCHAR/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\b(?:access_token|refresh_token|password)\s+(?:TEXT|VARCHAR)/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

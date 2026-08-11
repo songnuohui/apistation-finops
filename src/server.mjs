@@ -33,6 +33,10 @@ import { AccountProfitGuardService } from './services/account-profit-guard-servi
 import { SupplierDeletionService } from './services/supplier-deletion-service.mjs';
 import { Sub2ApiServiceAuthService } from './services/sub2api-service-auth-service.mjs';
 import { OAuthSupplyAuthService } from './services/oauth-supply-auth-service.mjs';
+import { OAuthSupplyClient } from './services/oauth-supply-client.mjs';
+import { Sub2ApiAccountImportGateway } from './services/sub2api-account-import-gateway.mjs';
+import { ReplenishmentService } from './services/replenishment-service.mjs';
+import { ReplenishmentRepository } from './repositories/replenishment-repository.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -61,6 +65,19 @@ const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
 const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
 const oauthSupplyAuthService=new OAuthSupplyAuthService(repository,config);
+const oauthSupplyClient=new OAuthSupplyClient(config);
+const replenishmentRepository=new ReplenishmentRepository(config.demoMode?null:finopsPool,config);
+const sub2ApiAccountImportGateway=new Sub2ApiAccountImportGateway(config);
+sub2ApiAccountImportGateway.setAccessTokenProvider(sub2ApiServiceAuthService);
+const replenishmentService=new ReplenishmentService(
+  replenishmentRepository,
+  oauthSupplyAuthService,
+  sub2ApiAccountImportGateway,
+  config,
+  console,
+  {client:oauthSupplyClient,ledgerRepository:repository},
+);
+replenishmentService.start();
 const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
 const supplierDeletionService=new SupplierDeletionService(repository,sub2ApiReadonlyGateway,{demoMode:config.demoMode});
 const pendingLogins=new PendingLoginStore();
@@ -532,6 +549,64 @@ async function api(request,res,url){
   if(request.method==='POST'&&url.pathname==='/api/oauth-supply-auth/test'){
     return json(res,200,await oauthSupplyAuthService.test());
   }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/dashboard'){
+    return json(res,200,{
+      ...(await replenishmentRepository.dashboard()),
+      oauthSupply: {
+        products: await replenishmentService.products().catch((error) => ({ error: error.message })),
+        balance: await replenishmentService.balance().catch((error) => ({ error: error.message })),
+      },
+    });
+  }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/mappings'){
+    return json(res,200,await replenishmentRepository.listMappings());
+  }
+  if((request.method==='POST'||request.method==='PATCH')&&url.pathname==='/api/replenishment/mappings'){
+    const input=await body(request);
+    return json(res,200,await replenishmentRepository.upsertMapping(input,auth.actor));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/rules'){
+    return json(res,200,await replenishmentRepository.listRules());
+  }
+  if(request.method==='POST'&&url.pathname==='/api/replenishment/rules'){
+    return json(res,201,await replenishmentRepository.saveRule(await body(request),auth.actor));
+  }
+  const replenishmentRuleId=/^\/api\/replenishment\/rules\/(\d+)$/.exec(url.pathname);
+  if(request.method==='PATCH'&&replenishmentRuleId){
+    return json(res,200,await replenishmentRepository.saveRule({
+      ...(await body(request)),
+      id:Number(replenishmentRuleId[1]),
+    },auth.actor));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/replenishment/trigger'){
+    const input=await body(request);
+    const selectedRule=await replenishmentRepository.getRule(Number(input.ruleId));
+    if(!selectedRule)return json(res,404,{error:'replenishment rule not found'});
+    return json(res,200,await replenishmentService.createOrderForRule(selectedRule,{
+      trigger:'manual',
+      actor:auth.actor,
+      force:Boolean(input.force),
+    }));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/orders'){
+    return json(res,200,await replenishmentRepository.listOrders({limit:Math.min(200,Math.max(1,Number(url.searchParams.get('limit')||100)))}));
+  }
+  const replenishmentOrderId=/^\/api\/replenishment\/orders\/(\d+)$/.exec(url.pathname);
+  if(request.method==='GET'&&replenishmentOrderId){
+    const result=await replenishmentRepository.getOrder(Number(replenishmentOrderId[1]));
+    return result?json(res,200,result):json(res,404,{error:'replenishment order not found'});
+  }
+  const replenishmentApproval=/^\/api\/replenishment\/orders\/(\d+)\/approve$/.exec(url.pathname);
+  if(request.method==='POST'&&replenishmentApproval){
+    return json(res,200,await replenishmentService.approveOrder(Number(replenishmentApproval[1]),auth.actor));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/recoveries'){
+    return json(res,200,await replenishmentService.recoveries());
+  }
+  const replenishmentRecoveryClaim=/^\/api\/replenishment\/recoveries\/([^/]+)\/claim$/.exec(url.pathname);
+  if(request.method==='POST'&&replenishmentRecoveryClaim){
+    return json(res,200,await replenishmentService.claimRecovery(decodeURIComponent(replenishmentRecoveryClaim[1])));
+  }
   if(request.method==='PATCH'&&url.pathname==='/api/sub2api-service-auth'){
     const settings=await sub2ApiServiceAuthService.updateSettings(
       normalizeSub2ApiServiceAuthSettings(await body(request)),
@@ -647,14 +722,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth', '032_oauth_supply_replenishment']],
   );
-  if(migration.rowCount < 30)throw new Error('required FinOps migrations through 031_oauth_supply_auth are not applied');
+  if(migration.rowCount < 31)throw new Error('required FinOps migrations through 032_oauth_supply_replenishment are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),

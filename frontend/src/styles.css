@@ -347,6 +347,50 @@ button:disabled{cursor:not-allowed!important}
 /* Keep narrow screens inside the viewport while preserving full table detail. */
 html,body,#app{max-width:100%;overflow-x:hidden}
 
+.replenishment-view{gap:18px}
+.replenishment-hero{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:22px 24px;background:#fff;border:1px solid var(--line);border-radius:8px}
+.eyebrow-line{display:flex;align-items:center;gap:7px;color:#1769d5;font-size:11px;font-weight:800}
+.replenishment-hero h2{margin:8px 0 5px;font-size:24px}
+.replenishment-hero p{margin:0;color:var(--muted);font-size:13px}
+.replenishment-hero-actions{display:flex;align-items:center;gap:12px}
+.icon-text-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:8px 12px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#3a587e;font-size:12px}
+.icon-text-button:hover{color:#1754c2;background:#f7faff}
+.connection-indicator{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}
+.connection-indicator i{width:8px;height:8px;border-radius:50%;background:#c6ced8}
+.connection-indicator.connected{color:#08734d}
+.connection-indicator.connected i{background:#17a673;box-shadow:0 0 0 3px #dff7ed}
+.replenishment-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}
+.replenishment-layout{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,.85fr);gap:18px}
+.rule-list,.mapping-list{display:grid;gap:2px}
+.rule-row,.mapping-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid #edf1f6}
+.rule-row:last-child,.mapping-row:last-child{border-bottom:0}
+.rule-main,.mapping-row>div{min-width:0}
+.rule-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rule-title strong,.mapping-row strong{font-size:13px}
+.rule-main>small,.mapping-row small{display:block;margin-top:4px;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rule-facts{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;color:#65758b;font-size:11px}
+.mode-pill{display:inline-flex;padding:3px 7px;border-radius:999px;background:#eef4ff;color:#315c9a;font-size:10px}
+.row-actions{display:flex;gap:6px;flex:0 0 auto}
+.mapping-row>span{color:#315c9a;font-size:11px;white-space:nowrap}
+.mapping-actions,.recovery-actions{display:flex;align-items:center;gap:8px}
+.mapping-actions>span{color:#315c9a;font-size:11px;white-space:nowrap}
+.table-note{color:var(--muted);font-size:11px}
+.order-table-wrap{overflow:auto}
+.replenishment-table{width:100%;min-width:760px;border-collapse:collapse}
+.replenishment-table th,.replenishment-table td{padding:11px 12px;border-bottom:1px solid #edf1f6;text-align:left;font-size:12px;white-space:nowrap}
+.replenishment-table th{color:#7b899a;font-size:11px;font-weight:700;background:#fafbfd}
+.replenishment-table td small{display:block;margin-top:4px;color:var(--muted);font-size:10px}
+.replenishment-table tr:last-child td{border-bottom:0}
+.compact-button{padding:6px 9px;font-size:11px}
+.empty-cell{text-align:center!important;color:var(--muted);padding:30px!important}
+.empty-state{padding:24px 0;color:var(--muted);font-size:12px;text-align:center}
+.replenishment-editor{max-width:720px}
+.order-detail-modal{max-width:620px}
+.order-detail-error{padding:11px 12px;border:1px solid #ffd2d8;border-radius:6px;background:#fff3f4;color:#a63443;font-size:12px}
+.event-note{padding:12px 13px;border-left:3px solid #4d85e8;background:#f6f9ff;color:#536b8e;font-size:12px;line-height:19px}
+.spinning{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 @media (max-width:760px){
   .app-shell,.main{width:100%;min-width:0}
   .main{margin-left:0}
@@ -374,6 +418,12 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .runtime-summary strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .modal-layer{padding:8px}
   .modal{width:100%;max-width:100%;max-height:calc(100dvh - 16px);overflow:auto}
+  .replenishment-hero{align-items:stretch;flex-direction:column;padding:18px}
+  .replenishment-hero-actions{justify-content:space-between}
+  .replenishment-layout{grid-template-columns:1fr}
+  .replenishment-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rule-row{align-items:flex-start}
+  .rule-facts{gap:7px 10px}
 }
 
 @media (max-width:380px){

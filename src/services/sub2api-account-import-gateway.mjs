@@ -1,0 +1,224 @@
+function endpoint(baseUrl, pathname) {
+  return new URL(pathname, `${baseUrl}/`).toString();
+}
+
+function normalizeAccountId(value) {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw Object.assign(new Error('invalid Sub2API account id'), { statusCode: 400 });
+  }
+  return id;
+}
+
+function unwrap(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  return Object.hasOwn(payload, 'data') ? payload.data : payload;
+}
+
+export class Sub2ApiAccountImportGateway {
+  constructor(config, logger = console, fetchImpl = fetch) {
+    this.config = config;
+    this.logger = logger;
+    this.fetchImpl = fetchImpl;
+    this.accessTokenProvider = null;
+  }
+
+  setAccessTokenProvider(provider) {
+    this.accessTokenProvider = provider || null;
+  }
+
+  async authentication({ force = false } = {}) {
+    const managed = this.accessTokenProvider?.getAuthentication
+      ? await this.accessTokenProvider.getAuthentication({ force })
+      : null;
+    if (managed?.credential) return managed;
+    const token = this.accessTokenProvider?.getAccessToken
+      ? await this.accessTokenProvider.getAccessToken({ force })
+      : '';
+    return {
+      credential: String(token || '').trim(),
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      serviceManaged: Boolean(token),
+    };
+  }
+
+  async request(pathname, { method = 'GET', body, accept = 'application/json' } = {}) {
+    const execute = async (authentication) => {
+      if (!authentication?.credential) {
+        throw Object.assign(new Error('Sub2API service authentication is unavailable'), { statusCode: 503 });
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
+      try {
+        const response = await this.fetchImpl(endpoint(this.config.sub2apiAuthUrl, pathname), {
+          method,
+          signal: controller.signal,
+          headers: {
+            Accept: accept,
+            ...authentication.headers,
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          let payload = {};
+          try { payload = text ? JSON.parse(text) : {}; } catch {}
+          throw Object.assign(new Error(payload?.message || payload?.error || `Sub2API returned HTTP ${response.status}`), {
+            statusCode: response.status,
+            httpStatus: response.status,
+          });
+        }
+        return { response, text };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const authentication = await this.authentication();
+    try {
+      return await execute(authentication);
+    } catch (error) {
+      if ([401, 403].includes(error?.httpStatus) && authentication.serviceManaged) {
+        await this.accessTokenProvider?.invalidateAccessToken?.(authentication.credential);
+        return execute(await this.authentication({ force: true }));
+      }
+      throw error;
+    }
+  }
+
+  async jsonRequest(pathname, options = {}) {
+    const { text } = await this.request(pathname, options);
+    let payload = {};
+    if (text.trim()) {
+      try { payload = JSON.parse(text); } catch {
+        throw Object.assign(new Error('Sub2API returned invalid JSON'), { statusCode: 502 });
+      }
+    }
+    if (Object.hasOwn(payload, 'code') && Number(payload.code) !== 0) {
+      throw Object.assign(new Error(payload.message || 'Sub2API administrator API request failed'), { statusCode: 502 });
+    }
+    return unwrap(payload);
+  }
+
+  async createAccount(input) {
+    const payload = await this.jsonRequest('/api/v1/admin/accounts', {
+      method: 'POST',
+      body: {
+        ...input,
+        confirm_mixed_channel_risk: true,
+      },
+    });
+    return payload?.account || payload;
+  }
+
+  async updateAccountConfiguration(accountId, { groupIds, concurrency, priority }) {
+    const id = normalizeAccountId(accountId);
+    const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}`, {
+      method: 'PUT',
+      body: {
+        group_ids: [...new Set((groupIds || []).map(Number))],
+        concurrency: Number(concurrency),
+        priority: Number(priority),
+        confirm_mixed_channel_risk: true,
+      },
+    });
+    return payload?.account || payload;
+  }
+
+  async applyOAuthCredentials(accountId, credentials) {
+    const id = normalizeAccountId(accountId);
+    const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}/apply-oauth-credentials`, {
+      method: 'POST',
+      body: {
+        type: 'oauth',
+        credentials,
+      },
+    });
+    return payload?.account || payload;
+  }
+
+  async getAccount(accountId) {
+    const id = normalizeAccountId(accountId);
+    const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}`);
+    return payload?.account || payload;
+  }
+
+  async testAccount(accountId, { modelId, prompt }) {
+    const id = normalizeAccountId(accountId);
+    const { text } = await this.request(`/api/v1/admin/accounts/${id}/test`, {
+      method: 'POST',
+      body: {
+        model_id: modelId,
+        prompt,
+        mode: '',
+      },
+      accept: 'text/event-stream',
+    });
+    const events = [];
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const raw = trimmed.slice(5).trim();
+      if (!raw || raw === '[DONE]') continue;
+      try { events.push(JSON.parse(raw)); } catch {}
+    }
+    const failure = events.find((event) => event?.error || event?.type === 'error');
+    if (failure) {
+      throw Object.assign(new Error(failure?.error?.message || failure?.error || failure?.message || 'Sub2API account test failed'), {
+        statusCode: 422,
+      });
+    }
+    const completed = events.find((event) => event?.type === 'test_complete');
+    if (!completed?.success) {
+      throw Object.assign(new Error('Sub2API account test ended without an explicit success event'), {
+        statusCode: 502,
+      });
+    }
+    return { success: true, events: events.length };
+  }
+
+  async configureAndVerify({ accountId, groupIds, concurrency, priority, modelId, prompt }) {
+    await this.updateAccountConfiguration(accountId, { groupIds, concurrency, priority });
+    const confirmed = await this.getAccount(accountId);
+    const confirmedGroups = (confirmed?.groups || confirmed?.group_ids || []).map((entry) => Number(entry?.id ?? entry));
+    const expectedGroups = [...new Set((groupIds || []).map(Number))].sort((a, b) => a - b);
+    const actualGroups = [...new Set(confirmedGroups)].sort((a, b) => a - b);
+    if (Number(confirmed?.concurrency) !== Number(concurrency)
+      || Number(confirmed?.priority) !== Number(priority)
+      || JSON.stringify(actualGroups) !== JSON.stringify(expectedGroups)) {
+      throw Object.assign(new Error('Sub2API account configuration verification failed'), {
+        statusCode: 502,
+        accountId,
+      });
+    }
+    await this.testAccount(accountId, { modelId, prompt });
+    return confirmed;
+  }
+
+  async importAndVerify({
+    name,
+    platform,
+    credentials,
+    groupIds,
+    concurrency,
+    priority,
+    modelId,
+    prompt,
+    expiresAt = null,
+    onCreated,
+  }) {
+    const created = await this.createAccount({
+      name,
+      platform,
+      type: 'oauth',
+      credentials,
+      group_ids: groupIds,
+      concurrency,
+      priority,
+      ...(expiresAt ? { expires_at: expiresAt } : {}),
+    });
+    const accountId = normalizeAccountId(created?.id);
+    await onCreated?.(accountId);
+    return this.configureAndVerify({ accountId, groupIds, concurrency, priority, modelId, prompt });
+  }
+}

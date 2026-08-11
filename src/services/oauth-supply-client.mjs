@@ -114,6 +114,116 @@ export class OAuthSupplyClient {
       throw new OAuthSupplyClientError('network_error', '无法连接 OAuth Supply', { statusCode: 502 });
     }
   }
+
+  async customerRequest({ baseUrl, token, pathname, method = 'GET', body, headers = {}, idempotencyKey = '' }) {
+    const normalizedBaseUrl = this.baseUrl(baseUrl);
+    const requestHeaders = {
+      'X-Customer-Token': String(token || '').trim(),
+      ...headers,
+    };
+    if (idempotencyKey) requestHeaders['Idempotency-Key'] = idempotencyKey;
+    try {
+      const { response, payload } = await this.http.request(normalizedBaseUrl, pathname, {
+        method,
+        token: '',
+        body,
+        headers: requestHeaders,
+        allowError: true,
+      });
+      if (!response.ok) {
+        const message = payload?.error || payload?.message || `OAuth Supply API failed (HTTP ${response.status})`;
+        throw new OAuthSupplyClientError(
+          response.status === 401 ? 'token_expired' : response.status === 429 ? 'rate_limited' : 'upstream_error',
+          String(message).slice(0, 500),
+          { statusCode: response.status === 401 ? 401 : response.status === 429 ? 429 : 502, httpStatus: response.status },
+        );
+      }
+      return { status: response.status, payload: payload || {} };
+    } catch (error) {
+      if (error instanceof OAuthSupplyClientError) throw error;
+      if (error instanceof SupplierAdapterError) {
+        throw new OAuthSupplyClientError(error.code, error.message, {
+          statusCode: error.statusCode || 502,
+          httpStatus: error.httpStatus,
+        });
+      }
+      throw new OAuthSupplyClientError('network_error', '无法连接 OAuth Supply', { statusCode: 502 });
+    }
+  }
+
+  async products({ baseUrl, token }) {
+    return this.customerRequest({ baseUrl, token, pathname: '/api/customer/products' });
+  }
+
+  async inventory({ baseUrl, token, product, quantity = 1 }) {
+    const query = new URLSearchParams({ product: String(product), quantity: String(quantity) });
+    return this.customerRequest({ baseUrl, token, pathname: `/api/customer/inventory?${query}` });
+  }
+
+  async balance({ baseUrl, token }) {
+    return this.customerRequest({ baseUrl, token, pathname: '/api/customer/balance' });
+  }
+
+  async createOrder({ baseUrl, token, product, quantity, idempotencyKey }) {
+    return this.customerRequest({
+      baseUrl,
+      token,
+      pathname: '/api/customer/pickup/orders',
+      method: 'POST',
+      body: { product, quantity },
+      idempotencyKey,
+    });
+  }
+
+  async getOrder({ baseUrl, token, orderId }) {
+    return this.customerRequest({
+      baseUrl,
+      token,
+      pathname: `/api/customer/pickup/orders/${encodeURIComponent(orderId)}`,
+    });
+  }
+
+  async takeOrder({ baseUrl, token, orderId }) {
+    return this.customerRequest({
+      baseUrl,
+      token,
+      pathname: `/api/customer/pickup/orders/${encodeURIComponent(orderId)}/take`,
+      method: 'POST',
+    });
+  }
+
+  async recoveries({ baseUrl, token, beforeId = 0, limit = 100 }) {
+    const query = new URLSearchParams({
+      before_id: beforeId ? String(beforeId) : '',
+      limit: String(Math.min(100, Math.max(1, quantityOrOne(limit)))),
+    });
+    return this.customerRequest({ baseUrl, token, pathname: `/api/customer/recoveries?${query}` });
+  }
+
+  async claimRecovery({ baseUrl, token, claimUrl }) {
+    const expected = new URL(this.baseUrl(baseUrl));
+    let parsed;
+    try {
+      parsed = new URL(String(claimUrl || ''), expected);
+    } catch {
+      throw new OAuthSupplyClientError('invalid_claim_url', 'OAuth Supply 返回了无效的认领地址', { statusCode: 502 });
+    }
+    if (parsed.origin !== expected.origin) {
+      throw new OAuthSupplyClientError('invalid_claim_url', 'OAuth Supply 认领地址不属于已配置的站点', { statusCode: 502 });
+    }
+    return this.customerRequest({
+      baseUrl,
+      token,
+      pathname: `${parsed.pathname}${parsed.search}`,
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    });
+  }
 }
 
 export const oauthSupplyTokenTtlMs = DEFAULT_TOKEN_TTL_MS;
+
+function quantityOrOne(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1;
+}

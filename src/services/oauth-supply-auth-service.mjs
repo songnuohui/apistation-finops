@@ -68,6 +68,14 @@ export class OAuthSupplyAuthService {
     return this.authenticate();
   }
 
+  async invalidateAccessToken(token = '') {
+    if (!token || token === this.accessToken) {
+      this.accessToken = '';
+      this.tokenExpiresAt = null;
+    }
+    return true;
+  }
+
   async authenticate() {
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = this.#authenticate().finally(() => {

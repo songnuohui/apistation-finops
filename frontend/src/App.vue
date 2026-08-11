@@ -15,6 +15,7 @@ import UsageView from './components/UsageView.vue';
 import UserFinanceView from './components/UserFinanceView.vue';
 import OverviewView from './components/OverviewView.vue';
 import OAuthSupplyView from './components/OAuthSupplyView.vue';
+import ReplenishmentView from './components/ReplenishmentView.vue';
 
 type AnyRecord = Record<string, any>;
 
@@ -49,6 +50,7 @@ const usageRefreshToken = ref(0);
 const qualityRefreshToken = ref(0);
 const supplierKeyRefreshToken = ref(0);
 const oauthSupplyRefreshToken = ref(0);
+const replenishmentRefreshToken = ref(0);
 const activeUsageTab = ref<'users' | 'models' | 'events'>('users');
 const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
@@ -64,6 +66,7 @@ const nav = [
   { id: 'supplier-keys', label: '供应商密钥', icon: KeyRound, group: '资源与成本' },
   { id: 'supplier-quality', label: '供应商评分', icon: ShieldCheck, group: '资源与成本' },
   { id: 'oauth-supply', label: 'OAuth Supply', icon: PlugZap, group: '自动化接入' },
+  { id: 'replenishment', label: '自动补号', icon: RefreshCw, group: '自动化接入' },
 ];
 const pageMeta: Record<string, [string, string]> = {
   overview: ['经营总览', '现金、消耗、成本与毛利'],
@@ -74,6 +77,7 @@ const pageMeta: Record<string, [string, string]> = {
   'supplier-keys': ['供应商密钥', '跨供应商查看上游密钥、账号关联、利润控制和巡检状态'],
   'supplier-quality': ['供应商评分', '价格、可用性、首字延迟和稳定性评分'],
   'oauth-supply': ['OAuth Supply 接入', '独立配置客户账号，登录并安全取得采购 Token'],
+  replenishment: ['自动补号', '库存、订单、验号、Sub2API 导入和采购成本统一管理'],
 };
 
 const title = computed(() => pageMeta[page.value]?.[0] || 'FinOps');
@@ -158,6 +162,7 @@ async function loadPage() {
     else if (page.value === 'supplier-keys') supplierKeyRefreshToken.value += 1;
     else if (page.value === 'supplier-quality') qualityRefreshToken.value += 1;
     else if (page.value === 'oauth-supply') oauthSupplyRefreshToken.value += 1;
+    else if (page.value === 'replenishment') replenishmentRefreshToken.value += 1;
   } finally { loading.value = false; }
 }
 
@@ -433,6 +438,7 @@ function syncBodyScrollLock() {
         <SupplierKeysView v-else-if="page === 'supplier-keys'" :refresh-token="supplierKeyRefreshToken" @toast="showToast" />
         <SupplierQualityView v-else-if="page === 'supplier-quality'" :refresh-token="qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <OAuthSupplyView v-else-if="page === 'oauth-supply'" :refresh-token="oauthSupplyRefreshToken" @toast="showToast" />
+        <ReplenishmentView v-else-if="page === 'replenishment'" :refresh-token="replenishmentRefreshToken" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">
