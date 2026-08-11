@@ -92,6 +92,56 @@ function accountExpiresAt(raw, orderItem, nowMs) {
   return remaining === null ? null : Math.floor(nowMs / 1000 + Math.max(0, remaining));
 }
 
+const OPEN_RECOVERY_STATUSES = new Set([
+  'detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+  'updating_sub2api', 'verifying', 'retry_wait', 'manual_required',
+]);
+
+function textIncludesAuthFailure(...values) {
+  return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
+}
+
+function quotaNumber(...values) {
+  for (const value of values) {
+    const parsed = numeric(value);
+    if (parsed !== null && parsed >= 0 && parsed <= 100) return parsed;
+  }
+  return null;
+}
+
+function quotaSnapshot(account, usage) {
+  const extra = account?.extra || {};
+  const short = quotaNumber(
+    usage?.codex_5h_used_percent,
+    usage?.five_hour?.utilization,
+    usage?.fiveHour?.utilization,
+    extra.codex_5h_used_percent,
+    extra.codex_secondary_used_percent,
+  );
+  const long = quotaNumber(
+    usage?.codex_7d_used_percent,
+    usage?.seven_day?.utilization,
+    usage?.sevenDay?.utilization,
+    extra.codex_7d_used_percent,
+    extra.codex_primary_used_percent,
+  );
+  return { short, long };
+}
+
+function selectedQuota(quota, window) {
+  if (window === 'short') return { value: quota.short, window: 'short' };
+  if (window === 'long') return { value: quota.long, window: 'long' };
+  const values = [
+    { value: quota.short, window: 'short' },
+    { value: quota.long, window: 'long' },
+  ].filter((entry) => entry.value !== null);
+  return values.sort((left, right) => right.value - left.value)[0] || { value: null, window: '' };
+}
+
+function retryDelayMs(attempt) {
+  return Math.min(15 * 60_000, 15_000 * (2 ** Math.max(0, attempt - 1)));
+}
+
 export class ReplenishmentService {
   constructor(repository, oauthSupplyAuthService, sub2ApiGateway, config, logger = console, {
     client,
@@ -171,75 +221,293 @@ export class ReplenishmentService {
   }
 
   async recoveries() {
-    const payload = await this.rawRecoveries();
-    const entries = Array.isArray(payload) ? payload : payload.items || payload.recoveries || [];
+    await this.syncSupplierRecoveries().catch((error) => {
+      this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
+    });
+    const entries = await this.repository.listRecoveries({ limit: 100 });
     return {
       items: entries.map((entry) => ({
-        id: entry.id || entry.recovery_id,
-        accountName: entry.email || entry.account_email || entry.account_id || '',
-        deliveryStatus: entry.delivery_status || entry.status || '',
-        ready: Boolean(entry.ready || entry.delivery_status === 'claimable'),
-        credentialVersion: entry.credential_version || entry.credentialVersion || '',
-        retryAfterSeconds: numeric(entry.retry_after_seconds, null),
-        targetAccountId: numeric(entry.sub2api_account_id || entry.target_account_id, null),
+        id: entry.id,
+        accountName: entry.accountName || entry.accountKey,
+        deliveryStatus: entry.deliveryStatus,
+        status: entry.status,
+        ready: ['claimable', 'credentials_saved', 'retry_wait', 'manual_required'].includes(entry.status),
+        credentialVersion: entry.credentialVersion,
+        attemptCount: entry.attemptCount,
+        nextRetryAt: entry.nextRetryAt,
+        lastError: entry.lastError,
+        firstSeenAt: entry.firstSeenAt,
+        recoveredAt: entry.recoveredAt,
+        targetAccountId: entry.sub2apiAccountId,
       })),
-      nextBeforeId: payload.next_before_id || null,
     };
   }
 
-  async rawRecoveries() {
+  async rawRecoveries({ beforeId = 0 } = {}) {
     const response = await this.customerRequest(({ settings, token }) => this.client.recoveries({
       baseUrl: settings.baseUrl,
       token,
+      beforeId,
       limit: 100,
     }));
     return payloadOf(response) || {};
   }
 
-  async claimRecovery(recoveryId) {
-    const payload = await this.rawRecoveries();
-    const entries = Array.isArray(payload) ? payload : payload.items || payload.recoveries || [];
-    const entry = entries.find((candidate) => String(candidate.id || candidate.recovery_id) === String(recoveryId));
-    if (!entry) throw errorWithStatus('修复记录不存在或已经翻页', 404);
-    const claimUrl = entry.claim_url || entry.claimUrl;
-    if (!claimUrl) throw errorWithStatus('修复文件尚未准备好认领', 409);
-    const claimed = await this.customerRequest(({ settings, token }) => this.client.claimRecovery({
-      baseUrl: settings.baseUrl,
-      token,
-      claimUrl,
-    }));
-    const claimedPayload = payloadOf(claimed) || {};
-    const matchingItem = await this.repository.findOrderItemByAccountKey(
-      entry.email || entry.account_email || entry.account_id || entry.accountId,
-    );
-    const targetAccountId = numeric(
-      entry.sub2api_account_id || entry.target_account_id || matchingItem?.sub2apiAccountId,
-      null,
-    );
-    const credentials = claimedPayload.credentials || claimedPayload.payload?.credentials || claimedPayload.payload;
-    if (targetAccountId && credentials && typeof credentials === 'object') {
-      await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials);
+  async syncSupplierRecoveries() {
+    const existing = await this.repository.listRecoveries({ limit: 500 });
+    const activeByItem = new Map(existing.filter((entry) => OPEN_RECOVERY_STATUSES.has(entry.status))
+      .map((entry) => [entry.orderItemId, entry]));
+    let beforeId = 0;
+    for (let page = 0; page < 10; page += 1) {
+      const payload = await this.rawRecoveries({ beforeId });
+      const entries = Array.isArray(payload) ? payload : payload.items || payload.recoveries || [];
+      for (const entry of entries) {
+        const accountKey = entry.email || entry.account_email || entry.account_id || entry.accountId;
+        const matchingItem = await this.repository.findOrderItemByAccountKey(accountKey);
+        if (!matchingItem?.sub2apiAccountId) continue;
+        const order = await this.repository.getOrder(matchingItem.orderId);
+        const current = activeByItem.get(matchingItem.id);
+        const claimUrl = entry.claim_url || entry.claimUrl || '';
+        const ready = Boolean(entry.ready || entry.delivery_status === 'claimable' || claimUrl);
+        const recoveryKey = current?.recoveryKey
+          || `item:${matchingItem.id}:credential:${matchingItem.credentialVersion || 'initial'}`;
+        const status = current && ['credentials_saved', 'retry_wait', 'manual_required'].includes(current.status)
+          ? current.status
+          : ready ? 'claimable' : 'waiting_supplier';
+        const saved = await this.repository.upsertRecovery({
+          ...(current || {}),
+          recoveryKey,
+          supplierRecoveryId: entry.id || entry.recovery_id,
+          orderItemId: matchingItem.id,
+          ruleId: order?.ruleId,
+          sub2apiAccountId: matchingItem.sub2apiAccountId,
+          accountKey,
+          status,
+          deliveryStatus: entry.delivery_status || entry.status || '',
+          credentialVersion: entry.credential_version || entry.credentialVersion || current?.credentialVersion || '',
+          claimUrlCiphertext: claimUrl && this.vault.available
+            ? this.vault.encrypt({ claimUrl })
+            : current?.claimUrlCiphertext || '',
+        });
+        activeByItem.set(matchingItem.id, saved);
+      }
+      const next = numeric(payload.next_before_id ?? payload.nextBeforeId, 0);
+      if (!entries.length || !next || next === beforeId) break;
+      beforeId = next;
     }
-    if (matchingItem) {
-      await this.repository.updateOrderItem(matchingItem.id, {
+  }
+
+  async claimRecovery(recoveryId) {
+    let job = await this.repository.getRecovery(recoveryId);
+    if (!job) throw errorWithStatus('修复任务不存在', 404);
+    if (job.status === 'recovered') return { ok: true, recoveryId: job.id, targetAccountId: job.sub2apiAccountId };
+    try {
+      let credentials;
+      let credentialVersion = job.credentialVersion;
+      if (job.credentialCiphertext) {
+        const saved = this.vault.decrypt(job.credentialCiphertext);
+        credentials = saved.credentials || saved;
+      } else {
+        if (!job.claimUrlCiphertext) throw errorWithStatus('供应商尚未准备好认领链接', 409);
+        const { claimUrl } = this.vault.decrypt(job.claimUrlCiphertext);
+        const claimed = await this.customerRequest(({ settings, token }) => this.client.claimRecovery({
+          baseUrl: settings.baseUrl,
+          token,
+          claimUrl,
+        }));
+        const claimedPayload = payloadOf(claimed) || {};
+        credentials = claimedPayload.credentials || claimedPayload.payload?.credentials || claimedPayload.payload;
+        if (!credentials || typeof credentials !== 'object') throw errorWithStatus('供应商修复响应缺少账号凭据');
+        credentialVersion = claimedPayload.credential_version || claimedPayload.credentialVersion || credentialVersion;
+        job = await this.repository.upsertRecovery({
+          ...job,
+          status: 'credentials_saved',
+          credentialVersion,
+          credentialCiphertext: this.vault.encrypt({ credentials }),
+          claimedAt: new Date(this.now()).toISOString(),
+          lastError: '',
+        });
+      }
+      job = await this.repository.upsertRecovery({ ...job, status: 'updating_sub2api', lastError: '' });
+      await this.sub2ApiGateway.applyOAuthCredentials(job.sub2apiAccountId, credentials);
+      job = await this.repository.upsertRecovery({ ...job, status: 'verifying', lastError: '' });
+      await this.sub2ApiGateway.testAccount(job.sub2apiAccountId, {
+        modelId: job.verificationModel || 'gpt-5.6-luna',
+        prompt: job.verificationPrompt || 'Reply with a short success marker.',
+      });
+      const encryptedCredentials = this.vault.encrypt({ credentials });
+      await this.repository.updateOrderItem(job.orderItemId, {
+        status: 'imported',
         verificationStatus: 'repaired',
-        credentialVersion: claimedPayload.credential_version || claimedPayload.credentialVersion || '',
+        healthStatus: 'healthy',
+        credentialVersion,
+        credentialCiphertext: encryptedCredentials,
+        errorMessage: '',
+        lastHealthAt: new Date(this.now()).toISOString(),
+      });
+      job = await this.repository.upsertRecovery({
+        ...job,
+        status: 'recovered',
+        credentialVersion,
+        credentialCiphertext: encryptedCredentials,
+        nextRetryAt: null,
+        lastError: '',
+        recoveredAt: new Date(this.now()).toISOString(),
       });
       await this.repository.addEvent({
-        orderId: matchingItem.orderId,
-        itemId: matchingItem.id,
-        eventType: 'recovery_claimed',
-        message: `修复账号 ${matchingItem.accountName} 已认领并更新`,
-        details: { recoveryId, targetAccountId },
+        orderId: (await this.repository.getOrderItem(job.orderItemId))?.orderId || null,
+        itemId: job.orderItemId,
+        eventType: 'recovery_verified',
+        message: `账号 ${job.accountName || job.accountKey} 已认领、更新并验号通过`,
+        details: { recoveryId: job.id, targetAccountId: job.sub2apiAccountId, credentialVersion },
+      });
+      return {
+        ok: true,
+        recoveryId: job.id,
+        credentialVersion,
+        targetAccountId: job.sub2apiAccountId,
+        imported: true,
+      };
+    } catch (error) {
+      const attempts = Number(job.attemptCount || 0) + 1;
+      const exhausted = attempts > Number(job.recoveryRetryLimit ?? 6);
+      await this.repository.upsertRecovery({
+        ...job,
+        status: exhausted ? 'manual_required' : 'retry_wait',
+        attemptCount: attempts,
+        nextRetryAt: exhausted ? null : new Date(this.now() + retryDelayMs(attempts)).toISOString(),
+        lastError: String(error?.message || error),
+      });
+      await this.repository.addEvent({
+        orderId: (await this.repository.getOrderItem(job.orderItemId))?.orderId || null,
+        itemId: job.orderItemId,
+        eventType: exhausted ? 'recovery_manual_required' : 'recovery_retry_scheduled',
+        message: String(error?.message || error),
+        details: { recoveryId: job.id, attempts, exhausted },
+      });
+      throw error;
+    }
+  }
+
+  async inspectRuleInventory(rule) {
+    const items = await this.repository.listTrackedItems(rule.id);
+    const recoveries = await this.repository.listRecoveries({ limit: 500 });
+    const openByItem = new Map(recoveries.filter((entry) => OPEN_RECOVERY_STATUSES.has(entry.status))
+      .map((entry) => [entry.orderItemId, entry]));
+    const accounts = [];
+    let effectiveAccounts = 0;
+    let lowQuotaAccounts = 0;
+    let unavailableAccounts = 0;
+    let repairingAccounts = 0;
+    let unknownQuotaAccounts = 0;
+    let graceRepairingAccounts = 0;
+    for (const tracked of items) {
+      let account = null;
+      let usage = null;
+      let readError = '';
+      try {
+        [account, usage] = await Promise.all([
+          this.sub2ApiGateway.getAccount(tracked.sub2apiAccountId),
+          this.sub2ApiGateway.getAccountUsage(tracked.sub2apiAccountId, { source: 'passive' }).catch(() => null),
+        ]);
+      } catch (error) {
+        readError = String(error?.message || error);
+      }
+      const expiresAt = numeric(account?.expires_at ?? account?.expiresAt ?? tracked.metadata?.expiresAt);
+      const expired = expiresAt !== null && expiresAt * 1000 <= this.now();
+      const authFailed = textIncludesAuthFailure(
+        readError,
+        account?.error_message,
+        account?.errorMessage,
+        usage?.error,
+        usage?.error_code,
+      ) || Boolean(usage?.needs_reauth);
+      let recoveryJob = openByItem.get(tracked.id);
+      if (authFailed && !recoveryJob) {
+        recoveryJob = await this.repository.upsertRecovery({
+          recoveryKey: `item:${tracked.id}:credential:${tracked.credentialVersion || 'initial'}`,
+          orderItemId: tracked.id,
+          ruleId: rule.id,
+          sub2apiAccountId: tracked.sub2apiAccountId,
+          accountKey: tracked.externalAccountKey || tracked.accountName,
+          status: 'detected',
+          deliveryStatus: '401 detected',
+        });
+        await this.repository.addEvent({
+          orderId: tracked.orderId,
+          itemId: tracked.id,
+          eventType: 'account_recovery_detected',
+          message: `账号 ${tracked.accountName} 检测到 401 或凭据失效`,
+          details: { sub2apiAccountId: tracked.sub2apiAccountId },
+        });
+        openByItem.set(tracked.id, recoveryJob);
+      }
+      const repairing = Boolean(recoveryJob);
+      const accountGroups = (account?.group_ids || account?.groups || [])
+        .map((entry) => Number(entry?.id ?? entry));
+      const groupMatched = rule.targetGroupIds.every((id) => accountGroups.includes(Number(id)));
+      const healthyStatus = !readError
+        && String(account?.status || '').toLowerCase() === 'active'
+        && String(account?.platform || rule.platform) === rule.platform
+        && groupMatched
+        && account?.schedulable !== false
+        && !expired
+        && !authFailed
+        && !repairing;
+      const quota = quotaSnapshot(account, usage);
+      const selected = selectedQuota(quota, rule.quotaWindow);
+      const quotaUnknown = selected.value === null;
+      const lowQuota = selected.value !== null && selected.value >= rule.quotaUsedThresholdPercent;
+      const unknownCountsLow = quotaUnknown && rule.quotaUnknownPolicy === 'low';
+      const effective = healthyStatus && !lowQuota && !unknownCountsLow;
+      if (effective) effectiveAccounts += 1;
+      if (lowQuota) lowQuotaAccounts += 1;
+      if (quotaUnknown) unknownQuotaAccounts += 1;
+      if (!healthyStatus && !repairing) unavailableAccounts += 1;
+      if (repairing) {
+        repairingAccounts += 1;
+        const ageMs = this.now() - Date.parse(recoveryJob.firstSeenAt || new Date(this.now()).toISOString());
+        if (ageMs < rule.repairGraceSeconds * 1000) graceRepairingAccounts += 1;
+      }
+      const healthStatus = repairing ? 'repairing'
+        : !healthyStatus ? 'unavailable'
+          : lowQuota || unknownCountsLow ? 'low_quota'
+            : quotaUnknown ? 'quota_unknown' : 'healthy';
+      await this.repository.updateOrderItem(tracked.id, {
+        healthStatus,
+        quotaUsedPercent: selected.value,
+        quotaWindow: selected.window,
+        lastHealthAt: new Date(this.now()).toISOString(),
+        errorMessage: authFailed ? 'Sub2API account requires reauthentication' : tracked.errorMessage,
+      });
+      accounts.push({
+        orderItemId: tracked.id,
+        sub2apiAccountId: tracked.sub2apiAccountId,
+        accountName: tracked.accountName,
+        healthStatus,
+        quotaUsedPercent: selected.value,
+        quotaWindow: selected.window,
+        status: account?.status || '',
+        schedulable: account?.schedulable !== false,
+        expiresAt,
+        lastError: readError || account?.error_message || account?.errorMessage || '',
       });
     }
-    return {
-      ok: true,
-      recoveryId,
-      credentialVersion: claimedPayload.credential_version || claimedPayload.credentialVersion || '',
-      targetAccountId,
-      imported: Boolean(targetAccountId && credentials),
+    const pendingAccounts = await this.repository.pendingQuantity(rule.id);
+    const snapshot = {
+      capturedAt: new Date(this.now()).toISOString(),
+      trackedAccounts: items.length,
+      effectiveAccounts,
+      lowQuotaAccounts,
+      unavailableAccounts,
+      repairingAccounts,
+      graceRepairingAccounts,
+      unknownQuotaAccounts,
+      pendingAccounts,
+      accounts,
     };
+    await this.repository.saveInventorySnapshot(rule.id, snapshot);
+    return snapshot;
   }
 
   async createOrderForRule(rule, { trigger = 'scheduled', actor = 'system', force = false } = {}) {
@@ -247,18 +515,34 @@ export class ReplenishmentService {
     if (!rule.product || !rule.platform || !rule.targetPoolKey) {
       throw errorWithStatus('补号策略缺少商品映射', 400);
     }
-    if (await this.repository.hasActiveOrder(rule.id)) return { status: 'already_active' };
+    const snapshot = await this.inspectRuleInventory(rule);
+    if (!force && snapshot.effectiveAccounts > rule.minAvailableAccounts) {
+      return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
+    }
+    if (await this.repository.hasActiveOrder(rule.id)) return { status: 'already_active', inventory: snapshot };
+    if (!force && snapshot.effectiveAccounts > 0
+      && snapshot.effectiveAccounts + snapshot.graceRepairingAccounts > rule.minAvailableAccounts) {
+      return { status: 'repair_grace', inventory: snapshot };
+    }
     if (!force && rule.lastTriggeredAt && this.now() - Date.parse(rule.lastTriggeredAt) < rule.cooldownSeconds * 1000) {
-      return { status: 'cooldown' };
+      return { status: 'cooldown', inventory: snapshot };
     }
-    const inventoryResponse = await this.inventory(rule.product, rule.replenishQuantity);
-    const inventory = payloadOf(inventoryResponse) || {};
-    const available = numeric(inventory.available, numeric(inventory.available_count, 0)) || 0;
-    await this.repository.markRuleInventory(rule.id);
-    if (!force && available >= rule.minAvailableAccounts) {
-      return { status: 'healthy', available };
+    const desired = Math.max(0,
+      Number(rule.targetAvailableAccounts) - snapshot.effectiveAccounts - snapshot.pendingAccounts);
+    if (!desired) return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
+    let quantity = Math.max(1, Math.min(desired, rule.replenishQuantity, 1000));
+    let inventoryResponse = await this.inventory(rule.product, quantity);
+    let inventory = payloadOf(inventoryResponse) || {};
+    const supplierAvailable = numeric(inventory.available, numeric(inventory.available_count, 0)) || 0;
+    if (supplierAvailable <= 0) {
+      await this.repository.saveInventorySnapshot(rule.id, snapshot, { error: '供应商当前无可售账号' });
+      return { status: 'blocked_supplier_inventory', supplierAvailable, inventory: snapshot };
     }
-    const quantity = Math.max(1, Math.min(rule.replenishQuantity, 1000));
+    if (supplierAvailable < quantity) {
+      quantity = supplierAvailable;
+      inventoryResponse = await this.inventory(rule.product, quantity);
+      inventory = payloadOf(inventoryResponse) || {};
+    }
     const quotedCny = centsToCny(inventory.estimated_total_fen ?? inventory.estimatedTotalFen);
     if ((rule.maxOrderAmountCny !== null || rule.maxDailyAmountCny !== null) && quotedCny === null) {
       await this.repository.markRuleInventory(rule.id, { error: '供应商未返回报价，成本上限开启时禁止下单' });
@@ -274,10 +558,10 @@ export class ReplenishmentService {
       return { status: 'blocked_daily_cost', dailySpend, quotedCny };
     }
     if (rule.mode === 'observe') {
-      await this.repository.markRuleInventory(rule.id, {
-        error: `观察到库存 ${available}，低于阈值 ${rule.minAvailableAccounts}`,
+      await this.repository.saveInventorySnapshot(rule.id, snapshot, {
+        error: `有效库存 ${snapshot.effectiveAccounts}，已达到补号阈值 ${rule.minAvailableAccounts}`,
       });
-      return { status: 'observed_need', available, quotedCny };
+      return { status: 'observed_need', available: snapshot.effectiveAccounts, quotedCny, quantity, inventory: snapshot };
     }
     const balance = await this.balance().catch(() => null);
     const availableBalanceCny = centsToCny(balance?.available_fen ?? balance?.availableFen);
@@ -290,7 +574,7 @@ export class ReplenishmentService {
       rule,
       trigger,
       quantity,
-      availableBefore: available,
+      availableBefore: snapshot.effectiveAccounts,
       quotedAmountCny: quotedCny,
       actor,
       status: rule.mode === 'approval' ? 'approval_required' : 'ordering',
@@ -301,7 +585,7 @@ export class ReplenishmentService {
       orderId: planned.id,
       eventType: rule.mode === 'approval' ? 'approval_required' : 'order_planned',
       message: rule.mode === 'approval' ? '订单等待审批' : '订单开始创建',
-      details: { available, quantity, quotedCny, trigger },
+      details: { available: snapshot.effectiveAccounts, quantity, quotedCny, trigger, inventory: snapshot },
       actor,
     });
     if (rule.mode === 'approval') return planned;
@@ -645,23 +929,14 @@ export class ReplenishmentService {
         }
       }
       await this.reconcileCostLedgers();
-      const recoveryPayload = await this.rawRecoveries().catch(() => null);
-      const recoveryEntries = recoveryPayload
-        ? (Array.isArray(recoveryPayload) ? recoveryPayload : recoveryPayload.items || recoveryPayload.recoveries || [])
-        : [];
-      for (const entry of recoveryEntries) {
-        if (entry.delivery_status !== 'claimable' && !entry.ready) continue;
-        const matchingItem = await this.repository.findOrderItemByAccountKey(
-          entry.email || entry.account_email || entry.account_id || entry.accountId,
-        );
-        if (!matchingItem) continue;
-        const recoveryOrder = await this.repository.getOrder(matchingItem.orderId);
-        const recoveryRule = await this.repository.getRule(recoveryOrder?.ruleId);
-        if (recoveryRule?.mode === 'auto') {
-          await this.claimRecovery(entry.id || entry.recovery_id).catch((error) => {
-            this.logger.warn('[replenishment] recovery claim failed', error?.message || error);
-          });
-        }
+      await this.syncSupplierRecoveries().catch((error) => {
+        this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
+      });
+      for (const recovery of await this.repository.listDueRecoveries({ limit: 30 })) {
+        if (recovery.mode !== 'auto') continue;
+        await this.claimRecovery(recovery.id).catch((error) => {
+          this.logger.warn('[replenishment] recovery processing failed', error?.message || error);
+        });
       }
       for (const rule of await this.repository.listRules({ enabledOnly: true })) {
         try {

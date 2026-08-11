@@ -252,6 +252,17 @@ test('OAuth Supply replenishment remains FinOps-owned and keeps account credenti
   assert.doesNotMatch(migration, /\b(?:access_token|refresh_token|password)\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('replenishment inventory and recovery state remains FinOps-owned and encrypted', () => {
+  const migration = read('migrations/033_replenishment_inventory_recovery.sql');
+  assert.match(migration, /target_available_accounts INTEGER/);
+  assert.match(migration, /quota_used_threshold_percent NUMERIC/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*replenishment_recoveries/s);
+  assert.match(migration, /claim_url_ciphertext TEXT NOT NULL/);
+  assert.match(migration, /credential_ciphertext TEXT NOT NULL/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\b(?:access_token|refresh_token|password|claim_url)\s+(?:TEXT|VARCHAR)/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

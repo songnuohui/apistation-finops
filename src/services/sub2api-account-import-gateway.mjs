@@ -170,6 +170,12 @@ export class Sub2ApiAccountImportGateway {
     return payload?.account || payload;
   }
 
+  async getAccountUsage(accountId, { source = 'passive' } = {}) {
+    const id = normalizeAccountId(accountId);
+    const query = new URLSearchParams({ source: source === 'active' ? 'active' : 'passive' });
+    return this.jsonRequest(`/api/v1/admin/accounts/${id}/usage?${query}`);
+  }
+
   async testAccount(accountId, { modelId, prompt }) {
     const id = normalizeAccountId(accountId);
     const { text } = await this.request(`/api/v1/admin/accounts/${id}/test`, {

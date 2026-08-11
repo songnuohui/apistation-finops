@@ -100,3 +100,23 @@ test('Sub2API SSE verification rejects a stream without explicit completion', as
     /explicit success event/,
   );
 });
+
+test('Sub2API account usage reads the passive quota snapshot without forcing a refresh', async () => {
+  const gateway = new Sub2ApiAccountImportGateway(config, console, async (url, options) => {
+    assert.equal(url, 'https://sub2api.example/api/v1/admin/accounts/2780/usage?source=passive');
+    assert.equal(options.method, 'GET');
+    return new Response(JSON.stringify({
+      data: { codex_5h_used_percent: 32, codex_7d_used_percent: 81 },
+    }), { status: 200 });
+  });
+  gateway.setAccessTokenProvider({
+    async getAuthentication() {
+      return { credential: 'admin-key', headers: { 'x-api-key': 'admin-key' } };
+    },
+  });
+
+  assert.deepEqual(await gateway.getAccountUsage(2780), {
+    codex_5h_used_percent: 32,
+    codex_7d_used_percent: 81,
+  });
+});

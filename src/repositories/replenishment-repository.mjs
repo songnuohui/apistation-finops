@@ -35,7 +35,13 @@ function rule(row) {
     mode: row.mode,
     enabled: Boolean(row.enabled),
     minAvailableAccounts: Number(row.min_available_accounts || 0),
+    targetAvailableAccounts: Number(row.target_available_accounts || 0),
     replenishQuantity: Number(row.replenish_quantity || 1),
+    quotaUsedThresholdPercent: Number(row.quota_used_threshold_percent ?? 80),
+    quotaWindow: row.quota_window || 'any',
+    quotaUnknownPolicy: row.quota_unknown_policy || 'warn',
+    repairGraceSeconds: Number(row.repair_grace_seconds ?? 900),
+    recoveryRetryLimit: Number(row.recovery_retry_limit ?? 6),
     maxOrderAmountCny: number(row.max_order_amount_cny),
     maxDailyAmountCny: number(row.max_daily_amount_cny),
     concurrency: Number(row.concurrency || 1),
@@ -48,6 +54,7 @@ function rule(row) {
     lastTriggeredAt: row.last_triggered_at || null,
     lastInventoryAt: row.last_inventory_at || null,
     lastError: row.last_error || '',
+    lastInventorySnapshot: row.last_inventory_snapshot || {},
     product: row.product || '',
     platform: row.platform || '',
     targetPoolKey: row.target_pool_key || '',
@@ -103,10 +110,46 @@ function item(row) {
     costLedgerPeriodId: number(row.cost_ledger_period_id),
     costLedgerError: row.cost_ledger_error || '',
     errorMessage: row.error_message || '',
+    healthStatus: row.health_status || 'unknown',
+    quotaUsedPercent: number(row.quota_used_percent),
+    quotaWindow: row.quota_window || '',
+    lastHealthAt: row.last_health_at || null,
     metadata: row.metadata || {},
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
     credentialCiphertext: row.credential_ciphertext || '',
+  };
+}
+
+function recovery(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    recoveryKey: row.recovery_key,
+    supplierRecoveryId: row.supplier_recovery_id || '',
+    orderItemId: Number(row.order_item_id),
+    ruleId: Number(row.rule_id),
+    sub2apiAccountId: Number(row.sub2api_account_id),
+    accountKey: row.account_key || '',
+    accountName: row.account_name || '',
+    status: row.status,
+    deliveryStatus: row.delivery_status || '',
+    credentialVersion: row.credential_version || '',
+    claimUrlCiphertext: row.claim_url_ciphertext || '',
+    credentialCiphertext: row.credential_ciphertext || '',
+    attemptCount: Number(row.attempt_count || 0),
+    nextRetryAt: row.next_retry_at || null,
+    lastError: row.last_error || '',
+    firstSeenAt: row.first_seen_at || null,
+    lastSeenAt: row.last_seen_at || null,
+    claimedAt: row.claimed_at || null,
+    recoveredAt: row.recovered_at || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    mode: row.mode || '',
+    verificationModel: row.verification_model || '',
+    verificationPrompt: row.verification_prompt || '',
+    recoveryRetryLimit: Number(row.recovery_retry_limit ?? 6),
   };
 }
 
@@ -117,7 +160,13 @@ function normalizeRuleInput(input) {
     mode: input.mode,
     enabled: Boolean(input.enabled),
     minAvailableAccounts: Number(input.minAvailableAccounts || 0),
+    targetAvailableAccounts: Number(input.targetAvailableAccounts || 0),
     replenishQuantity: Number(input.replenishQuantity || 1),
+    quotaUsedThresholdPercent: Number(input.quotaUsedThresholdPercent ?? 80),
+    quotaWindow: String(input.quotaWindow || 'any'),
+    quotaUnknownPolicy: String(input.quotaUnknownPolicy || 'warn'),
+    repairGraceSeconds: Number(input.repairGraceSeconds ?? 900),
+    recoveryRetryLimit: Number(input.recoveryRetryLimit ?? 6),
     maxOrderAmountCny: input.maxOrderAmountCny === null || input.maxOrderAmountCny === '' ? null : Number(input.maxOrderAmountCny),
     maxDailyAmountCny: input.maxDailyAmountCny === null || input.maxDailyAmountCny === '' ? null : Number(input.maxDailyAmountCny),
     concurrency: Number(input.concurrency || 1),
@@ -133,6 +182,28 @@ function normalizeRuleInput(input) {
     throw badRequest('请选择有效的商品映射');
   }
   if (!['observe', 'approval', 'auto'].includes(values.mode)) throw badRequest('运行模式无效');
+  if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 0) {
+    throw badRequest('最低有效库存必须是非负整数');
+  }
+  if (!Number.isSafeInteger(values.targetAvailableAccounts)
+    || values.targetAvailableAccounts <= values.minAvailableAccounts) {
+    throw badRequest('目标库存必须大于最低有效库存');
+  }
+  if (!Number.isSafeInteger(values.replenishQuantity) || values.replenishQuantity < 1 || values.replenishQuantity > 1000) {
+    throw badRequest('单次最多购买数量必须在 1 到 1000 之间');
+  }
+  if (!Number.isFinite(values.quotaUsedThresholdPercent)
+    || values.quotaUsedThresholdPercent < 0 || values.quotaUsedThresholdPercent > 100) {
+    throw badRequest('额度消耗阈值必须在 0% 到 100% 之间');
+  }
+  if (!['short', 'long', 'any'].includes(values.quotaWindow)) throw badRequest('额度判断窗口无效');
+  if (!['warn', 'low', 'ignore'].includes(values.quotaUnknownPolicy)) throw badRequest('额度未知处理方式无效');
+  if (!Number.isSafeInteger(values.repairGraceSeconds) || values.repairGraceSeconds < 0 || values.repairGraceSeconds > 86400) {
+    throw badRequest('修复等待时间必须在 0 到 86400 秒之间');
+  }
+  if (!Number.isSafeInteger(values.recoveryRetryLimit) || values.recoveryRetryLimit < 0 || values.recoveryRetryLimit > 20) {
+    throw badRequest('修复重试次数必须在 0 到 20 之间');
+  }
   return values;
 }
 
@@ -159,7 +230,13 @@ export class ReplenishmentRepository {
       mode: 'observe',
       enabled: true,
       minAvailableAccounts: 3,
+      targetAvailableAccounts: 5,
       replenishQuantity: 2,
+      quotaUsedThresholdPercent: 80,
+      quotaWindow: 'any',
+      quotaUnknownPolicy: 'warn',
+      repairGraceSeconds: 900,
+      recoveryRetryLimit: 6,
       maxOrderAmountCny: 100,
       maxDailyAmountCny: 300,
       concurrency: 5,
@@ -176,12 +253,14 @@ export class ReplenishmentRepository {
       lastTriggeredAt: null,
       lastInventoryAt: null,
       lastError: '',
+      lastInventorySnapshot: {},
       updatedAt: new Date().toISOString(),
     }] : [];
     this.orders = [];
     this.items = [];
     this.runs = [];
     this.events = [];
+    this.recoveries = [];
   }
 
   async listMappings() {
@@ -285,24 +364,31 @@ export class ReplenishmentRepository {
     if (!productMapping.rowCount) throw badRequest('商品映射不存在，请刷新后重新选择');
     const params = [
       values.name, values.productMappingId, values.mode, values.enabled,
-      values.minAvailableAccounts, values.replenishQuantity, values.maxOrderAmountCny,
-      values.maxDailyAmountCny, values.concurrency, values.priority, values.verificationModel,
-      values.verificationPrompt, values.pollIntervalSeconds, values.retryLimit, values.cooldownSeconds,
+      values.minAvailableAccounts, values.targetAvailableAccounts, values.replenishQuantity,
+      values.quotaUsedThresholdPercent, values.quotaWindow, values.quotaUnknownPolicy,
+      values.repairGraceSeconds, values.recoveryRetryLimit,
+      values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.priority,
+      values.verificationModel, values.verificationPrompt, values.pollIntervalSeconds,
+      values.retryLimit, values.cooldownSeconds,
     ];
     const result = input.id
       ? await this.pool.query(`
           UPDATE ${this.schema}.replenishment_rules SET
             name=$2,product_mapping_id=$3,mode=$4,enabled=$5,min_available_accounts=$6,
-            replenish_quantity=$7,max_order_amount_cny=$8,max_daily_amount_cny=$9,
-            concurrency=$10,priority=$11,verification_model=$12,verification_prompt=$13,
-            poll_interval_seconds=$14,retry_limit=$15,cooldown_seconds=$16,updated_at=NOW()
+            target_available_accounts=$7,replenish_quantity=$8,quota_used_threshold_percent=$9,
+            quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
+            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,priority=$17,
+            verification_model=$18,verification_prompt=$19,poll_interval_seconds=$20,
+            retry_limit=$21,cooldown_seconds=$22,updated_at=NOW()
           WHERE id=$1 RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
-            name,product_mapping_id,mode,enabled,min_available_accounts,replenish_quantity,
-            max_order_amount_cny,max_daily_amount_cny,concurrency,priority,verification_model,
-            verification_prompt,poll_interval_seconds,retry_limit,cooldown_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            name,product_mapping_id,mode,enabled,min_available_accounts,target_available_accounts,
+            replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
+            repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
+            concurrency,priority,verification_model,verification_prompt,poll_interval_seconds,
+            retry_limit,cooldown_seconds,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
           RETURNING id`, [...params, actor]);
     return this.getRule(result.rows[0]?.id);
   }
@@ -322,6 +408,23 @@ export class ReplenishmentRepository {
       WHERE id=$1`, [id, String(error || '').slice(0, 1000)]);
   }
 
+  async saveInventorySnapshot(id, snapshot, { error = '' } = {}) {
+    if (this.demo) {
+      const current = this.rules.find((entry) => entry.id === Number(id));
+      if (current) {
+        current.lastInventoryAt = new Date().toISOString();
+        current.lastInventorySnapshot = structuredClone(snapshot || {});
+        current.lastError = error;
+      }
+      return;
+    }
+    await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules SET
+        last_inventory_at=NOW(),last_inventory_snapshot=$2::jsonb,last_error=$3,updated_at=NOW()
+      WHERE id=$1`,
+    [id, JSON.stringify(snapshot || {}), String(error || '').slice(0, 1000)]);
+  }
+
   async hasActiveOrder(ruleId) {
     const active = new Set(['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
     if (this.demo) return this.orders.some((entry) => entry.ruleId === Number(ruleId) && active.has(entry.status));
@@ -329,6 +432,139 @@ export class ReplenishmentRepository {
       SELECT 1 FROM ${this.schema}.oauth_supply_orders
       WHERE rule_id=$1 AND status=ANY($2::text[]) LIMIT 1`, [ruleId, [...active]]);
     return Boolean(result.rowCount);
+  }
+
+  async pendingQuantity(ruleId) {
+    const active = ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'];
+    if (this.demo) {
+      return this.orders
+        .filter((entry) => entry.ruleId === Number(ruleId) && active.includes(entry.status))
+        .reduce((sum, entry) => sum + Math.max(0, Number(entry.requestedQuantity || 0) - Number(entry.validQuantity || 0)), 0);
+    }
+    const result = await this.pool.query(`
+      SELECT COALESCE(SUM(GREATEST(requested_quantity-valid_quantity,0)),0) AS quantity
+      FROM ${this.schema}.oauth_supply_orders
+      WHERE rule_id=$1 AND status=ANY($2::text[])`, [ruleId, active]);
+    return Number(result.rows[0]?.quantity || 0);
+  }
+
+  async listTrackedItems(ruleId) {
+    if (this.demo) {
+      const orderIds = new Set(this.orders.filter((entry) => entry.ruleId === Number(ruleId)).map((entry) => entry.id));
+      return this.items
+        .filter((entry) => orderIds.has(entry.orderId) && entry.sub2apiAccountId)
+        .map((entry) => ({ ...entry }));
+    }
+    const result = await this.pool.query(`
+      SELECT i.*,o.rule_id,o.product,o.platform
+      FROM ${this.schema}.oauth_supply_order_items i
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      WHERE o.rule_id=$1
+        AND i.sub2api_account_id IS NOT NULL
+        AND i.verification_status IN ('passed','repaired')
+      ORDER BY i.id`, [ruleId]);
+    return result.rows.map(item);
+  }
+
+  async upsertRecovery(input) {
+    const values = {
+      recoveryKey: String(input.recoveryKey || '').trim(),
+      supplierRecoveryId: String(input.supplierRecoveryId || '').trim(),
+      orderItemId: Number(input.orderItemId),
+      ruleId: Number(input.ruleId),
+      sub2apiAccountId: Number(input.sub2apiAccountId),
+      accountKey: String(input.accountKey || '').trim(),
+      status: String(input.status || 'waiting_supplier'),
+      deliveryStatus: String(input.deliveryStatus || '').trim(),
+      credentialVersion: String(input.credentialVersion || '').trim(),
+      claimUrlCiphertext: String(input.claimUrlCiphertext || ''),
+      credentialCiphertext: String(input.credentialCiphertext || ''),
+      attemptCount: Number(input.attemptCount || 0),
+      nextRetryAt: input.nextRetryAt || null,
+      lastError: String(input.lastError || ''),
+      claimedAt: input.claimedAt || null,
+      recoveredAt: input.recoveredAt || null,
+    };
+    if (!values.recoveryKey || !Number.isSafeInteger(values.orderItemId) || !Number.isSafeInteger(values.ruleId)
+      || !Number.isSafeInteger(values.sub2apiAccountId)) {
+      throw badRequest('修复任务缺少关联账号');
+    }
+    if (this.demo) {
+      let current = this.recoveries.find((entry) => entry.recoveryKey === values.recoveryKey);
+      if (!current) {
+        current = {
+          id: ++this.sequence,
+          firstSeenAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        };
+        this.recoveries.push(current);
+      }
+      Object.assign(current, values, { lastSeenAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+      return { ...current };
+    }
+    const result = await this.pool.query(`
+      INSERT INTO ${this.schema}.replenishment_recoveries(
+        recovery_key,supplier_recovery_id,order_item_id,rule_id,sub2api_account_id,account_key,status,
+        delivery_status,credential_version,claim_url_ciphertext,credential_ciphertext,attempt_count,
+        next_retry_at,last_error,claimed_at,recovered_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      ON CONFLICT(recovery_key) DO UPDATE SET
+        supplier_recovery_id=COALESCE(NULLIF(EXCLUDED.supplier_recovery_id,''),${this.schema}.replenishment_recoveries.supplier_recovery_id),
+        delivery_status=EXCLUDED.delivery_status,
+        credential_version=COALESCE(NULLIF(EXCLUDED.credential_version,''),${this.schema}.replenishment_recoveries.credential_version),
+        claim_url_ciphertext=COALESCE(NULLIF(EXCLUDED.claim_url_ciphertext,''),${this.schema}.replenishment_recoveries.claim_url_ciphertext),
+        credential_ciphertext=COALESCE(NULLIF(EXCLUDED.credential_ciphertext,''),${this.schema}.replenishment_recoveries.credential_ciphertext),
+        status=EXCLUDED.status,attempt_count=EXCLUDED.attempt_count,next_retry_at=EXCLUDED.next_retry_at,
+        last_error=EXCLUDED.last_error,claimed_at=COALESCE(EXCLUDED.claimed_at,${this.schema}.replenishment_recoveries.claimed_at),
+        recovered_at=COALESCE(EXCLUDED.recovered_at,${this.schema}.replenishment_recoveries.recovered_at),
+        last_seen_at=NOW(),updated_at=NOW()
+      RETURNING *`,
+    [values.recoveryKey, values.supplierRecoveryId || null, values.orderItemId, values.ruleId,
+      values.sub2apiAccountId, values.accountKey, values.status, values.deliveryStatus,
+      values.credentialVersion, values.claimUrlCiphertext, values.credentialCiphertext,
+      values.attemptCount, values.nextRetryAt, values.lastError.slice(0, 1000),
+      values.claimedAt, values.recoveredAt]);
+    return recovery(result.rows[0]);
+  }
+
+  async getRecovery(id) {
+    if (this.demo) return this.recoveries.find((entry) => entry.id === Number(id)) || null;
+    const result = await this.pool.query(`
+      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      FROM ${this.schema}.replenishment_recoveries rr
+      JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      WHERE rr.id=$1`, [id]);
+    return recovery(result.rows[0]);
+  }
+
+  async listRecoveries({ limit = 100 } = {}) {
+    if (this.demo) return [...this.recoveries].sort((a, b) => b.id - a.id).slice(0, limit).map((entry) => ({ ...entry }));
+    const result = await this.pool.query(`
+      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      FROM ${this.schema}.replenishment_recoveries rr
+      JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      ORDER BY rr.updated_at DESC,rr.id DESC LIMIT $1`, [limit]);
+    return result.rows.map(recovery);
+  }
+
+  async listDueRecoveries({ limit = 30 } = {}) {
+    const statuses = ['claimable', 'credentials_saved', 'retry_wait'];
+    if (this.demo) {
+      const now = Date.now();
+      return this.recoveries.filter((entry) => statuses.includes(entry.status)
+        && (!entry.nextRetryAt || Date.parse(entry.nextRetryAt) <= now))
+        .slice(0, limit).map((entry) => ({ ...entry }));
+    }
+    const result = await this.pool.query(`
+      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      FROM ${this.schema}.replenishment_recoveries rr
+      JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      WHERE rr.status=ANY($1::text[]) AND (rr.next_retry_at IS NULL OR rr.next_retry_at<=NOW())
+      ORDER BY rr.updated_at LIMIT $2`, [statuses, limit]);
+    return result.rows.map(recovery);
   }
 
   async dailySpend(ruleId) {
@@ -487,6 +723,8 @@ export class ReplenishmentRepository {
           sub2apiAccountId: value.sub2apiAccountId || null, costLedgerStatus: value.costLedgerStatus || 'pending',
           costLedgerPeriodId: value.costLedgerPeriodId || null, costLedgerError: value.costLedgerError || '',
           errorMessage: value.errorMessage || '',
+          healthStatus: value.healthStatus || 'unknown', quotaUsedPercent: value.quotaUsedPercent ?? null,
+          quotaWindow: value.quotaWindow || '', lastHealthAt: value.lastHealthAt || null,
           metadata: value.metadata || {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         };
         this.items.push(record);
@@ -528,14 +766,24 @@ export class ReplenishmentRepository {
         status=$2,verification_status=$3,individual_cost_cny=$4,final_cost_cny=$5,
         credential_version=$6,credential_ciphertext=$7,sub2api_account_id=$8,
         cost_ledger_status=$9,cost_ledger_period_id=$10,cost_ledger_error=$11,
-        error_message=$12,metadata=$13::jsonb,updated_at=NOW()
+        error_message=$12,metadata=$13::jsonb,health_status=$14,quota_used_percent=$15,
+        quota_window=$16,last_health_at=$17,updated_at=NOW()
       WHERE id=$1 RETURNING *`,
     [id, merged.status, merged.verificationStatus, merged.individualCostCny, merged.finalCostCny,
       merged.credentialVersion || '', merged.credentialCiphertext || '', merged.sub2apiAccountId,
       merged.costLedgerStatus || 'pending', merged.costLedgerPeriodId,
       String(merged.costLedgerError || '').slice(0, 1000),
-      String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(merged.metadata || {})]);
+      String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(merged.metadata || {}),
+      merged.healthStatus || 'unknown', merged.quotaUsedPercent ?? null, merged.quotaWindow || '',
+      merged.lastHealthAt || null]);
     return item(result.rows[0]);
+  }
+
+  async getOrderItem(id) {
+    if (this.demo) return this.items.find((entry) => entry.id === Number(id)) || null;
+    const result = await this.pool.query(`
+      SELECT * FROM ${this.schema}.oauth_supply_order_items WHERE id=$1`, [id]);
+    return result.rowCount ? item(result.rows[0]) : null;
   }
 
   async listPendingCostItems({ limit = 50 } = {}) {
@@ -634,6 +882,10 @@ export class ReplenishmentRepository {
         completedOrders: orders.filter((entry) => entry.status === 'completed').length,
         totalCostCny: orders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
         importedAccounts: orders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
+        effectiveAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.effectiveAccounts || 0), 0),
+        lowQuotaAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.lowQuotaAccounts || 0), 0),
+        unavailableAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.unavailableAccounts || 0), 0),
+        repairingAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.repairingAccounts || 0), 0),
       },
     };
   }

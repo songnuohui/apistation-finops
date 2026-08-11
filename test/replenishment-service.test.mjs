@@ -244,3 +244,146 @@ test('cost ledger stays pending until FinOps synchronization exposes the importe
   await service.reconcileCostLedgers();
   assert.equal(createCount, 2);
 });
+
+async function trackedItem(repository, rule, id, accountId) {
+  const order = await repository.createPlannedOrder({
+    rule,
+    trigger: 'test',
+    quantity: 1,
+    availableBefore: 0,
+    quotedAmountCny: 1,
+    actor: 'test',
+    status: 'ordering',
+    idempotencyKey: `tracked-${id}`,
+  });
+  await repository.updateOrder(order.id, { status: 'completed', validQuantity: 1 });
+  const [created] = await repository.addOrderItems(order.id, [{
+    externalItemId: `item-${id}`,
+    externalAccountKey: `account-${id}@example.com`,
+    accountName: `account-${id}@example.com`,
+    verificationStatus: 'passed',
+    status: 'imported',
+    sub2apiAccountId: accountId,
+    credentialVersion: 'v1',
+  }]);
+  return created;
+}
+
+test('effective inventory excludes accounts at the quota threshold and starts recovery for 401 accounts', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.quotaUsedThresholdPercent = 80;
+  rule.quotaWindow = 'any';
+  await trackedItem(repository, rule, 1, 101);
+  await trackedItem(repository, rule, 2, 102);
+  await trackedItem(repository, rule, 3, 103);
+  const gateway = {
+    async getAccount(id) {
+      return {
+        id,
+        platform: 'openai',
+        status: 'active',
+        schedulable: true,
+        group_ids: [1],
+        ...(id === 103 ? { error_message: 'upstream returned 401 unauthenticated' } : {}),
+      };
+    },
+    async getAccountUsage(id) {
+      return { codex_7d_used_percent: id === 102 ? 80 : 20 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+
+  const snapshot = await service.inspectRuleInventory(rule);
+
+  assert.equal(snapshot.trackedAccounts, 3);
+  assert.equal(snapshot.effectiveAccounts, 1);
+  assert.equal(snapshot.lowQuotaAccounts, 1);
+  assert.equal(snapshot.repairingAccounts, 1);
+  assert.equal((await repository.listRecoveries()).length, 1);
+});
+
+test('inventory at the inclusive threshold orders only enough to reach the target', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.mode = 'observe';
+  rule.minAvailableAccounts = 2;
+  rule.targetAvailableAccounts = 5;
+  rule.replenishQuantity = 3;
+  await trackedItem(repository, rule, 4, 104);
+  await trackedItem(repository, rule, 5, 105);
+  rule.lastTriggeredAt = null;
+  const gateway = {
+    async getAccount(id) {
+      return { id, platform: 'openai', status: 'active', schedulable: true, group_ids: [1] };
+    },
+    async getAccountUsage() {
+      return { codex_5h_used_percent: 10, codex_7d_used_percent: 20 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, {
+    client: {
+      async inventory({ quantity }) {
+        assert.equal(quantity, 3);
+        return { payload: { available: 10, estimated_total_fen: 900 } };
+      },
+    },
+  });
+
+  const result = await service.createOrderForRule(rule);
+
+  assert.equal(result.status, 'observed_need');
+  assert.equal(result.available, 2);
+  assert.equal(result.quantity, 3);
+});
+
+test('recovery saves claimed credentials before retrying Sub2API and verifies the same account', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 6, 106);
+  let claimCalls = 0;
+  let applyFails = true;
+  const gateway = {
+    async applyOAuthCredentials(id, credentials) {
+      assert.equal(id, 106);
+      assert.equal(credentials.access_token, 'repaired-token');
+      if (applyFails) throw new Error('temporary Sub2API failure');
+    },
+    async testAccount(id) {
+      assert.equal(id, 106);
+      return { success: true };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, {
+    client: {
+      async claimRecovery() {
+        claimCalls += 1;
+        return { payload: { credentials: { access_token: 'repaired-token' }, credential_version: 'v2' } };
+      },
+    },
+  });
+  const job = await repository.upsertRecovery({
+    recoveryKey: `item:${tracked.id}:credential:v1`,
+    supplierRecoveryId: 'recovery-6',
+    orderItemId: tracked.id,
+    ruleId: rule.id,
+    sub2apiAccountId: 106,
+    accountKey: tracked.externalAccountKey,
+    status: 'claimable',
+    claimUrlCiphertext: service.vault.encrypt({ claimUrl: '/api/customer/recoveries/6/claim?ticket=ticket' }),
+  });
+
+  await assert.rejects(service.claimRecovery(job.id), /temporary Sub2API failure/);
+  let saved = await repository.getRecovery(job.id);
+  assert.equal(saved.status, 'retry_wait');
+  assert.ok(saved.credentialCiphertext);
+  assert.equal(claimCalls, 1);
+
+  applyFails = false;
+  await service.claimRecovery(job.id);
+  saved = await repository.getRecovery(job.id);
+  assert.equal(saved.status, 'recovered');
+  assert.equal(saved.credentialVersion, 'v2');
+  assert.equal(claimCalls, 1);
+  assert.equal((await repository.getOrderItem(tracked.id)).verificationStatus, 'repaired');
+});
