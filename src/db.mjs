@@ -19,7 +19,7 @@ export function createSourcePool(config) {
   return createPool(
     config.sourceDatabaseUrl,
     'apistation-finops-source-reader',
-    3,
+    config.sourceDatabasePoolMax ?? 3,
     config.sourceStatementTimeoutMs ?? 10_000,
   );
 }
@@ -28,7 +28,7 @@ export function createFinopsPool(config) {
   return createPool(
     config.finopsDatabaseUrl,
     'apistation-finops',
-    5,
+    config.finopsDatabasePoolMax ?? 8,
     config.finopsStatementTimeoutMs ?? 30_000,
   );
 }

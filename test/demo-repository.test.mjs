@@ -187,6 +187,8 @@ test('demo supplier connections support create, edit, sync, account links, and a
   assert.equal(details.connection.connectionStatus, 'ok');
   assert.equal(details.keys.length, 1);
   assert.equal(details.checks.length, 1);
+  assert.equal('accounts' in details, false);
+  assert.ok((await repository.listSupplierConnectionAccountCandidates(created.id)).items.length > 0);
 
   const key = details.keys[0];
   await repository.setSupplierKeyAccountLink(key.id, 2742, true);

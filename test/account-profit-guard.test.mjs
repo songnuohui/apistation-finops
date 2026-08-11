@@ -85,6 +85,36 @@ test('profit guard auto-assigns only platform-matched groups within the inclusiv
   assert.deepEqual(calls.filter((item) => item.action === 'add_group').map((item) => item.groupId), [20, 30]);
 });
 
+test('target margin range adds preferred groups without removing a safe existing group below the target range', async () => {
+  const updates = [];
+  const repository = {
+    async recordProfitGuardEvaluation() {},
+    async recordProfitGuardError() {},
+  };
+  const gateway = {
+    async getAccount() { return { group_ids: [10] }; },
+    async updateAccountGroups(_accountId, groupIds) { updates.push(groupIds); },
+  };
+  const service = new AccountProfitGuardService(repository, gateway);
+  const result = await service.evaluateCandidate({
+    accountId: 8,
+    platform: 'openai',
+    upstreamMultiplier: 0.085,
+    minimumMargin: 0.1,
+    allowEmptyGroups: true,
+    autoAssignEnabled: true,
+    targetMarginMin: 0.2,
+    targetMarginMax: 0.35,
+  }, new Map([
+    [10, { id: 10, platform: 'openai', rate_multiplier: 0.1 }],
+    [20, { id: 20, platform: 'openai', rate_multiplier: 0.12 }],
+  ]));
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(result.added, [20]);
+  assert.deepEqual(updates, [[10, 20]]);
+});
+
 test('profit guard applies removals and auto-assignment in one update', async () => {
   const updates = [];
   const repository = {

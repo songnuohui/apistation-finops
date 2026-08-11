@@ -364,6 +364,13 @@ async function api(request,res,url){
   if(request.method==='GET'&&supplierConnectionDetails){
     return json(res,200,await repository.getSupplierConnectionDetails(Number(supplierConnectionDetails[1])));
   }
+  const supplierConnectionAccountCandidates=/^\/api\/supplier-connections\/(\d+)\/account-candidates$/.exec(url.pathname);
+  if(request.method==='GET'&&supplierConnectionAccountCandidates){
+    return json(res,200,await repository.listSupplierConnectionAccountCandidates(
+      Number(supplierConnectionAccountCandidates[1]),
+      {search:searchTerm(url.searchParams),limit:100},
+    ));
+  }
   const supplierProfitGuardDefault=/^\/api\/supplier-connections\/(\d+)\/profit-guard-default$/.exec(url.pathname);
   if(request.method==='GET'&&supplierProfitGuardDefault){
     return json(res,200,await repository.getSupplierProfitGuardDefault(Number(supplierProfitGuardDefault[1])));
@@ -809,7 +816,12 @@ const server=http.createServer(async(request,res)=>{
     if((url.pathname==='/'||!path.extname(url.pathname))&&!authorize(request,config).ok)return redirect(res,'/login');
     return await staticFile(res,url);
   }catch(error){console.error('[request]',error);if(!res.headersSent)json(res,error.statusCode||500,{error:error.statusCode?error.message:'internal server error'});else res.end();}
-  finally{if(config.nodeEnv==='development')console.info(`[http] ${request.method} ${request.url} ${res.statusCode} ${Date.now()-started}ms`);}
+  finally{
+    const duration=Date.now()-started;
+    const pathname=String(request.url||'').split('?')[0];
+    if(config.nodeEnv==='development')console.info(`[http] ${request.method} ${pathname} ${res.statusCode} ${duration}ms`);
+    else if(duration>=1_000)console.warn(`[slow-http] ${request.method} ${pathname} ${res.statusCode} ${duration}ms`);
+  }
 });
 
 async function start(){

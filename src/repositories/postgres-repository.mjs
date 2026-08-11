@@ -3959,34 +3959,40 @@ export class PostgresRepository {
 
   async getSupplierConnectionDetails(connectionId) {
     const connection = await this.getSupplierConnection(connectionId);
-    const [keys,balances,checks,alerts,links,accounts] = await Promise.all([
-      this.pool.query(`SELECT id,external_key_id,name,masked_key,status,group_id,group_name,rate_multiplier,
+    const client = await this.pool.connect();
+    let keys;
+    let balances;
+    let checks;
+    let alerts;
+    let links;
+    try {
+      keys = await client.query(`SELECT id,external_key_id,name,masked_key,status,group_id,group_name,rate_multiplier,
         quota_total,quota_used,quota_remaining,quota_currency,expires_at,last_used_at,last_check_status,
         last_check_method,last_check_at,last_check_error,first_seen_at,last_seen_at,removed_at
         FROM ${this.schema}.supplier_keys WHERE connection_id=$1 AND removed_at IS NULL
-        ORDER BY (removed_at IS NULL) DESC,(last_check_status='failed') DESC,name,id`, [connectionId]),
-      this.pool.query(`SELECT balance,currency,observed_at FROM ${this.schema}.supplier_balance_snapshots
-        WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 60`, [connectionId]),
-      this.pool.query(`SELECT c.id,c.supplier_key_id,k.name AS key_name,k.masked_key,c.status,c.method,c.http_status,
-        c.latency_ms,c.error_code,c.error_message,c.checked_at
-        FROM ${this.schema}.supplier_key_checks c JOIN ${this.schema}.supplier_keys k ON k.id=c.supplier_key_id
-        WHERE k.connection_id=$1 AND k.removed_at IS NULL AND k.status='active'
-        ORDER BY c.checked_at DESC,c.id DESC LIMIT 100`, [connectionId]),
-      this.pool.query(`SELECT id,supplier_key_id,alert_type,severity,status,title,message,details,first_seen_at,
-        last_seen_at,occurrence_count,acknowledged_at,acknowledged_by,resolved_at
-        FROM ${this.schema}.supplier_alert_events WHERE connection_id=$1
-        ORDER BY (status='open') DESC,last_seen_at DESC,id DESC LIMIT 100`, [connectionId]),
-      this.pool.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name,
+        ORDER BY (removed_at IS NULL) DESC,(last_check_status='failed') DESC,name,id`, [connectionId]);
+      links = await client.query(`SELECT l.supplier_key_id,l.source_account_id,a.name AS account_name,
         p.enabled AS profit_guard_enabled,p.minimum_margin,p.threshold_mode,p.minimum_sale_multiplier,
         p.allow_empty_groups,p.last_evaluated_at,p.last_action_at,p.last_error
         FROM ${this.schema}.supplier_account_links l
         LEFT JOIN ${this.schema}.dim_accounts a ON a.source_account_id=l.source_account_id
         LEFT JOIN ${this.schema}.account_profit_guard_policies p ON p.source_account_id=l.source_account_id
         JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id AND k.removed_at IS NULL
-        WHERE k.connection_id=$1`, [connectionId]),
-      this.pool.query(`SELECT source_account_id AS id,name,platform,status FROM ${this.schema}.dim_accounts
-        WHERE source_deleted_at IS NULL ORDER BY name,source_account_id LIMIT 5000`),
-    ]);
+        WHERE k.connection_id=$1`, [connectionId]);
+      balances = await client.query(`SELECT balance,currency,observed_at FROM ${this.schema}.supplier_balance_snapshots
+        WHERE connection_id=$1 ORDER BY observed_at DESC,id DESC LIMIT 60`, [connectionId]);
+      checks = await client.query(`SELECT c.id,c.supplier_key_id,k.name AS key_name,k.masked_key,c.status,c.method,c.http_status,
+        c.latency_ms,c.error_code,c.error_message,c.checked_at
+        FROM ${this.schema}.supplier_key_checks c JOIN ${this.schema}.supplier_keys k ON k.id=c.supplier_key_id
+        WHERE k.connection_id=$1 AND k.removed_at IS NULL AND k.status='active'
+        ORDER BY c.checked_at DESC,c.id DESC LIMIT 100`, [connectionId]);
+      alerts = await client.query(`SELECT id,supplier_key_id,alert_type,severity,status,title,message,details,first_seen_at,
+        last_seen_at,occurrence_count,acknowledged_at,acknowledged_by,resolved_at
+        FROM ${this.schema}.supplier_alert_events WHERE connection_id=$1
+        ORDER BY (status='open') DESC,last_seen_at DESC,id DESC LIMIT 100`, [connectionId]);
+    } finally {
+      client.release();
+    }
     const linksByKey = new Map();
     for (const row of links.rows) {
       if (!linksByKey.has(String(row.supplier_key_id))) linksByKey.set(String(row.supplier_key_id), []);
@@ -4028,7 +4034,32 @@ export class PostgresRepository {
         lastSeenAt:row.last_seen_at,occurrenceCount:Number(row.occurrence_count),acknowledgedAt:row.acknowledged_at,
         acknowledgedBy:row.acknowledged_by,resolvedAt:row.resolved_at,
       })),
-      accounts: accounts.rows.map((row) => ({ id:Number(row.id),name:row.name,platform:row.platform,status:row.status })),
+    };
+  }
+
+  async listSupplierConnectionAccountCandidates(connectionId, { search = '', limit = 100 } = {}) {
+    await this.getSupplierConnection(connectionId);
+    const result = await this.pool.query(`
+      SELECT a.source_account_id AS id,a.name,a.platform,a.status
+      FROM ${this.schema}.dim_accounts a
+      WHERE a.source_deleted_at IS NULL
+        AND a.status='active'
+        AND ($2='' OR a.name ILIKE '%'||$2||'%' OR a.platform ILIKE '%'||$2||'%'
+          OR a.source_account_id::text=$2)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${this.schema}.supplier_account_links l
+          JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
+          WHERE l.source_account_id=a.source_account_id
+            AND k.connection_id=$1
+            AND k.removed_at IS NULL
+        )
+      ORDER BY a.name,a.source_account_id
+      LIMIT $3`, [connectionId, String(search || '').trim(), Math.min(Math.max(Number(limit) || 100, 1), 100)]);
+    return {
+      items: result.rows.map((row) => ({
+        id:Number(row.id),name:row.name,platform:row.platform,status:row.status,
+      })),
     };
   }
 

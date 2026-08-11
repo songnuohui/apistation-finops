@@ -116,6 +116,8 @@ test('source and FinOps pools keep independent statement timeout boundaries', as
     AUTH_DISABLED: 'true',
     SOURCE_DATABASE_URL: 'postgres://source',
     FINOPS_DATABASE_URL: 'postgres://finops',
+    SOURCE_DATABASE_POOL_MAX: '4',
+    FINOPS_DATABASE_POOL_MAX: '9',
   });
   const sourcePool = createSourcePool(config);
   const finopsPool = createFinopsPool(config);
@@ -124,6 +126,8 @@ test('source and FinOps pools keep independent statement timeout boundaries', as
     assert.equal(config.finopsStatementTimeoutMs, 30_000);
     assert.equal(sourcePool.options.statement_timeout, 10_000);
     assert.equal(finopsPool.options.statement_timeout, 30_000);
+    assert.equal(sourcePool.options.max, 4);
+    assert.equal(finopsPool.options.max, 9);
   } finally {
     await Promise.all([sourcePool.end(), finopsPool.end()]);
   }

@@ -24,9 +24,13 @@ const editorSaving = ref(false);
 const detail = ref<AnyRecord | null>(null);
 const detailLoading = ref(false);
 const detailTab = ref<DetailTab>('keys');
+const qualityLoading = ref(false);
 const syncingId = ref<number | null>(null);
 const linkKey = ref<AnyRecord | null>(null);
 const accountSearch = ref('');
+const accountCandidates = ref<AnyRecord[]>([]);
+const accountCandidatesLoading = ref(false);
+const acknowledgingAlertId = ref<number | null>(null);
 const targetEditor = ref<AnyRecord | null>(null);
 const targetModels = ref<string[]>([]);
 const targetModelsLoading = ref(false);
@@ -40,6 +44,10 @@ const supplierProfitGuardEditor = ref<AnyRecord | null>(null);
 const supplierProfitGuardSaving = ref(false);
 const deletingResource = ref<string | null>(null);
 let searchTimer: number | undefined;
+let accountSearchTimer: number | undefined;
+let detailRequestToken = 0;
+let qualityRequestToken = 0;
+let accountRequestToken = 0;
 
 const adapterLabels: Record<string, string> = {
   auto: '自动识别',
@@ -102,11 +110,10 @@ const availableAccounts = computed(() => {
     if (Number(key.id) === currentKeyId) continue;
     for (const link of key.accountLinks || []) linkedElsewhere.add(Number(link.accountId));
   }
-  const needle = accountSearch.value.trim().toLowerCase();
-  return (detail.value.accounts || []).filter((account: AnyRecord) => {
+  return accountCandidates.value.filter((account: AnyRecord) => {
     if (account.status !== 'active' || linkedElsewhere.has(Number(account.id)) || linkedHere.has(Number(account.id))) return false;
-    return !needle || `${account.name} ${account.platform} ${account.id}`.toLowerCase().includes(needle);
-  }).slice(0, 80);
+    return true;
+  });
 });
 
 function notify(message: string) {
@@ -342,9 +349,10 @@ async function deleteKey(key: AnyRecord) {
   try {
     const result = await send(`/supplier-keys/${key.id}`, 'DELETE', {});
     notify(`供应商密钥已删除，已处理 ${result.deletedAccounts?.length || 0} 个 Sub2API 账号`);
-    const connectionId = Number(detail.value?.connection?.id);
-    await loadConnections();
-    if (connectionId) await openDetails(connectionId, 'keys');
+    if (detail.value) {
+      detail.value.keys = detail.value.keys.filter((item: AnyRecord) => Number(item.id) !== Number(key.id));
+    }
+    void loadConnections();
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -357,8 +365,12 @@ async function syncConnection(connectionId: number) {
   try {
     const result = await send(`/supplier-connections/${connectionId}/sync`, 'POST', {});
     notify(result.sync?.ok === false ? '同步未完成，请查看连接异常' : '供应商连接已同步');
-    await loadConnections();
-    if (detail.value?.connection?.id === connectionId) await openDetails(connectionId, detailTab.value);
+    await Promise.all([
+      loadConnections(),
+      detail.value?.connection?.id === connectionId
+        ? openDetails(connectionId, detailTab.value)
+        : Promise.resolve(),
+    ]);
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -366,46 +378,109 @@ async function syncConnection(connectionId: number) {
   }
 }
 
+async function loadQuality(connectionId: number) {
+  if (!detail.value || Number(detail.value.connection?.id) !== connectionId) return;
+  const requestToken = ++qualityRequestToken;
+  qualityLoading.value = true;
+  try {
+    const quality = await get(`/supplier-connections/${connectionId}/quality?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`);
+    if (requestToken === qualityRequestToken && Number(detail.value?.connection?.id) === connectionId) {
+      detail.value = { ...detail.value, quality };
+    }
+  } catch (error: any) {
+    if (requestToken === qualityRequestToken) notify(error.message);
+  } finally {
+    if (requestToken === qualityRequestToken) qualityLoading.value = false;
+  }
+}
+
+async function selectDetailTab(tab: DetailTab) {
+  detailTab.value = tab;
+  const connectionId = Number(detail.value?.connection?.id);
+  if (tab === 'quality' && connectionId && !detail.value?.quality) await loadQuality(connectionId);
+}
+
 async function openDetails(connectionId: number, tab: DetailTab = 'keys') {
+  const requestToken = ++detailRequestToken;
   detailLoading.value = true;
   detailTab.value = tab;
   try {
-    const [connectionDetail, quality] = await Promise.all([
-      get(`/supplier-connections/${connectionId}/details`),
-      get(`/supplier-connections/${connectionId}/quality?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`),
-    ]);
-    detail.value = { ...connectionDetail, quality };
+    const connectionDetail = await get(`/supplier-connections/${connectionId}/details`);
+    if (requestToken !== detailRequestToken) return;
+    detail.value = { ...connectionDetail, quality: null };
     if (String(route.query.connection || '') !== String(connectionId)) {
       await router.replace({ path: '/suppliers', query: { connection: String(connectionId) } });
     }
+    if (tab === 'quality') await loadQuality(connectionId);
   } catch (error: any) {
-    notify(error.message);
+    if (requestToken === detailRequestToken) notify(error.message);
   } finally {
-    detailLoading.value = false;
+    if (requestToken === detailRequestToken) detailLoading.value = false;
   }
 }
 
 async function closeDetails() {
+  detailRequestToken += 1;
+  qualityRequestToken += 1;
+  accountRequestToken += 1;
   detail.value = null;
+  qualityLoading.value = false;
   linkKey.value = null;
+  accountCandidates.value = [];
+  accountCandidatesLoading.value = false;
   targetEditor.value = null;
   supplierProfitGuardEditor.value = null;
   if (route.query.connection) await router.replace('/suppliers');
 }
 
-function openLinkPicker(key: AnyRecord) {
+async function loadAccountCandidates() {
+  const connectionId = Number(detail.value?.connection?.id);
+  if (!connectionId || !linkKey.value) return;
+  const requestToken = ++accountRequestToken;
+  accountCandidatesLoading.value = true;
+  try {
+    const result = await get(`/supplier-connections/${connectionId}/account-candidates?${query({ search: accountSearch.value })}`);
+    if (requestToken === accountRequestToken && linkKey.value && Number(detail.value?.connection?.id) === connectionId) {
+      accountCandidates.value = result.items || [];
+    }
+  } catch (error: any) {
+    if (requestToken === accountRequestToken) notify(error.message);
+  } finally {
+    if (requestToken === accountRequestToken) accountCandidatesLoading.value = false;
+  }
+}
+
+async function openLinkPicker(key: AnyRecord) {
   linkKey.value = key;
   accountSearch.value = '';
+  accountCandidates.value = [];
+  await loadAccountCandidates();
+}
+
+function closeLinkPicker() {
+  accountRequestToken += 1;
+  accountCandidatesLoading.value = false;
+  accountCandidates.value = [];
+  linkKey.value = null;
 }
 
 async function linkAccount(accountId: number) {
   if (!linkKey.value || !detail.value) return;
+  const selectedKey = linkKey.value;
+  const account = accountCandidates.value.find((item) => Number(item.id) === accountId);
   try {
-    const result = await send(`/supplier-keys/${linkKey.value.id}/account-link`, 'PATCH', { accountId, linked: true });
+    const result = await send(`/supplier-keys/${selectedKey.id}/account-link`, 'PATCH', { accountId, linked: true });
     notify(result.sync?.ok === false ? '账号已关联，供应商同步暂未成功' : '账号已关联并切换为供应商密钥自动倍率');
-    const connectionId = Number(detail.value.connection.id);
-    linkKey.value = null;
-    await Promise.all([loadConnections(), openDetails(connectionId, 'keys')]);
+    const key = detail.value.keys.find((item: AnyRecord) => Number(item.id) === Number(selectedKey.id));
+    if (key && !key.accountLinks.some((item: AnyRecord) => Number(item.accountId) === accountId)) {
+      key.accountLinks.push({
+        accountId,
+        accountName: account?.name || `账号 #${accountId}`,
+        profitGuard: null,
+      });
+    }
+    closeLinkPicker();
+    void loadConnections();
   } catch (error: any) {
     notify(error.message);
   }
@@ -416,8 +491,9 @@ async function unlinkAccount(keyId: number, accountId: number) {
   try {
     await send(`/supplier-keys/${keyId}/account-link`, 'PATCH', { accountId, linked: false });
     notify('已解除本地账号关联');
-    const connectionId = Number(detail.value.connection.id);
-    await Promise.all([loadConnections(), openDetails(connectionId, 'keys')]);
+    const key = detail.value.keys.find((item: AnyRecord) => Number(item.id) === keyId);
+    if (key) key.accountLinks = key.accountLinks.filter((item: AnyRecord) => Number(item.accountId) !== accountId);
+    void loadConnections();
   } catch (error: any) {
     notify(error.message);
   }
@@ -476,10 +552,10 @@ async function saveProfitGuard() {
     } else {
       notify('利润保护已保存并立即检查，当前销售分组均满足保护条件');
     }
-    await Promise.all([
-      loadConnections(),
-      openDetails(Number(detail.value.connection.id), 'keys'),
-    ]);
+    const key = detail.value.keys.find((item: AnyRecord) => Number(item.id) === Number(current.keyId));
+    const link = key?.accountLinks.find((item: AnyRecord) => Number(item.accountId) === Number(current.accountId));
+    if (link) link.profitGuard = result.policy || link.profitGuard;
+    void loadConnections();
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -531,7 +607,22 @@ async function saveSupplierProfitGuard() {
         ? `；已移除 ${result.evaluation.changed} 个账号中的亏损分组`
         : '';
     notify(`统一利润保护已应用到 ${result.appliedAccountCount || 0} 个关联账号${evaluationNote}`);
-    await openDetails(Number(detail.value.connection.id), 'keys');
+    const policy = {
+      enabled: Boolean(current.enabled),
+      minimumMargin: Number(current.minimumMarginPercent || 0) / 100,
+      thresholdMode: current.thresholdMode,
+      minimumSaleMultiplier: current.thresholdMode === 'minimum_sale_multiplier'
+        ? Number(current.minimumSaleMultiplier)
+        : null,
+      allowEmptyGroups: Boolean(current.allowEmptyGroups),
+      lastEvaluatedAt: null,
+      lastActionAt: null,
+      lastError: result.evaluation?.error || '',
+    };
+    for (const key of detail.value.keys) {
+      for (const link of key.accountLinks || []) link.profitGuard = { ...policy };
+    }
+    void loadConnections();
   } catch (error: any) {
     notify(error.message);
   } finally {
@@ -540,14 +631,25 @@ async function saveSupplierProfitGuard() {
 }
 
 async function acknowledgeAlert(alertId: number) {
-  if (!detail.value) return;
+  const connectionId = Number(detail.value?.connection?.id);
+  if (!connectionId) return;
   try {
-    await send(`/supplier-alerts/${alertId}/acknowledge`, 'POST', {});
+    acknowledgingAlertId.value = alertId;
+    const result = await send(`/supplier-alerts/${alertId}/acknowledge`, 'POST', {});
+    if (Number(detail.value?.connection?.id) === connectionId) {
+      const alert = detail.value?.alerts.find((item: AnyRecord) => Number(item.id) === alertId);
+      if (alert) Object.assign(alert, result);
+      if (detail.value) {
+        detail.value.connection.openAlertCount = Math.max(0, Number(detail.value.connection.openAlertCount || 0) - 1);
+      }
+    }
+    const connection = connectionItems.value.find((item) => Number(item.id) === connectionId);
+    if (connection) connection.openAlertCount = Math.max(0, Number(connection.openAlertCount || 0) - 1);
     notify('告警已确认');
-    const connectionId = Number(detail.value.connection.id);
-    await Promise.all([loadConnections(), openDetails(connectionId, 'alerts')]);
   } catch (error: any) {
     notify(error.message);
+  } finally {
+    acknowledgingAlertId.value = null;
   }
 }
 
@@ -604,7 +706,7 @@ async function saveTarget() {
     );
     targetEditor.value = null;
     notify('主动探测目标已保存');
-    await openDetails(Number(detail.value.connection.id), 'quality');
+    await loadQuality(Number(detail.value.connection.id));
   } catch (error: any) {
     notify(error.message);
   }
@@ -615,7 +717,7 @@ async function runTarget(targetId: number) {
   try {
     const result = await send(`/supplier-quality-targets/${targetId}/run`, 'POST', {});
     notify(result.ok === false ? '主动模型探测失败，已记录失败样本' : '主动模型探测已完成');
-    await openDetails(Number(detail.value.connection.id), 'quality');
+    await loadQuality(Number(detail.value.connection.id));
   } catch (error: any) {
     notify(error.message);
   }
@@ -626,7 +728,7 @@ async function deleteTarget(targetId: number) {
   try {
     await send(`/supplier-quality-targets/${targetId}`, 'DELETE', {});
     notify('主动探测目标已删除');
-    await openDetails(Number(detail.value.connection.id), 'quality');
+    await loadQuality(Number(detail.value.connection.id));
   } catch (error: any) {
     notify(error.message);
   }
@@ -747,9 +849,16 @@ watch(search, () => {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(loadConnections, 250);
 });
+watch(accountSearch, () => {
+  if (!linkKey.value) return;
+  window.clearTimeout(accountSearchTimer);
+  accountSearchTimer = window.setTimeout(loadAccountCandidates, 250);
+});
 watch(() => props.refreshToken, () => loadConnections());
 watch([() => props.range, () => props.rangeStart, () => props.rangeEnd], () => {
-  if (detail.value?.connection?.id) openDetails(Number(detail.value.connection.id), detailTab.value);
+  if (!detail.value?.connection?.id) return;
+  detail.value = { ...detail.value, quality: null };
+  if (detailTab.value === 'quality') void loadQuality(Number(detail.value.connection.id));
 });
 watch(() => editor.value?.adapterType, () => syncEditorAuthMode());
 watch(() => targetEditor.value?.keyId, (value, previous) => {
@@ -912,11 +1021,11 @@ onMounted(async () => {
             <div><span>下次同步</span><strong>{{ detail.connection.enabled ? dateTime(detail.connection.nextSyncAt) : '已停用' }}</strong><small>每 {{ detail.connection.inventoryIntervalSeconds }} 秒读取一次</small></div>
           </div>
           <div class="detail-tabs">
-            <button :class="{ active: detailTab === 'keys' }" @click="detailTab = 'keys'">API 密钥 <small>{{ visibleKeys.length }}</small></button>
-            <button :class="{ active: detailTab === 'quality' }" @click="detailTab = 'quality'">质量评分 <small>{{ detail.quality?.metrics?.sampleCount || 0 }}</small></button>
-            <button :class="{ active: detailTab === 'balances' }" @click="detailTab = 'balances'">余额历史 <small>{{ detail.balances.length }}</small></button>
-            <button :class="{ active: detailTab === 'checks' }" @click="detailTab = 'checks'">巡检记录 <small>{{ detail.checks.length }}</small></button>
-            <button :class="{ active: detailTab === 'alerts' }" @click="detailTab = 'alerts'">告警 <small>{{ openAlerts.length }}</small></button>
+            <button :class="{ active: detailTab === 'keys' }" @click="selectDetailTab('keys')">API 密钥 <small>{{ visibleKeys.length }}</small></button>
+            <button :class="{ active: detailTab === 'quality' }" @click="selectDetailTab('quality')">质量评分 <small>{{ detail.quality?.metrics?.sampleCount || 0 }}</small></button>
+            <button :class="{ active: detailTab === 'balances' }" @click="selectDetailTab('balances')">余额历史 <small>{{ detail.balances.length }}</small></button>
+            <button :class="{ active: detailTab === 'checks' }" @click="selectDetailTab('checks')">巡检记录 <small>{{ detail.checks.length }}</small></button>
+            <button :class="{ active: detailTab === 'alerts' }" @click="selectDetailTab('alerts')">告警 <small>{{ openAlerts.length }}</small></button>
           </div>
 
           <section v-if="detailTab === 'keys'" class="detail-section">
@@ -954,6 +1063,7 @@ onMounted(async () => {
 
           <section v-else-if="detailTab === 'quality'" class="detail-section">
             <div class="detail-section-head"><div><h3>供应商质量评分</h3><p>当前模式：{{ qualityModeLabel(detail.connection.qualityMonitorMode) }}。展示已有质量样本，不新增额外耗时监控。</p></div><button class="primary-button" :disabled="!['active','hybrid'].includes(detail.connection.qualityMonitorMode)" @click="openTargetEditor()"><Plus :size="16" />添加主动目标</button></div>
+            <div v-if="qualityLoading && !detail.quality" class="table-empty"><RefreshCw :size="16" class="spin" />正在读取质量评分</div>
             <div class="supplier-metrics quality-metrics">
               <div><span>风险调整分</span><strong>{{ detail.quality?.score?.riskAdjustedScore == null ? '--' : Number(detail.quality.score.riskAdjustedScore).toFixed(1) }}</strong><small>{{ detail.quality?.score?.dataStatus || '暂无评分' }}</small></div>
               <div><span>价格分</span><strong>{{ detail.quality?.score?.priceScore == null ? '--' : Number(detail.quality.score.priceScore).toFixed(1) }}</strong><small>同模型供应商间比较</small></div>
@@ -992,7 +1102,7 @@ onMounted(async () => {
               <article v-for="alert in detail.alerts" :key="alert.id" :class="['alert-detail', alert.severity]">
                 <AlertTriangle :size="18" />
                 <div><strong>{{ alert.title }}</strong><p>{{ alert.message }}</p><small>{{ dateTime(alert.lastSeenAt) }} · 出现 {{ alert.occurrenceCount }} 次 · {{ statusLabel(alert.status) }}</small></div>
-                <button v-if="alert.status === 'open'" class="small-button" @click="acknowledgeAlert(alert.id)"><Check :size="14" />确认</button>
+                <button v-if="alert.status === 'open'" class="small-button" :disabled="acknowledgingAlertId === alert.id" @click="acknowledgeAlert(alert.id)"><RefreshCw v-if="acknowledgingAlertId === alert.id" :size="14" class="spin" /><Check v-else :size="14" />确认</button>
               </article>
               <div v-if="!detail.alerts.length" class="table-empty">当前没有供应商告警</div>
             </div>
@@ -1001,11 +1111,11 @@ onMounted(async () => {
       </section>
     </div>
 
-    <div v-if="linkKey" class="modal-layer nested-modal" @click.self="linkKey = null">
+    <div v-if="linkKey" class="modal-layer nested-modal" @click.self="closeLinkPicker">
       <section class="modal link-picker-modal">
-        <header><div><h2>关联本地账号</h2><p>{{ linkKey.name || linkKey.maskedKey }} · {{ linkKey.groupName || '未分组' }}</p></div><button class="icon-button" @click="linkKey = null"><X :size="19" /></button></header>
+        <header><div><h2>关联本地账号</h2><p>{{ linkKey.name || linkKey.maskedKey }} · {{ linkKey.groupName || '未分组' }}</p></div><button class="icon-button" @click="closeLinkPicker"><X :size="19" /></button></header>
         <label class="search-box full-search"><Link2 :size="17" /><input v-model="accountSearch" placeholder="搜索账号、平台或 ID" /></label>
-        <div class="table-wrap compact-table"><table><thead><tr><th>本地账号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="account in availableAccounts" :key="account.id"><td><strong>{{ account.name || `账号 #${account.id}` }}</strong><small>ID {{ account.id }}</small></td><td>{{ account.platform || '--' }}</td><td><span class="status-pill success">可用</span></td><td><button class="small-button" @click="linkAccount(account.id)"><Link2 :size="14" />关联</button></td></tr><tr v-if="!availableAccounts.length"><td colspan="4" class="table-empty">没有可关联的本地账号</td></tr></tbody></table></div>
+        <div class="table-wrap compact-table"><table><thead><tr><th>本地账号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="account in availableAccounts" :key="account.id"><td><strong>{{ account.name || `账号 #${account.id}` }}</strong><small>ID {{ account.id }}</small></td><td>{{ account.platform || '--' }}</td><td><span class="status-pill success">可用</span></td><td><button class="small-button" @click="linkAccount(account.id)"><Link2 :size="14" />关联</button></td></tr><tr v-if="accountCandidatesLoading"><td colspan="4" class="table-empty"><RefreshCw :size="15" class="spin" />正在读取账号</td></tr><tr v-else-if="!availableAccounts.length"><td colspan="4" class="table-empty">没有可关联的本地账号</td></tr></tbody></table></div>
       </section>
     </div>
 

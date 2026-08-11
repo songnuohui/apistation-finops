@@ -1123,7 +1123,24 @@ export class DemoRepository {
       balances: detail.balances,
       checks: detail.checks,
       alerts: detail.alerts,
-      accounts: this.accounts.map((item) => ({ id:item.id,name:item.name,platform:item.platform,status:item.status })),
+    };
+  }
+
+  async listSupplierConnectionAccountCandidates(connectionId, { search = '', limit = 100 } = {}) {
+    await this.getSupplierConnection(connectionId);
+    const linked = new Set(
+      this.supplierDetail(connectionId).keys
+        .filter((key) => !key.removedAt)
+        .flatMap((key) => key.accountLinks || [])
+        .map((item) => Number(item.accountId)),
+    );
+    const needle = String(search || '').trim().toLowerCase();
+    return {
+      items: this.accounts
+        .filter((item) => item.status === 'active' && !linked.has(Number(item.id)))
+        .filter((item) => !needle || `${item.name} ${item.platform} ${item.id}`.toLowerCase().includes(needle))
+        .slice(0, Math.min(Math.max(Number(limit) || 100, 1), 100))
+        .map((item) => ({ id:item.id,name:item.name,platform:item.platform,status:item.status })),
     };
   }
 

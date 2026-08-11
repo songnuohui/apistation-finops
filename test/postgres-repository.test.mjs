@@ -76,6 +76,54 @@ test('supplier connection profit guard coverage includes linked account policies
   assert.equal(connection.profitGuardFullyEnabled, true);
 });
 
+test('supplier connection details reuse one checked-out client and defer account candidates', async () => {
+  const clientQueries = [];
+  let released = 0;
+  const client = {
+    async query(text) {
+      clientQueries.push(text);
+      if (text.includes('FROM "finops".supplier_keys WHERE connection_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".supplier_account_links')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".supplier_balance_snapshots')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".supplier_key_checks')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".supplier_alert_events')) return { rows: [], rowCount: 0 };
+      throw new Error(`unexpected detail query: ${text}`);
+    },
+    release() {
+      released += 1;
+    },
+  };
+  const pool = {
+    async query(text) {
+      if (!text.includes('SELECT c.*,s.name AS supplier_name')) throw new Error(`unexpected pool query: ${text}`);
+      return {
+        rows: [{
+          id: '9',
+          supplier_id: '4',
+          supplier_name: 'Provider A',
+          name: 'main',
+          adapter_type: 'sub2api',
+          base_url: 'https://provider.example',
+          auth_mode: 'password',
+          enabled: true,
+          inventory_interval_seconds: 600,
+        }],
+        rowCount: 1,
+      };
+    },
+    async connect() {
+      return client;
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+
+  const detail = await repository.getSupplierConnectionDetails(9);
+
+  assert.equal(clientQueries.length, 5);
+  assert.equal(released, 1);
+  assert.equal('accounts' in detail, false);
+});
+
 test('supplier key sync pins the status parameter to text in every SQL context', async () => {
   const queries = [];
   const client = {

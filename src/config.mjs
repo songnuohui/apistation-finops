@@ -166,6 +166,8 @@ export function loadConfig(env = process.env) {
     port: intValue(env.PORT, 8090, { min: 1, max: 65535 }),
     sourceDatabaseUrl,
     finopsDatabaseUrl,
+    sourceDatabasePoolMax: intValue(env.SOURCE_DATABASE_POOL_MAX, 3, { min: 1, max: 10 }),
+    finopsDatabasePoolMax: intValue(env.FINOPS_DATABASE_POOL_MAX, 8, { min: 2, max: 20 }),
     sourceStatementTimeoutMs: intValue(env.SOURCE_STATEMENT_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
     finopsStatementTimeoutMs: intValue(env.FINOPS_STATEMENT_TIMEOUT_MS, 30_000, { min: 5_000, max: 120_000 }),
     demoMode: sourceDatabaseUrl === '' && finopsDatabaseUrl === '',

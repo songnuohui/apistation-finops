@@ -172,6 +172,7 @@ export class SupplierMonitorService {
       // Portal access tokens are short lived. Keep the latest token encrypted
       // in the FinOps connection so the next cycle can reuse it. Passwords
       // remain the recovery path after expiry or a 401/403 response.
+      let persistAccessToken = Promise.resolve();
       if (connection.authMode === 'password'
         && (snapshot.accessToken || snapshot.sessionCookie)
         && this.repository.updateSupplierConnectionAccessToken) {
@@ -182,15 +183,17 @@ export class SupplierMonitorService {
           userId: snapshot.userId || '',
           accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
         };
-        await this.repository.updateSupplierConnectionAccessToken(
+        persistAccessToken = this.repository.updateSupplierConnectionAccessToken(
           connectionId,
           this.encryptCredentials(nextCredentials),
         );
       }
       for (const key of snapshot.keys) key.keyFingerprint = this.vault.fingerprint(key.rawKey || `${connection.id}:${key.externalId}`);
-      const linkedExternalIds = new Set(
-        await this.repository.listLinkedSupplierKeyExternalIds?.(connection.id) || [],
-      );
+      const [, linkedExternalIdRows] = await Promise.all([
+        persistAccessToken,
+        this.repository.listLinkedSupplierKeyExternalIds?.(connection.id) || Promise.resolve([]),
+      ]);
+      const linkedExternalIds = new Set(linkedExternalIdRows || []);
       const activeKeys = snapshot.keys.filter((key) => key.status === 'active');
       const linkedKeys = activeKeys.filter((key) => linkedExternalIds.has(String(key.externalId)));
       const optionalKeys = connection.activeCheckEnabled
@@ -199,7 +202,7 @@ export class SupplierMonitorService {
           .slice(0, Math.max(0, connection.activeCheckLimit - linkedKeys.length))
         : [];
       const candidates = [...linkedKeys, ...optionalKeys];
-      const checkResults = await mapConcurrent(candidates, 4, async (key) => {
+      const checkResultsPromise = mapConcurrent(candidates, 4, async (key) => {
         try {
           const check = await this.adapters.check(connection, credentials, snapshot, key);
           return { ...check, externalId: key.externalId };
@@ -208,18 +211,24 @@ export class SupplierMonitorService {
           return { externalId:key.externalId,status:'failed',method:'metadata',httpStatus:failure.httpStatus,errorCode:failure.code,errorMessage:failure.message };
         }
       });
-      let passiveObservations = [];
-      if (['passive', 'hybrid'].includes(connection.qualityMonitorMode || 'passive')
-        && this.adapters.collectPassiveQuality) {
+      const passiveObservationsPromise = (async () => {
+        if (!(['passive', 'hybrid'].includes(connection.qualityMonitorMode || 'passive')
+        && this.adapters.collectPassiveQuality)) {
+          return [];
+        }
         try {
-          passiveObservations = await this.adapters.collectPassiveQuality(connection, snapshot);
+          return await this.adapters.collectPassiveQuality(connection, snapshot);
         } catch (error) {
           console.warn(`[supplier-monitor] passive quality collection failed for ${connectionId}:`, error?.message || error);
+          return [];
         }
-      }
-      const activeResults = [];
-      if (['active', 'hybrid'].includes(connection.qualityMonitorMode || 'passive')
-        && this.repository.listDueSupplierQualityTargets) {
+      })();
+      const activeResultsPromise = (async () => {
+        const activeResults = [];
+        if (!(['active', 'hybrid'].includes(connection.qualityMonitorMode || 'passive')
+          && this.repository.listDueSupplierQualityTargets)) {
+          return activeResults;
+        }
         const dueTargets = (await this.repository.listDueSupplierQualityTargets(50))
           .filter((target) => Number(target.connectionId) === Number(connectionId));
         await mapConcurrent(dueTargets, 2, async (target) => {
@@ -256,7 +265,13 @@ export class SupplierMonitorService {
             });
           }
         });
-      }
+        return activeResults;
+      })();
+      const [checkResults, passiveObservations, activeResults] = await Promise.all([
+        checkResultsPromise,
+        passiveObservationsPromise,
+        activeResultsPromise,
+      ]);
       // The repository only needs sanitized inventory data. Do not pass portal
       // credentials or raw API keys across that ownership boundary.
       const sanitizedSnapshot = {
@@ -267,14 +282,16 @@ export class SupplierMonitorService {
       delete sanitizedSnapshot.sessionCookie;
       delete sanitizedSnapshot.userId;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
-      if (this.costRefreshHandler) {
+      const refreshCosts = async () => {
+        if (!this.costRefreshHandler) return;
         try {
           await this.costRefreshHandler({ connectionId });
         } catch (error) {
           console.warn(`[supplier-monitor] linked cost refresh failed for ${connectionId}:`, error?.message || error);
         }
-      }
-      if (this.profitGuardService) {
+      };
+      const evaluateProfitGuard = async () => {
+        if (!this.profitGuardService) return;
         try {
           await this.profitGuardService.evaluateSupplierConnection(connectionId);
         } catch (error) {
@@ -282,21 +299,28 @@ export class SupplierMonitorService {
           // a supplier-sync failure. The policy records its own error state.
           console.warn(`[supplier-monitor] profit guard failed for ${connectionId}:`, error?.message || error);
         }
-      }
-      if (passiveObservations.length && this.repository.recordSupplierQualityObservations) {
+      };
+      const persistPassiveQuality = async () => {
+        if (!passiveObservations.length || !this.repository.recordSupplierQualityObservations) return;
         try {
           await this.repository.recordSupplierQualityObservations(connectionId, passiveObservations);
         } catch (error) {
           console.warn(`[supplier-monitor] passive quality persistence failed for ${connectionId}:`, error?.message || error);
         }
-      }
-      for (const result of activeResults) {
+      };
+      const persistActiveQuality = () => mapConcurrent(activeResults, 2, async (result) => {
         try {
           await this.repository.recordSupplierQualityTargetResult(result.targetId, result.observation);
         } catch (error) {
           console.warn(`[supplier-monitor] active quality persistence failed for target ${result.targetId}:`, error?.message || error);
         }
-      }
+      });
+      await Promise.all([
+        refreshCosts(),
+        evaluateProfitGuard(),
+        persistPassiveQuality(),
+        persistActiveQuality(),
+      ]);
       for (const key of snapshot.keys) key.rawKey = '';
       if ('accessToken' in snapshot) snapshot.accessToken = '';
       if ('sessionCookie' in snapshot) snapshot.sessionCookie = '';
