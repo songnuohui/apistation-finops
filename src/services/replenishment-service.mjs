@@ -102,7 +102,7 @@ const OPEN_RECOVERY_STATUSES = new Set([
 ]);
 
 function textIncludesAuthFailure(...values) {
-  return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
+  return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token[_ -]?invalidated|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
 }
 
 function quotaNumber(...values) {
@@ -272,7 +272,7 @@ export class ReplenishmentService {
           ruleId: entry.order?.ruleId,
           accountName: entry.accountName,
           status: entry.status,
-          ready: true,
+          ready: entry.status !== 'waiting_supplier_recovery',
           attemptCount: entry.importAttemptCount,
           nextRetryAt: entry.nextImportRetryAt,
           lastError: entry.errorMessage,
@@ -366,6 +366,9 @@ export class ReplenishmentService {
       });
       return { ok: true, itemId: item.id, accountId: account?.id || item.sub2apiAccountId };
     } catch (error) {
+      if (await this.waitForSupplierRecovery({ item, rule: item.rule, order: item.order, error })) {
+        return { ok: false, itemId: item.id, status: 'waiting_supplier_recovery' };
+      }
       const attempts = Number(item.importAttemptCount || 0) + 1;
       const retryLimit = policy?.retryLimit === null || policy?.retryLimit === undefined ? null : Number(policy.retryLimit);
       const exhausted = retryLimit !== null && attempts > retryLimit;
@@ -431,6 +434,21 @@ export class ReplenishmentService {
             ? this.vault.encrypt({ claimUrl })
             : current?.claimUrlCiphertext || '',
         });
+        if (matchingItem.verificationStatus === 'failed'
+          && matchingItem.status !== 'waiting_supplier_recovery') {
+          await this.repository.updateOrderItem(matchingItem.id, {
+            status: 'waiting_supplier_recovery',
+            nextImportRetryAt: null,
+          });
+          await this.repository.addEvent({
+            ruleId: matchingItem.orderId ? (await this.repository.getOrder(matchingItem.orderId))?.ruleId : null,
+            orderId: matchingItem.orderId,
+            itemId: matchingItem.id,
+            eventType: 'import_recovery_waiting_supplier',
+            message: '账号凭据失效，已转入供应商恢复认领队列',
+            details: { recoveryId: saved.id, supplierRecoveryId: saved.supplierRecoveryId || '' },
+          });
+        }
         activeByItem.set(matchingItem.id, saved);
       }
       const next = numeric(payload.next_before_id ?? payload.nextBeforeId, 0);
@@ -472,24 +490,79 @@ export class ReplenishmentService {
         });
       }
       job = await this.repository.upsertRecovery({ ...job, status: 'updating_sub2api', lastError: '' });
-      await this.sub2ApiGateway.applyOAuthCredentials(job.sub2apiAccountId, credentials);
-      job = await this.repository.upsertRecovery({ ...job, status: 'verifying', lastError: '' });
-      await this.sub2ApiGateway.testAccount(job.sub2apiAccountId, {
-        modelId: job.verificationModel || 'gpt-5.6-luna',
-        prompt: job.verificationPrompt || 'Reply with a short success marker.',
-      });
+      const orderItem = await this.repository.getOrderItem(job.orderItemId);
+      const rule = await this.repository.getRule(job.ruleId);
+      let targetAccountId = job.sub2apiAccountId;
+      try {
+        await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials);
+        job = await this.repository.upsertRecovery({ ...job, status: 'verifying', lastError: '' });
+        await this.sub2ApiGateway.testAccount(targetAccountId, {
+          modelId: job.verificationModel || 'gpt-5.6-luna',
+          prompt: job.verificationPrompt || 'Reply with a short success marker.',
+        });
+      } catch (error) {
+        if (!isNotFound(error) || !orderItem || !rule) throw error;
+        const account = await this.sub2ApiGateway.importAndVerify({
+          name: orderItem.accountName || job.accountName || job.accountKey,
+          platform: rule.platform,
+          credentials,
+          expiresAt: orderItem.metadata?.expiresAt || null,
+          groupIds: rule.targetGroupIds,
+          concurrency: rule.concurrency,
+          priority: rule.priority,
+          modelId: rule.verificationModel,
+          prompt: rule.verificationPrompt,
+          onCreated: async (accountId) => this.repository.updateOrderItem(orderItem.id, {
+            status: 'importing', sub2apiAccountId: accountId,
+          }),
+        });
+        targetAccountId = account?.id || targetAccountId;
+        await this.repository.addEvent({
+          ruleId: job.ruleId,
+          orderId: orderItem.orderId,
+          itemId: job.orderItemId,
+          eventType: 'recovery_reimported',
+          message: '原 Sub2API 账号不存在，已使用认领的新凭据重新导入并验号',
+          details: { recoveryId: job.id, previousAccountId: job.sub2apiAccountId, accountId: targetAccountId },
+        });
+      }
       const encryptedCredentials = this.vault.encrypt({ credentials });
       await this.repository.updateOrderItem(job.orderItemId, {
         status: 'imported',
         verificationStatus: 'repaired',
         healthStatus: 'healthy',
+        sub2apiAccountId: targetAccountId,
         credentialVersion,
         credentialCiphertext: encryptedCredentials,
         errorMessage: '',
         lastHealthAt: new Date(this.now()).toISOString(),
       });
+      const recoveredOrderItem = await this.repository.getOrderItem(job.orderItemId);
+      const recoveredOrder = recoveredOrderItem?.orderId
+        ? await this.repository.getOrder(recoveredOrderItem.orderId)
+        : null;
+      if (recoveredOrder) {
+        const validQuantity = recoveredOrder.items
+          .filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)).length;
+        const failedQuantity = Math.max(0, recoveredOrder.requestedQuantity - validQuantity);
+        const status = failedQuantity === 0 ? 'completed' : 'import_retry';
+        await this.repository.updateOrder(recoveredOrder.id, {
+          status,
+          validQuantity,
+          lastError: failedQuantity ? `${failedQuantity} 个账号等待修复` : '',
+        });
+        await this.repository.finishRun(recoveredOrder.runId, {
+          status,
+          actualPaidAmountCny: recoveredOrder.actualPaidAmountCny,
+          deliveredQuantity: recoveredOrder.deliveredQuantity,
+          validQuantity,
+          failedQuantity,
+          errorMessage: failedQuantity ? `${failedQuantity} 个账号等待修复` : '',
+        });
+      }
       job = await this.repository.upsertRecovery({
         ...job,
+        sub2apiAccountId: targetAccountId,
         status: 'recovered',
         credentialVersion,
         credentialCiphertext: encryptedCredentials,
@@ -503,13 +576,13 @@ export class ReplenishmentService {
         itemId: job.orderItemId,
         eventType: 'recovery_verified',
         message: `账号 ${job.accountName || job.accountKey} 已认领、更新并验号通过`,
-        details: { recoveryId: job.id, targetAccountId: job.sub2apiAccountId, credentialVersion },
+        details: { recoveryId: job.id, targetAccountId, credentialVersion },
       });
       return {
         ok: true,
         recoveryId: job.id,
         credentialVersion,
-        targetAccountId: job.sub2apiAccountId,
+        targetAccountId,
         imported: true,
       };
     } catch (error) {
@@ -535,6 +608,39 @@ export class ReplenishmentService {
       });
       throw error;
     }
+  }
+
+  async waitForSupplierRecovery({ item, rule, order, error }) {
+    const targetAccountId = Number(item?.sub2apiAccountId);
+    if (!textIncludesAuthFailure(error?.message, error?.cause?.message)
+      || !Number.isSafeInteger(targetAccountId) || targetAccountId <= 0 || !rule?.id) return false;
+    const recovery = await this.repository.upsertRecovery({
+      recoveryKey: `item:${item.id}:credential:${item.credentialVersion || 'initial'}`,
+      orderItemId: item.id,
+      ruleId: rule.id,
+      sub2apiAccountId: targetAccountId,
+      accountKey: item.externalAccountKey || item.accountName,
+      status: 'waiting_supplier',
+      deliveryStatus: 'credential invalidated',
+      credentialVersion: item.credentialVersion,
+      lastError: String(error?.message || error),
+    });
+    await this.repository.updateOrderItem(item.id, {
+      status: 'waiting_supplier_recovery',
+      verificationStatus: 'failed',
+      nextImportRetryAt: null,
+      errorMessage: String(error?.message || error),
+    });
+    await this.repository.addEvent({
+      ruleId: rule.id,
+      runId: order?.runId || null,
+      orderId: order?.id || item.orderId,
+      itemId: item.id,
+      eventType: 'import_recovery_waiting_supplier',
+      message: '账号凭据 401/失效，停止重放旧凭据并等待供应商恢复认领',
+      details: { recoveryId: recovery.id, targetAccountId },
+    });
+    return true;
   }
 
   async inspectRuleInventory(rule) {
@@ -974,6 +1080,10 @@ export class ReplenishmentService {
       } catch (error) {
         failedQuantity += 1;
         const policy = await this.repository.getRecoveryPolicyByRule(rule.id);
+        const savedItem = await this.repository.getOrderItem(current.id);
+        if (await this.waitForSupplierRecovery({ item: savedItem || current, rule, order, error })) {
+          continue;
+        }
         const retryEnabled = policy?.enabled !== false && current.credentialCiphertext;
         await this.repository.updateOrderItem(current.id, {
           status: retryEnabled ? 'retry_wait' : 'manual_required',

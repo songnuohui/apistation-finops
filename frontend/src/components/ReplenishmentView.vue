@@ -325,7 +325,7 @@ const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', a
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
-const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
+const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
 const eventTypeLabel = (value: string) => ({
@@ -335,6 +335,7 @@ const eventTypeLabel = (value: string) => ({
   approval_required: '等待审批', order_planned: '准备下单', order_created: '订单已创建',
   delivery_processed: '导入完成', import_failed: '导入失败', import_retry_scheduled: '导入重试',
   import_retry_succeeded: '重试成功', import_retry_reimported: '重新导入', import_retry_manual_required: '人工处理',
+  import_recovery_waiting_supplier: '等待供应商恢复', recovery_reimported: '认领后重新导入',
   account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
   recovery_manual_required: '人工处理', recovery_verified: '修复完成',
 } as Record<string, string>)[value] || value || '操作记录';

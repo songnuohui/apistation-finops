@@ -782,6 +782,7 @@ export class ReplenishmentRepository {
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       ON CONFLICT(recovery_key) DO UPDATE SET
         supplier_recovery_id=COALESCE(NULLIF(EXCLUDED.supplier_recovery_id,''),${this.schema}.replenishment_recoveries.supplier_recovery_id),
+        sub2api_account_id=EXCLUDED.sub2api_account_id,
         delivery_status=EXCLUDED.delivery_status,
         credential_version=COALESCE(NULLIF(EXCLUDED.credential_version,''),${this.schema}.replenishment_recoveries.credential_version),
         claim_url_ciphertext=COALESCE(NULLIF(EXCLUDED.claim_url_ciphertext,''),${this.schema}.replenishment_recoveries.claim_url_ciphertext),

@@ -345,6 +345,73 @@ test('import retry reimports credentials when the original Sub2API account no lo
   assert.ok((await repository.listEvents({ ruleId: rule.id })).some((entry) => entry.eventType === 'import_retry_reimported'));
 });
 
+test('invalidated OAuth credentials wait for supplier recovery instead of retrying the same token', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const order = await repository.createPlannedOrder({
+    rule, trigger: 'manual', quantity: 1, availableBefore: 0, quotedAmountCny: 3,
+    actor: 'test', status: 'ordering', idempotencyKey: 'invalidated-credential-order',
+  });
+  const gateway = {
+    async importAndVerify(input) {
+      await input.onCreated?.(921);
+      throw new Error('API returned 401: {"code":"token_invalidated"}');
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+
+  await service.processDelivery(order, rule, {
+    charged_fen: 300,
+    accounts: [{ email: 'invalidated@example.com', credentials: { access_token: 'invalidated-token' } }],
+  });
+
+  const savedOrder = await repository.getOrder(order.id);
+  assert.equal(savedOrder.status, 'import_retry');
+  assert.equal(savedOrder.items[0].status, 'waiting_supplier_recovery');
+  assert.equal(savedOrder.items[0].nextImportRetryAt, null);
+  const [recovery] = await repository.listRecoveries();
+  assert.equal(recovery.status, 'waiting_supplier');
+  assert.equal(recovery.sub2apiAccountId, 921);
+});
+
+test('claimed recovery reimports when the original Sub2API account is gone', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 41, 141);
+  await repository.updateOrder(tracked.orderId, { status: 'import_retry', validQuantity: 0 });
+  await repository.updateOrderItem(tracked.id, { verificationStatus: 'failed', status: 'waiting_supplier_recovery' });
+  let importInput = null;
+  const gateway = {
+    async applyOAuthCredentials() {
+      throw Object.assign(new Error('account not found'), { statusCode: 404 });
+    },
+    async importAndVerify(input) {
+      importInput = input;
+      await input.onCreated?.(142);
+      return { id: 142 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+  const job = await repository.upsertRecovery({
+    recoveryKey: `item:${tracked.id}:credential:v1`,
+    orderItemId: tracked.id,
+    ruleId: rule.id,
+    sub2apiAccountId: 141,
+    accountKey: tracked.externalAccountKey,
+    status: 'credentials_saved',
+    credentialVersion: 'v2',
+    credentialCiphertext: service.vault.encrypt({ credentials: { access_token: 'replacement-token' } }),
+  });
+
+  await service.claimRecovery(job.id);
+
+  assert.equal(importInput.platform, 'openai');
+  assert.equal(importInput.credentials.access_token, 'replacement-token');
+  assert.equal((await repository.getOrderItem(tracked.id)).sub2apiAccountId, 142);
+  assert.equal((await repository.getRecovery(job.id)).sub2apiAccountId, 142);
+  assert.equal((await repository.getOrder(tracked.orderId)).status, 'completed');
+});
+
 test('cost ledger stays pending until FinOps synchronization exposes the imported account', async () => {
   const item = {
     id: 41,
