@@ -909,9 +909,9 @@ onMounted(async () => {
         <summary class="secondary-button"><Settings2 :size="16" />供应商设置<ChevronDown :size="14" /></summary>
         <div class="supplier-settings-popover">
           <button @click="openServiceAuthSettings"><KeyRound :size="16" /><span><strong>Sub2API 自动认证</strong><small>后台同步与利润保护凭据</small></span></button>
-          <button @click="openQqSettings"><Bell :size="16" /><span><strong>QQ 告警</strong><small>连接、余额和密钥异常通知</small></span></button>
         </div>
       </details>
+      <button class="secondary-button" title="配置连接、余额和密钥异常通知" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
       <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
     </div>
