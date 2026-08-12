@@ -397,10 +397,15 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .order-detail-error{padding:11px 12px;border:1px solid #ffd2d8;border-radius:6px;background:#fff3f4;color:#a63443;font-size:12px}
 .event-note{padding:12px 13px;border-left:3px solid #4d85e8;background:#f6f9ff;color:#536b8e;font-size:12px;line-height:19px}
 .execution-log-head{align-items:center}
+.execution-log-panel{display:flex;min-height:0;flex-direction:column}
 .execution-log-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .execution-log-actions select{height:36px;min-width:180px;padding:0 32px 0 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#3d526c;font-size:12px}
+.execution-log-viewport{height:440px;min-height:220px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-top:1px solid #edf1f6}
 .execution-log-list{display:grid;border-top:1px solid #edf1f6}
-.execution-log-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:12px;align-items:flex-start;padding:14px 0;border-bottom:1px solid #edf1f6}
+.execution-log-viewport .execution-log-list{border-top:0}
+.execution-log-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:12px;align-items:flex-start;padding:14px 8px 14px 0;border-bottom:1px solid #edf1f6;cursor:pointer}
+.execution-log-row:hover{background:#f8fbff}
+.execution-log-row:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px;background:#f8fbff}
 .execution-log-row:last-child{border-bottom:0}
 .execution-log-marker{width:8px;height:8px;margin-top:7px;border-radius:50%;background:#20a474;box-shadow:0 0 0 3px #e3f6ef}
 .execution-log-marker.warning{background:#d18a1d;box-shadow:0 0 0 3px #fff3dd}
@@ -410,7 +415,18 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .execution-log-title strong{font-size:12px}
 .execution-log-main p{margin:5px 0;color:#42556e;font-size:12px;line-height:18px;overflow-wrap:anywhere}
 .execution-log-main small{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:10px}
+.execution-log-tail{display:grid;justify-items:end;gap:9px;min-width:128px}
 .execution-log-row time{padding-top:3px;color:var(--muted);font-size:10px;white-space:nowrap}
+.execution-log-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+.execution-event-modal{max-width:680px}
+.execution-event-summary{display:flex;align-items:flex-start;gap:10px;padding:13px;border:1px solid #e2e8f0;border-radius:7px;background:#f8fafc}
+.execution-event-summary p{margin:0;color:#334a66;font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.execution-event-facts,.execution-event-details dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;margin:16px 0 0;border:1px solid #e2e8f0;border-radius:7px;overflow:hidden;background:#e2e8f0}
+.execution-event-facts div,.execution-event-details dl div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:10px;padding:10px 12px;background:#fff}
+.execution-event-facts dt,.execution-event-details dt{color:var(--muted);font-size:11px}
+.execution-event-facts dd,.execution-event-details dd{min-width:0;margin:0;color:#334a66;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.execution-event-details h3{margin:18px 0 0;font-size:13px}
+.execution-event-details dl{grid-template-columns:1fr;margin-top:8px}
 .spinning{animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -452,7 +468,10 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .execution-log-actions{width:100%}
   .execution-log-actions select{min-width:0;flex:1}
   .execution-log-row{grid-template-columns:10px minmax(0,1fr)}
-  .execution-log-row time{grid-column:2;padding-top:0}
+  .execution-log-tail{grid-column:2;grid-template-columns:minmax(0,1fr) auto;align-items:center;justify-items:start;width:100%;min-width:0}
+  .execution-log-row-actions{justify-self:end}
+  .execution-log-viewport{height:min(440px,58dvh)}
+  .execution-event-facts{grid-template-columns:1fr}
 }
 
 @media (max-width:380px){
@@ -463,6 +482,9 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .runtime-summary span{font-size:10px}
   .runtime-summary strong{font-size:14px}
   .custom-range-fields{gap:4px;padding-left:5px;padding-right:5px}
+  .execution-log-tail{grid-template-columns:1fr}
+  .execution-log-row-actions{justify-self:start}
+  .execution-event-facts div,.execution-event-details dl div{grid-template-columns:1fr;gap:4px}
 }
 
 /* Supplier management */

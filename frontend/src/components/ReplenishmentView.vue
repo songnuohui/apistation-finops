@@ -97,26 +97,49 @@
           <button class="icon-button" title="刷新执行日志" :disabled="eventsLoading" @click="loadEvents"><RefreshCw :size="15" :class="{ spinning: eventsLoading }" /></button>
         </div>
       </div>
-      <div v-if="eventsLoading && !executionEvents.length" class="empty-state">正在读取执行日志…</div>
-      <div v-else-if="!executionEvents.length" class="empty-state">暂无执行日志，策略下一次检查后会显示在这里</div>
-      <div v-else class="execution-log-list">
-        <article v-for="event in executionEvents" :key="event.id" class="execution-log-row">
-          <span class="execution-log-marker" :class="eventTone(event.eventType)" />
-          <div class="execution-log-main">
-            <div class="execution-log-title">
-              <strong>{{ event.ruleName || (event.ruleId ? `策略 #${event.ruleId}` : '补号任务') }}</strong>
-              <span class="status-pill" :class="eventTone(event.eventType)">{{ eventTypeLabel(event.eventType) }}</span>
+      <div class="execution-log-viewport" :aria-busy="eventsLoading">
+        <div v-if="eventsLoading && !executionEvents.length" class="empty-state">正在读取执行日志…</div>
+        <div v-else-if="!executionEvents.length" class="empty-state">暂无执行日志，策略下一次检查后会显示在这里</div>
+        <div v-else class="execution-log-list">
+          <article
+            v-for="event in executionEvents"
+            :key="event.id"
+            class="execution-log-row"
+            role="button"
+            tabindex="0"
+            :aria-label="`查看${eventTypeLabel(event.eventType)}详情`"
+            @click="viewEvent(event)"
+            @keydown.enter.prevent="viewEvent(event)"
+            @keydown.space.prevent="viewEvent(event)"
+          >
+            <span class="execution-log-marker" :class="eventTone(event.eventType)" />
+            <div class="execution-log-main">
+              <div class="execution-log-title">
+                <strong>{{ event.ruleName || (event.ruleId ? `策略 #${event.ruleId}` : '补号任务') }}</strong>
+                <span class="status-pill" :class="eventTone(event.eventType)">{{ eventTypeLabel(event.eventType) }}</span>
+              </div>
+              <p>{{ event.message || '操作已完成' }}</p>
+              <small>
+                <span v-if="event.orderId">订单 #{{ event.orderId }}</span>
+                <span v-if="event.itemId">账号项 #{{ event.itemId }}</span>
+                <span>{{ triggerLabel(event.details?.trigger) }}</span>
+                <span>{{ event.actor || 'system' }}</span>
+              </small>
             </div>
-            <p>{{ event.message || '操作已完成' }}</p>
-            <small>
-              <span v-if="event.orderId">订单 #{{ event.orderId }}</span>
-              <span v-if="event.itemId">账号项 #{{ event.itemId }}</span>
-              <span>{{ triggerLabel(event.details?.trigger) }}</span>
-              <span>{{ event.actor || 'system' }}</span>
-            </small>
-          </div>
-          <time :datetime="event.createdAt">{{ dateTimeWithSeconds(event.createdAt) }}</time>
-        </article>
+            <div class="execution-log-tail">
+              <time :datetime="event.createdAt">{{ dateTimeWithSeconds(event.createdAt) }}</time>
+              <div class="execution-log-row-actions">
+                <button
+                  v-if="eventAction(event)"
+                  class="secondary-button compact-button"
+                  :disabled="actioningId === `event-${event.id}`"
+                  @click.stop="runEventAction(event)"
+                >{{ eventAction(event)?.label }}</button>
+                <button class="icon-button" title="查看日志详情" @click.stop="viewEvent(event)"><ChevronRight :size="15" /></button>
+              </div>
+            </div>
+          </article>
+        </div>
       </div>
     </section>
 
@@ -206,6 +229,47 @@
     <section v-if="selectedOrder" class="modal-layer" @click.self="selectedOrder = null">
       <div class="modal order-detail-modal"><header><div><h2>补号订单 #{{ selectedOrder.id }}</h2><p>{{ selectedOrder.product }} · {{ orderGroupSummary(selectedOrder) }}</p></div><button class="icon-button" @click="selectedOrder = null"><X :size="18" /></button></header><div class="detail-metrics"><Metric title="状态" :value="orderStatusLabel(selectedOrder.status)" /><Metric title="有效账号" :value="`${selectedOrder.validQuantity || 0} / ${selectedOrder.requestedQuantity}`" /><Metric title="实际成本" :value="money(selectedOrder.actualPaidAmountCny ?? selectedOrder.quotedAmountCny)" tone="good" /></div><p class="order-detail-error" v-if="selectedOrder.lastError">{{ selectedOrder.lastError }}</p><div class="event-note">账号导入后固定写入策略中的正式分组、并发数和优先级；修复时只更新凭据并重新验号。</div></div>
     </section>
+
+    <section v-if="selectedEvent" class="modal-layer" @click.self="selectedEvent = null">
+      <div class="modal execution-event-modal">
+        <header>
+          <div>
+            <h2>{{ eventTypeLabel(selectedEvent.eventType) }}</h2>
+            <p>{{ selectedEvent.ruleName || (selectedEvent.ruleId ? `策略 #${selectedEvent.ruleId}` : '补号任务') }} · {{ dateTimeWithSeconds(selectedEvent.createdAt) }}</p>
+          </div>
+          <button class="icon-button" title="关闭" @click="selectedEvent = null"><X :size="18" /></button>
+        </header>
+        <div class="execution-event-summary">
+          <span class="status-pill" :class="eventTone(selectedEvent.eventType)">{{ eventTypeLabel(selectedEvent.eventType) }}</span>
+          <p>{{ selectedEvent.message || '操作已完成' }}</p>
+        </div>
+        <dl class="execution-event-facts">
+          <div v-if="selectedEvent.orderId"><dt>关联订单</dt><dd>#{{ selectedEvent.orderId }}</dd></div>
+          <div v-if="selectedEvent.itemId"><dt>关联账号项</dt><dd>#{{ selectedEvent.itemId }}</dd></div>
+          <div><dt>触发方式</dt><dd>{{ triggerLabel(selectedEvent.details?.trigger) }}</dd></div>
+          <div><dt>执行人</dt><dd>{{ selectedEvent.actor || 'system' }}</dd></div>
+        </dl>
+        <div v-if="eventDetailEntries(selectedEvent).length" class="execution-event-details">
+          <h3>执行数据</h3>
+          <dl>
+            <div v-for="entry in eventDetailEntries(selectedEvent)" :key="entry.key">
+              <dt>{{ entry.label }}</dt>
+              <dd>{{ entry.value }}</dd>
+            </div>
+          </dl>
+        </div>
+        <footer>
+          <button class="secondary-button" @click="selectedEvent = null">关闭</button>
+          <button v-if="selectedEvent.orderId" class="secondary-button" @click="openEventOrder(selectedEvent)">查看订单</button>
+          <button
+            v-if="eventAction(selectedEvent)"
+            class="primary-button"
+            :disabled="actioningId === `event-${selectedEvent.id}`"
+            @click="runEventAction(selectedEvent)"
+          >{{ eventAction(selectedEvent)?.label }}</button>
+        </footer>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -233,6 +297,7 @@ const eventRuleId = ref('');
 const executionLogPanel = ref<HTMLElement | null>(null);
 const editor = ref<any | null>(null);
 const selectedOrder = ref<any | null>(null);
+const selectedEvent = ref<any | null>(null);
 
 const connected = computed(() => Boolean(dashboard.value.oauthSupply?.balance && !dashboard.value.oauthSupply.balance.error));
 const selectedRule = computed(() => selectedOrder.value ? rules.value.find((rule) => rule.id === selectedOrder.value.ruleId) : null);
@@ -266,13 +331,58 @@ const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : va
 const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
 const groupSummary = (ids: any[] = []) => ids.length ? ids.map((id) => groupById.value.get(Number(id))?.name || `分组 #${id}`).join('、') : '未选择正式分组';
 const orderGroupSummary = (order: any) => groupSummary(rules.value.find((rule) => Number(rule.id) === Number(order.ruleId))?.targetGroupIds || []);
+const relatedOrder = (event: any) => event?.orderId
+  ? orders.value.find((order) => Number(order.id) === Number(event.orderId)) || null
+  : null;
+const relatedRecovery = (event: any) => event?.itemId
+  ? recoveries.value.find((recovery) => Number(recovery.orderItemId) === Number(event.itemId)) || null
+  : null;
+const relatedRule = (event: any) => event?.ruleId
+  ? rules.value.find((rule) => Number(rule.id) === Number(event.ruleId)) || null
+  : null;
+
+function eventAction(event: any) {
+  const order = relatedOrder(event);
+  if (order?.status === 'approval_required') return { type: 'approve', label: '批准下单', target: order };
+  const recovery = relatedRecovery(event);
+  if (recovery?.ready && recovery.status !== 'recovered') return { type: 'recovery', label: '立即重试', target: recovery };
+  const rule = relatedRule(event);
+  if (event?.eventType === 'rule_disabled' && rule && !rule.enabled) return { type: 'enable', label: '启动策略', target: rule };
+  if (rule?.enabled && ['inventory_healthy', 'order_skipped', 'rule_blocked', 'observed_replenishment', 'rule_execution_failed'].includes(event?.eventType)) {
+    return { type: 'trigger', label: '立即检查', target: rule };
+  }
+  return null;
+}
+
+function detailValue(value: any) {
+  if (value === null || value === undefined || value === '') return '--';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'object') return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+function eventDetailEntries(event: any) {
+  const labels: Record<string, string> = {
+    available: '有效库存', availableBalanceCny: '可用余额（CNY）', dailySpend: '今日累计成本（CNY）',
+    error: '错误信息', externalOrderId: '供应商订单号', quantity: '计划购买数量',
+    quotedCny: '报价（CNY）', reason: '原因代码', remoteStatus: '供应商状态',
+    supplierAvailable: '供应商可售数量', trigger: '触发方式',
+  };
+  return Object.entries(event?.details || {})
+    .filter(([key]) => key !== 'trigger')
+    .map(([key, value]) => ({ key, label: labels[key] || key, value: detailValue(value) }));
+}
 
 async function load() {
   loading.value = true;
   error.value = '';
   try {
     const [nextDashboard, nextCatalog, nextMappings, nextRules, nextOrders, nextRecoveries] = await Promise.all([
-      get('/replenishment/dashboard'), get('/replenishment/catalog'), get('/replenishment/mappings'),
+      get('/replenishment/dashboard'),
+      get('/replenishment/catalog').catch((err: any) => ({
+        groups: [], platforms: [], error: err?.message || 'Sub2API 分组目录暂时不可用',
+      })),
+      get('/replenishment/mappings'),
       get('/replenishment/rules'), get('/replenishment/orders?limit=50'),
       get('/replenishment/recoveries').catch((err: any) => ({ items: [], error: err?.message || '账号修复记录暂时不可用' })),
     ]);
@@ -282,7 +392,8 @@ async function load() {
     rules.value = nextRules;
     orders.value = nextOrders;
     recoveries.value = nextRecoveries.items || [];
-    if (nextRecoveries.error && !nextDashboard.oauthSupply?.balance?.error) error.value = nextRecoveries.error;
+    if (nextCatalog.error) error.value = nextCatalog.error;
+    else if (nextRecoveries.error && !nextDashboard.oauthSupply?.balance?.error) error.value = nextRecoveries.error;
   } catch (err: any) {
     error.value = err.message || '补号数据加载失败';
   } finally {
@@ -308,6 +419,44 @@ async function openRuleLogs(rule: any) {
   await loadEvents();
   await nextTick();
   executionLogPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function viewEvent(event: any) {
+  selectedEvent.value = event;
+}
+
+async function openEventOrder(event: any) {
+  if (!event?.orderId) return;
+  selectedEvent.value = null;
+  await viewOrder({ id: event.orderId });
+}
+
+async function runEventAction(event: any) {
+  const action = eventAction(event);
+  if (!action) return;
+  actioningId.value = `event-${event.id}`;
+  try {
+    if (action.type === 'approve') {
+      await send(`/replenishment/orders/${action.target.id}/approve`, 'POST', {});
+      emit('toast', `订单 #${action.target.id} 已批准`);
+    } else if (action.type === 'recovery') {
+      await send(`/replenishment/recoveries/${action.target.id}/claim`, 'POST', {});
+      emit('toast', '修复任务已执行');
+    } else if (action.type === 'enable') {
+      await send(`/replenishment/rules/${action.target.id}/status`, 'PATCH', { enabled: true });
+      emit('toast', `策略“${action.target.name}”已启动`);
+    } else if (action.type === 'trigger') {
+      await send('/replenishment/trigger', 'POST', { ruleId: action.target.id });
+      emit('toast', `策略“${action.target.name}”检查已完成`);
+    }
+    selectedEvent.value = null;
+    await load();
+  } catch (err: any) {
+    error.value = err.message || '日志操作执行失败';
+    await load();
+  } finally {
+    actioningId.value = '';
+  }
 }
 
 function newMapping() {

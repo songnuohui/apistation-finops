@@ -234,6 +234,8 @@ export class ReplenishmentService {
     return {
       items: entries.map((entry) => ({
         id: entry.id,
+        orderItemId: entry.orderItemId,
+        ruleId: entry.ruleId,
         accountName: entry.accountName || entry.accountKey,
         deliveryStatus: entry.deliveryStatus,
         status: entry.status,
