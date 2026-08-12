@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Sub2ApiAccountImportGateway } from '../src/services/sub2api-account-import-gateway.mjs';
+import { Sub2ApiAccountImportGateway, applyModelWhitelist } from '../src/services/sub2api-account-import-gateway.mjs';
 
 const config = {
   sub2apiAuthUrl: 'https://sub2api.example',
@@ -68,9 +68,15 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
     priority: 2,
     modelId: 'gpt-5.6-luna',
     prompt: 'Reply with OK.',
+    modelWhitelist: ['gpt-5.6', 'gpt-5.2'],
   });
 
   assert.equal(created.id, 2780);
+  const createBody = JSON.parse(requests.find((entry) => entry.url.endsWith('/accounts') && entry.options.method === 'POST').options.body);
+  assert.deepEqual(createBody.credentials.model_mapping, {
+    'gpt-5.6': 'gpt-5.6',
+    'gpt-5.2': 'gpt-5.2',
+  });
   const putBody = JSON.parse(requests.find((entry) => entry.options.method === 'PUT').options.body);
   assert.deepEqual(putBody.group_ids, [3, 9]);
   assert.equal(putBody.concurrency, 7);
@@ -78,6 +84,13 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
   const testBody = JSON.parse(requests.find((entry) => entry.url.endsWith('/test')).options.body);
   assert.equal(testBody.model_id, 'gpt-5.6-luna');
   assert.equal(testBody.prompt, 'Reply with OK.');
+});
+
+test('an empty model whitelist clears an inherited model restriction', () => {
+  assert.deepEqual(applyModelWhitelist({ access_token: 'secret', model_mapping: { old: 'old' } }, []), {
+    access_token: 'secret',
+    model_mapping: {},
+  });
 });
 
 test('Sub2API SSE verification rejects a stream without explicit completion', async () => {

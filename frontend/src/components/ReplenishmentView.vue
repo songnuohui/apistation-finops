@@ -204,7 +204,7 @@
         </div>
         <div v-else class="form-grid">
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
-          <label>商品映射<select v-model.number="editor.productMappingId"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
+          <label>商品映射<select v-model.number="editor.productMappingId" @change="onRuleMappingChange"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
           <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="0" /></label>
           <label>目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
@@ -229,6 +229,17 @@
           <label>单次成本上限<input v-model.number="editor.maxOrderAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
           <label>每日成本上限<input v-model.number="editor.maxDailyAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
           <label>验号模型<input v-model.trim="editor.verificationModel" /></label>
+          <label class="full-field">账号可用模型
+            <input v-model.trim="modelSearch" class="model-search" placeholder="搜索模型" />
+            <span class="field-hint">空着表示不限制模型，已选择 {{ editor.modelWhitelist?.length || 0 }} 个模型。</span>
+            <span class="model-options">
+              <label v-for="model in filteredRuleModels" :key="model" class="model-option">
+                <input v-model="editor.modelWhitelist" type="checkbox" :value="model" />
+                <span>{{ model }}</span>
+              </label>
+              <small v-if="!filteredRuleModels.length" class="field-hint">当前平台暂无模型目录。</small>
+            </span>
+          </label>
           <label>订单轮询间隔（秒）<input v-model.number="editor.pollIntervalSeconds" type="number" min="3" /></label>
           <label class="full-field">验号提示词<textarea v-model.trim="editor.verificationPrompt" rows="3" /></label>
           <label class="switch-row full-field"><input v-model="editor.enabled" type="checkbox" /><span><strong>启用策略</strong><small>观察模式会检查有效库存和报价，但不会创建订单。</small></span></label>
@@ -300,6 +311,7 @@ const editorError = ref('');
 const eventsLoading = ref(false);
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
 const catalog = ref<any>({ groups: [], platforms: [] });
+const modelSearch = ref('');
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
 const orders = ref<any[]>([]);
@@ -317,6 +329,16 @@ const connected = computed(() => Boolean(dashboard.value.oauthSupply?.balance &&
 const selectedRule = computed(() => selectedOrder.value ? rules.value.find((rule) => rule.id === selectedOrder.value.ruleId) : null);
 const groupById = computed<Map<number, any>>(() => new Map((catalog.value.groups || []).map((group: any) => [Number(group.id), group])));
 const mappingGroups = computed(() => !editor.value?.platform ? [] : (catalog.value.groups || []).filter((group: any) => group.platform === editor.value.platform));
+const filteredRuleModels = computed(() => {
+  const platform = editor.value?.kind === 'rule'
+    ? mappings.value.find((mapping) => Number(mapping.id) === Number(editor.value.productMappingId))?.platform
+    : '';
+  const models = platform ? (catalog.value.modelsByPlatform?.[platform] || []) : Object.values(catalog.value.modelsByPlatform || {}).flat();
+  const selected = editor.value?.modelWhitelist || [];
+  const query = modelSearch.value.toLowerCase().trim();
+  return [...new Set([...(models as any[]).map(String), ...selected.map(String)])]
+    .filter((model) => !query || model.toLowerCase().includes(query));
+});
 const money = (value: any) => value === null || value === undefined ? '--' : `¥${Number(value || 0).toFixed(2)}`;
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
@@ -494,6 +516,7 @@ function newRule() {
     scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
     maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, priority: 20,
     verificationModel: 'gpt-5.6-luna',
+    modelWhitelist: [],
     verificationPrompt: 'Reply with a short success marker if this account can complete a basic request.',
     pollIntervalSeconds: 5, retryLimit: 3, cooldownSeconds: 300,
   };
@@ -501,11 +524,13 @@ function newRule() {
 }
 function editRule(rule: any) {
   editorError.value = '';
-  editor.value = { ...rule, kind: 'rule' };
+  editor.value = { ...rule, kind: 'rule', modelWhitelist: [...(rule.modelWhitelist || [])] };
+  modelSearch.value = '';
   recoveryEditor.value = { ...recoveryPolicyFor(rule) };
 }
 function editMapping(mapping: any) { editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', targetGroupIds: [...(mapping.targetGroupIds || [])] }; }
 function onMappingPlatformChange() { editor.value.targetGroupIds = []; editorError.value = ''; }
+function onRuleMappingChange() { editor.value.modelWhitelist = []; modelSearch.value = ''; }
 
 function validateEditor() {
   if (editor.value.kind === 'mapping') {

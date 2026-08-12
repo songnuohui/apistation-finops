@@ -57,6 +57,7 @@ function rule(row) {
     priority: Number(row.priority || 0),
     verificationModel: row.verification_model || 'gpt-5.6-luna',
     verificationPrompt: row.verification_prompt || '',
+    modelWhitelist: Array.isArray(row.model_whitelist) ? row.model_whitelist.map(String).filter(Boolean) : [],
     pollIntervalSeconds: Number(row.poll_interval_seconds || 5),
     retryLimit: Number(row.retry_limit || 3),
     cooldownSeconds: Number(row.cooldown_seconds || 300),
@@ -228,6 +229,7 @@ function normalizeRuleInput(input) {
     priority: Number(input.priority ?? 100),
     verificationModel: String(input.verificationModel || 'gpt-5.6-luna').trim(),
     verificationPrompt: String(input.verificationPrompt || '').trim(),
+    modelWhitelist: [...new Set((Array.isArray(input.modelWhitelist) ? input.modelWhitelist : []).map((value) => String(value).trim()).filter(Boolean))],
     pollIntervalSeconds: Number(input.pollIntervalSeconds || 5),
     retryLimit: Number(input.retryLimit ?? 3),
     cooldownSeconds: Number(input.cooldownSeconds ?? 300),
@@ -333,6 +335,7 @@ export class ReplenishmentRepository {
       priority: 20,
       verificationModel: 'gpt-5.6-luna',
       verificationPrompt: 'Reply with OK.',
+      modelWhitelist: [],
       pollIntervalSeconds: 5,
       retryLimit: 3,
       cooldownSeconds: 300,
@@ -472,6 +475,7 @@ export class ReplenishmentRepository {
       values.repairGraceSeconds, values.recoveryRetryLimit,
       values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.priority,
       values.verificationModel, values.verificationPrompt, values.pollIntervalSeconds,
+      values.modelWhitelist,
       values.retryLimit, values.cooldownSeconds,
       values.scheduleStartTime, values.scheduleEndTime, values.scheduleIntervalSeconds,
     ];
@@ -483,8 +487,8 @@ export class ReplenishmentRepository {
             quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
             max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,priority=$17,
             verification_model=$18,verification_prompt=$19,poll_interval_seconds=$20,
-            retry_limit=$21,cooldown_seconds=$22,schedule_start_time=$23,schedule_end_time=$24,
-            schedule_interval_seconds=$25,updated_at=NOW()
+            model_whitelist=$21,retry_limit=$22,cooldown_seconds=$23,schedule_start_time=$24,schedule_end_time=$25,
+            schedule_interval_seconds=$26,updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
@@ -492,9 +496,9 @@ export class ReplenishmentRepository {
             replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
             repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
             concurrency,priority,verification_model,verification_prompt,poll_interval_seconds,
-            retry_limit,cooldown_seconds,schedule_start_time,schedule_end_time,
+            model_whitelist,retry_limit,cooldown_seconds,schedule_start_time,schedule_end_time,
             schedule_interval_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
@@ -1029,7 +1033,7 @@ export class ReplenishmentRepository {
         o.delivered_quantity,o.actual_paid_amount_cny,o.quoted_amount_cny,o.status AS order_status,
         o.product,o.platform,o.target_pool_key,o.external_order_id,
         r.name AS rule_name,m.target_group_ids,r.concurrency,r.priority,m.platform AS rule_platform,
-        r.verification_model,r.verification_prompt,
+        r.verification_model,r.verification_prompt,r.model_whitelist,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
         policy.retry_limit AS recovery_policy_retry_limit,
         policy.retry_interval_seconds AS recovery_retry_interval_seconds
@@ -1056,6 +1060,7 @@ export class ReplenishmentRepository {
         concurrency: Number(row.concurrency || 1), priority: Number(row.priority || 0),
         platform: row.rule_platform || row.platform, verificationModel: row.verification_model,
         verificationPrompt: row.verification_prompt,
+        modelWhitelist: Array.isArray(row.model_whitelist) ? row.model_whitelist.map(String).filter(Boolean) : [],
       },
       recoveryPolicy: {
         enabled: row.recovery_enabled === undefined ? true : Boolean(row.recovery_enabled),

@@ -260,6 +260,20 @@ test('delivery distributes the paid amount exactly across all delivered accounts
   assert.deepEqual(result.items.map((item) => item.finalCostCny), [4.5, 4.5]);
 });
 
+test('replenishment model whitelist is normalized and empty means unrestricted', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  const restricted = await repository.saveRule({
+    ...current,
+    modelWhitelist: ['gpt-5.6', ' gpt-5.2 ', 'gpt-5.6', ''],
+  });
+  assert.deepEqual(restricted.modelWhitelist, ['gpt-5.6', 'gpt-5.2']);
+
+  const unrestricted = await repository.saveRule({ ...restricted, modelWhitelist: [] });
+  assert.deepEqual(unrestricted.modelWhitelist, []);
+});
+
 test('delivery assigns cost to a temporarily failed account without requiring manual cost entry', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);
@@ -306,6 +320,10 @@ test('failed verification is queued for a later import retry and can complete wi
   });
   let shouldFail = true;
   const gateway = {
+    async applyOAuthCredentials(id, credentials) {
+      assert.equal(id, 901);
+      assert.equal(credentials.access_token, 'retry-token');
+    },
     async importAndVerify(input) {
       await input.onCreated?.(901);
       if (shouldFail) throw new Error('verification timed out');
@@ -348,6 +366,10 @@ test('import retry reimports credentials when the original Sub2API account no lo
   });
   let importCount = 0;
   const gateway = {
+    async applyOAuthCredentials(id, credentials) {
+      assert.equal(id, 911);
+      assert.equal(credentials.access_token, 'retry-token');
+    },
     async importAndVerify(input) {
       importCount += 1;
       const accountId = importCount === 1 ? 911 : 912;
@@ -385,6 +407,10 @@ test('invalidated OAuth credentials wait for supplier recovery instead of retryi
     actor: 'test', status: 'ordering', idempotencyKey: 'invalidated-credential-order',
   });
   const gateway = {
+    async applyOAuthCredentials(id, credentials) {
+      assert.equal(id, 911);
+      assert.equal(credentials.access_token, 'retry-token');
+    },
     async importAndVerify(input) {
       await input.onCreated?.(921);
       throw new Error('API returned 401: {"code":"token_invalidated"}');
@@ -631,7 +657,7 @@ test('only normal and schedulable Sub2API accounts count as effective inventory'
   assert.deepEqual(snapshot.accounts.map((account) => account.schedulable), [true, false, false, true, true]);
 });
 
-test('inventory at the inclusive threshold orders only enough to reach the target', async () => {
+test('inventory exactly at the minimum threshold does not replenish', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);
   rule.mode = 'observe';
@@ -650,31 +676,29 @@ test('inventory at the inclusive threshold orders only enough to reach the targe
     },
   };
   const service = new ReplenishmentService(repository, authStub(), gateway, config, console, {
-    client: {
-      async inventory({ quantity }) {
-        assert.equal(quantity, 3);
-        return { payload: { available: 10, estimated_total_fen: 900 } };
-      },
-    },
+    client: { async inventory() { throw new Error('inventory should not be queried'); } },
   });
 
   const result = await service.createOrderForRule(rule);
 
-  assert.equal(result.status, 'observed_need');
+  assert.equal(result.status, 'healthy');
   assert.equal(result.available, 2);
-  assert.equal(result.quantity, 3);
 });
 
 test('recovery saves claimed credentials before retrying Sub2API and verifies the same account', async () => {
   const repository = new ReplenishmentRepository(null, config);
-  const rule = await repository.getRule(1);
+  const rule = await repository.saveRule({
+    ...(await repository.getRule(1)),
+    modelWhitelist: ['gpt-5.6', 'gpt-5.2'],
+  });
   const tracked = await trackedItem(repository, rule, 6, 106);
   let claimCalls = 0;
   let applyFails = true;
   const gateway = {
-    async applyOAuthCredentials(id, credentials) {
+    async applyOAuthCredentials(id, credentials, modelWhitelist) {
       assert.equal(id, 106);
       assert.equal(credentials.access_token, 'repaired-token');
+      assert.deepEqual(modelWhitelist, ['gpt-5.6', 'gpt-5.2']);
       if (applyFails) throw new Error('temporary Sub2API failure');
     },
     async testAccount(id) {

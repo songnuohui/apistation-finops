@@ -28,6 +28,17 @@ function groupCatalogEntry(group) {
   };
 }
 
+function normalizeModelWhitelist(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((value) => String(value).trim()).filter(Boolean))];
+}
+
+export function applyModelWhitelist(credentials, modelWhitelist) {
+  const next = { ...(credentials || {}) };
+  const models = normalizeModelWhitelist(modelWhitelist);
+  next.model_mapping = Object.fromEntries(models.map((model) => [model, model]));
+  return next;
+}
+
 export class Sub2ApiAccountImportGateway {
   constructor(config, logger = console, fetchImpl = fetch) {
     this.config = config;
@@ -138,6 +149,29 @@ export class Sub2ApiAccountImportGateway {
       .sort((left, right) => left.sortOrder - right.sortOrder || left.id - right.id);
   }
 
+  async listModelCandidates(groups = []) {
+    const representativeGroups = new Map();
+    for (const group of groups) {
+      if (Number.isSafeInteger(Number(group?.id)) && group?.platform && !representativeGroups.has(group.platform)) {
+        representativeGroups.set(group.platform, group);
+      }
+    }
+    const entries = await Promise.all([...representativeGroups.entries()].map(async ([platform, group]) => {
+      try {
+        const payload = await this.jsonRequest(`/api/v1/admin/groups/${Number(group.id)}/models-list-candidates?platform=${encodeURIComponent(platform)}`);
+        const models = Array.isArray(payload) ? payload : payload?.models;
+        const normalized = Array.isArray(models)
+          ? models.map((model) => String(model?.id ?? model?.name ?? model).trim()).filter(Boolean)
+          : [];
+        return [platform, [...new Set(normalized)].sort()];
+      } catch (error) {
+        this.logger.warn(`[replenishment] model catalog unavailable for ${platform}`, error?.message || error);
+        return [platform, []];
+      }
+    }));
+    return Object.fromEntries(entries);
+  }
+
   async updateAccountConfiguration(accountId, { groupIds, concurrency, priority }) {
     const id = normalizeAccountId(accountId);
     const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}`, {
@@ -152,13 +186,13 @@ export class Sub2ApiAccountImportGateway {
     return payload?.account || payload;
   }
 
-  async applyOAuthCredentials(accountId, credentials) {
+  async applyOAuthCredentials(accountId, credentials, modelWhitelist = []) {
     const id = normalizeAccountId(accountId);
     const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}/apply-oauth-credentials`, {
       method: 'POST',
       body: {
         type: 'oauth',
-        credentials,
+        credentials: applyModelWhitelist(credentials, modelWhitelist),
       },
     });
     return payload?.account || payload;
@@ -239,12 +273,14 @@ export class Sub2ApiAccountImportGateway {
     prompt,
     expiresAt = null,
     onCreated,
+    modelWhitelist = [],
   }) {
+    const normalizedCredentials = applyModelWhitelist(credentials, modelWhitelist);
     const created = await this.createAccount({
       name,
       platform,
       type: 'oauth',
-      credentials,
+      credentials: normalizedCredentials,
       group_ids: groupIds,
       concurrency,
       priority,

@@ -399,6 +399,7 @@ export class ReplenishmentService {
         priority: item.rule.priority,
         modelId: item.rule.verificationModel,
         prompt: item.rule.verificationPrompt,
+        modelWhitelist: item.rule.modelWhitelist,
       };
       const importAccount = () => this.sub2ApiGateway.importAndVerify({
         name: item.accountName,
@@ -415,6 +416,9 @@ export class ReplenishmentService {
         account = await importAccount();
       } else {
         try {
+          await this.sub2ApiGateway.applyOAuthCredentials(
+            item.sub2apiAccountId, credentials, item.rule.modelWhitelist,
+          );
           account = await this.sub2ApiGateway.configureAndVerify({
             accountId: item.sub2apiAccountId,
             ...configuration,
@@ -654,7 +658,7 @@ export class ReplenishmentService {
       const rule = await this.repository.getRule(job.ruleId);
       let targetAccountId = job.sub2apiAccountId;
       try {
-        await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials);
+        await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials, rule?.modelWhitelist);
         job = await this.repository.upsertRecovery({ ...job, status: 'verifying', lastError: '' });
         await this.sub2ApiGateway.testAccount(targetAccountId, {
           modelId: job.verificationModel || 'gpt-5.6-luna',
@@ -672,6 +676,7 @@ export class ReplenishmentService {
           priority: rule.priority,
           modelId: rule.verificationModel,
           prompt: rule.verificationPrompt,
+          modelWhitelist: rule.modelWhitelist,
           onCreated: async (accountId) => this.repository.updateOrderItem(orderItem.id, {
             status: 'importing', sub2apiAccountId: accountId,
           }),
@@ -973,7 +978,7 @@ export class ReplenishmentService {
         throw errorWithStatus('补号策略缺少商品映射', 400);
       }
       const snapshot = await this.inspectRuleInventory(rule);
-      if (!force && snapshot.effectiveAccounts > rule.minAvailableAccounts) {
+      if (!force && snapshot.effectiveAccounts >= rule.minAvailableAccounts) {
         await recordDecision('inventory_healthy', `库存检查完成：有效 ${snapshot.effectiveAccounts}，无需补号`, { inventory: snapshot });
         return { status: 'healthy', available: snapshot.effectiveAccounts, inventory: snapshot };
       }
@@ -1233,12 +1238,20 @@ export class ReplenishmentService {
           priority: rule.priority,
           modelId: rule.verificationModel,
           prompt: rule.verificationPrompt,
+          modelWhitelist: rule.modelWhitelist,
         };
         const account = current.sub2apiAccountId
-          ? await this.sub2ApiGateway.configureAndVerify({
-            accountId: current.sub2apiAccountId,
-            ...configuration,
-          })
+          ? await (async () => {
+            await this.sub2ApiGateway.applyOAuthCredentials(
+              current.sub2apiAccountId,
+              credentials,
+              rule.modelWhitelist,
+            );
+            return this.sub2ApiGateway.configureAndVerify({
+              accountId: current.sub2apiAccountId,
+              ...configuration,
+            });
+          })()
           : await this.sub2ApiGateway.importAndVerify({
             name: current.accountName,
             platform: rule.platform,
