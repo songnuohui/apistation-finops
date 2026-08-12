@@ -286,6 +286,14 @@ test('supplier rotating token authentication keeps both tokens inside encrypted 
   assert.doesNotMatch(migration, /\b(?:access_token|refresh_token)\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('replenishment schedules and recovery policies remain FinOps-owned', () => {
+  const migration = read('migrations/037_replenishment_scheduling_recovery_policies.sql');
+  assert.match(migration, /schedule_interval_seconds INTEGER/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS .*replenishment_recovery_policies/s);
+  assert.match(migration, /import_attempt_count INTEGER/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

@@ -60,6 +60,10 @@ function rule(row) {
     pollIntervalSeconds: Number(row.poll_interval_seconds || 5),
     retryLimit: Number(row.retry_limit || 3),
     cooldownSeconds: Number(row.cooldown_seconds || 300),
+    scheduleStartTime: String(row.schedule_start_time || '00:00').slice(0, 5),
+    scheduleEndTime: String(row.schedule_end_time || '00:00').slice(0, 5),
+    scheduleIntervalSeconds: Number(row.schedule_interval_seconds || 300),
+    lastScheduledAt: row.last_scheduled_at || null,
     lastTriggeredAt: row.last_triggered_at || null,
     lastInventoryAt: row.last_inventory_at || null,
     lastError: row.last_error || '',
@@ -127,6 +131,8 @@ function item(row) {
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
     credentialCiphertext: row.credential_ciphertext || '',
+    importAttemptCount: Number(row.import_attempt_count || 0),
+    nextImportRetryAt: row.next_import_retry_at || null,
   };
 }
 
@@ -155,11 +161,28 @@ function recovery(row) {
     recoveredAt: row.recovered_at || null,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
-    mode: row.mode || '',
+    mode: row.recovery_mode || row.mode || 'manual',
+    recoveryEnabled: row.recovery_enabled === false ? false : true,
     verificationModel: row.verification_model || '',
     verificationPrompt: row.verification_prompt || '',
-    recoveryRetryLimit: row.recovery_retry_limit === null || row.recovery_retry_limit === undefined
-      ? null : Number(row.recovery_retry_limit),
+    recoveryRetryLimit: row.recovery_policy_retry_limit === null || row.recovery_policy_retry_limit === undefined
+      ? null : Number(row.recovery_policy_retry_limit),
+    recoveryRetryIntervalSeconds: Number(row.recovery_retry_interval_seconds || 60),
+  };
+}
+
+function recoveryPolicy(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    ruleId: Number(row.rule_id),
+    ruleName: row.rule_name || '',
+    enabled: Boolean(row.enabled),
+    mode: row.mode || 'manual',
+    retryLimit: row.retry_limit === null || row.retry_limit === undefined ? null : Number(row.retry_limit),
+    retryIntervalSeconds: Number(row.retry_interval_seconds || 60),
+    lastScannedAt: row.last_scanned_at || null,
+    updatedAt: row.updated_at || null,
   };
 }
 
@@ -206,6 +229,9 @@ function normalizeRuleInput(input) {
     pollIntervalSeconds: Number(input.pollIntervalSeconds || 5),
     retryLimit: Number(input.retryLimit ?? 3),
     cooldownSeconds: Number(input.cooldownSeconds ?? 300),
+    scheduleStartTime: String(input.scheduleStartTime || '00:00').trim(),
+    scheduleEndTime: String(input.scheduleEndTime || '00:00').trim(),
+    scheduleIntervalSeconds: Number(input.scheduleIntervalSeconds ?? 300),
   };
   if (!values.name) throw badRequest('请输入策略名称');
   if (!Number.isSafeInteger(values.productMappingId) || values.productMappingId <= 0) {
@@ -235,6 +261,36 @@ function normalizeRuleInput(input) {
     && (!Number.isSafeInteger(values.recoveryRetryLimit)
       || values.recoveryRetryLimit < 0 || values.recoveryRetryLimit > 20)) {
     throw badRequest('修复重试次数必须在 0 到 20 之间');
+  }
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(values.scheduleStartTime)
+    || !/^([01]\d|2[0-3]):[0-5]\d$/.test(values.scheduleEndTime)) {
+    throw badRequest('自动补号执行时段必须是有效的 24 小时时间');
+  }
+  if (!Number.isSafeInteger(values.scheduleIntervalSeconds)
+    || values.scheduleIntervalSeconds < 30 || values.scheduleIntervalSeconds > 86400) {
+    throw badRequest('自动补号轮询间隔必须在 30 到 86400 秒之间');
+  }
+  return values;
+}
+
+function normalizeRecoveryPolicyInput(input) {
+  const values = {
+    ruleId: Number(input.ruleId),
+    enabled: input.enabled !== false,
+    mode: String(input.mode || 'manual'),
+    retryLimit: input.retryLimit === null || input.retryLimit === undefined || input.retryLimit === ''
+      ? null : Number(input.retryLimit),
+    retryIntervalSeconds: Number(input.retryIntervalSeconds ?? 60),
+  };
+  if (!Number.isSafeInteger(values.ruleId) || values.ruleId <= 0) throw badRequest('请选择有效的补号策略');
+  if (!['manual', 'auto'].includes(values.mode)) throw badRequest('修复执行模式无效');
+  if (values.retryLimit !== null
+    && (!Number.isSafeInteger(values.retryLimit) || values.retryLimit < 0 || values.retryLimit > 20)) {
+    throw badRequest('修复重试次数必须在 0 到 20 之间');
+  }
+  if (!Number.isSafeInteger(values.retryIntervalSeconds)
+    || values.retryIntervalSeconds < 15 || values.retryIntervalSeconds > 86400) {
+    throw badRequest('修复重试间隔必须在 15 到 86400 秒之间');
   }
   return values;
 }
@@ -278,6 +334,10 @@ export class ReplenishmentRepository {
       pollIntervalSeconds: 5,
       retryLimit: 3,
       cooldownSeconds: 300,
+      scheduleStartTime: '00:00',
+      scheduleEndTime: '00:00',
+      scheduleIntervalSeconds: 300,
+      lastScheduledAt: null,
       product: 'oauth_30d',
       platform: 'openai',
       targetPoolKey: 'openai-team-primary',
@@ -293,6 +353,12 @@ export class ReplenishmentRepository {
     this.runs = [];
     this.events = [];
     this.recoveries = [];
+    this.recoveryPolicies = this.demo ? [{
+      id: 2, ruleId: 1, ruleName: 'OAuth 30D 主账号池', enabled: true,
+      mode: 'manual', retryLimit: null, retryIntervalSeconds: 60,
+      lastScannedAt: null,
+      updatedAt: new Date().toISOString(),
+    }] : [];
   }
 
   async listMappings() {
@@ -405,6 +471,7 @@ export class ReplenishmentRepository {
       values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.priority,
       values.verificationModel, values.verificationPrompt, values.pollIntervalSeconds,
       values.retryLimit, values.cooldownSeconds,
+      values.scheduleStartTime, values.scheduleEndTime, values.scheduleIntervalSeconds,
     ];
     const result = input.id
       ? await this.pool.query(`
@@ -414,7 +481,8 @@ export class ReplenishmentRepository {
             quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
             max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,priority=$17,
             verification_model=$18,verification_prompt=$19,poll_interval_seconds=$20,
-            retry_limit=$21,cooldown_seconds=$22,updated_at=NOW()
+            retry_limit=$21,cooldown_seconds=$22,schedule_start_time=$23,schedule_end_time=$24,
+            schedule_interval_seconds=$25,updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
@@ -422,11 +490,81 @@ export class ReplenishmentRepository {
             replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
             repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
             concurrency,priority,verification_model,verification_prompt,poll_interval_seconds,
-            retry_limit,cooldown_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+            retry_limit,cooldown_seconds,schedule_start_time,schedule_end_time,
+            schedule_interval_seconds,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
+  }
+
+  async markRuleScheduled(id, at = new Date().toISOString()) {
+    if (this.demo) {
+      const current = this.rules.find((entry) => entry.id === Number(id));
+      if (current) current.lastScheduledAt = at;
+      return;
+    }
+    await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules
+      SET last_scheduled_at=$2,updated_at=NOW()
+      WHERE id=$1`, [id, at]);
+  }
+
+  async listRecoveryPolicies() {
+    if (this.demo) return this.recoveryPolicies.map((entry) => ({ ...entry }));
+    const result = await this.pool.query(`
+      SELECT policy.*,replenishment_rule.name AS rule_name
+      FROM ${this.schema}.replenishment_recovery_policies policy
+      JOIN ${this.schema}.replenishment_rules replenishment_rule ON replenishment_rule.id=policy.rule_id
+      WHERE replenishment_rule.deleted_at IS NULL
+      ORDER BY replenishment_rule.id`);
+    return result.rows.map(recoveryPolicy);
+  }
+
+  async getRecoveryPolicyByRule(ruleId) {
+    if (this.demo) return this.recoveryPolicies.find((entry) => entry.ruleId === Number(ruleId)) || null;
+    const result = await this.pool.query(`
+      SELECT policy.*,replenishment_rule.name AS rule_name
+      FROM ${this.schema}.replenishment_recovery_policies policy
+      JOIN ${this.schema}.replenishment_rules replenishment_rule ON replenishment_rule.id=policy.rule_id
+      WHERE policy.rule_id=$1 AND replenishment_rule.deleted_at IS NULL`, [ruleId]);
+    return recoveryPolicy(result.rows[0]);
+  }
+
+  async saveRecoveryPolicy(input, actor = 'admin') {
+    const values = normalizeRecoveryPolicyInput(input);
+    if (!await this.getRule(values.ruleId)) throw notFound('关联的补号策略不存在或已删除');
+    if (this.demo) {
+      let current = this.recoveryPolicies.find((entry) => entry.ruleId === values.ruleId);
+      if (!current) {
+        current = { id: ++this.sequence, ruleName: (await this.getRule(values.ruleId))?.name || '' };
+        this.recoveryPolicies.push(current);
+      }
+      Object.assign(current, values, { updatedAt: new Date().toISOString() });
+      return { ...current };
+    }
+    const result = await this.pool.query(`
+      INSERT INTO ${this.schema}.replenishment_recovery_policies(
+        rule_id,enabled,mode,retry_limit,retry_interval_seconds,created_by)
+      VALUES($1,$2,$3,$4,$5,$6)
+      ON CONFLICT(rule_id) DO UPDATE SET
+        enabled=EXCLUDED.enabled,mode=EXCLUDED.mode,retry_limit=EXCLUDED.retry_limit,
+        retry_interval_seconds=EXCLUDED.retry_interval_seconds,updated_at=NOW()
+      RETURNING rule_id`, [values.ruleId, values.enabled, values.mode, values.retryLimit,
+      values.retryIntervalSeconds, actor]);
+    return this.getRecoveryPolicyByRule(result.rows[0].rule_id);
+  }
+
+  async markRecoveryPolicyScanned(ruleId, at = new Date().toISOString()) {
+    if (this.demo) {
+      const current = this.recoveryPolicies.find((entry) => entry.ruleId === Number(ruleId));
+      if (current) current.lastScannedAt = at;
+      return;
+    }
+    await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_recovery_policies
+      SET last_scanned_at=$2,updated_at=NOW()
+      WHERE rule_id=$1`, [ruleId, at]);
   }
 
   async setRuleEnabled(id, enabled, actor = 'admin') {
@@ -662,23 +800,45 @@ export class ReplenishmentRepository {
   }
 
   async getRecovery(id) {
-    if (this.demo) return this.recoveries.find((entry) => entry.id === Number(id)) || null;
+    if (this.demo) {
+      const current = this.recoveries.find((entry) => entry.id === Number(id));
+      if (!current) return null;
+      const policy = this.recoveryPolicies.find((entry) => entry.ruleId === current.ruleId);
+      const selectedRule = this.rules.find((entry) => entry.id === current.ruleId);
+      return {
+        ...current,
+        mode: policy?.mode || 'manual', recoveryEnabled: policy?.enabled !== false,
+        recoveryRetryLimit: policy?.retryLimit ?? null,
+        recoveryRetryIntervalSeconds: policy?.retryIntervalSeconds || 60,
+        verificationModel: selectedRule?.verificationModel || '',
+        verificationPrompt: selectedRule?.verificationPrompt || '',
+      };
+    }
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+        policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
+        policy.retry_limit AS recovery_policy_retry_limit,
+        policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       WHERE rr.id=$1`, [id]);
     return recovery(result.rows[0]);
   }
 
   async listRecoveries({ limit = 100 } = {}) {
-    if (this.demo) return [...this.recoveries].sort((a, b) => b.id - a.id).slice(0, limit).map((entry) => ({ ...entry }));
+    if (this.demo) return Promise.all([...this.recoveries].sort((a, b) => b.id - a.id).slice(0, limit)
+      .map((entry) => this.getRecovery(entry.id)));
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+        policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
+        policy.retry_limit AS recovery_policy_retry_limit,
+        policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       ORDER BY rr.updated_at DESC,rr.id DESC LIMIT $1`, [limit]);
     return result.rows.map(recovery);
   }
@@ -692,10 +852,14 @@ export class ReplenishmentRepository {
         .slice(0, limit).map((entry) => ({ ...entry }));
     }
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.mode,r.verification_model,r.verification_prompt,r.recovery_retry_limit
+      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+        policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
+        policy.retry_limit AS recovery_policy_retry_limit,
+        policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
+      LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       WHERE rr.status=ANY($1::text[]) AND (rr.next_retry_at IS NULL OR rr.next_retry_at<=NOW())
       ORDER BY rr.updated_at LIMIT $2`, [statuses, limit]);
     return result.rows.map(recovery);
@@ -821,6 +985,59 @@ export class ReplenishmentRepository {
     return result.rows.map(order);
   }
 
+  async listImportRetryItems({ limit = 30, dueOnly = true, includeManual = false } = {}) {
+    const statuses = includeManual ? ['retry_wait', 'manual_required'] : ['retry_wait'];
+    if (this.demo) {
+      return this.items.filter((entry) => statuses.includes(entry.status)
+        && (!dueOnly || !entry.nextImportRetryAt || Date.parse(entry.nextImportRetryAt) <= Date.now()))
+        .slice(0, limit).map((entry) => ({ ...entry,
+          order: this.orders.find((candidate) => candidate.id === entry.orderId) || null,
+          rule: this.rules.find((candidate) => candidate.id === this.orders.find((candidate) => candidate.id === entry.orderId)?.ruleId) || null,
+        }));
+    }
+    const result = await this.pool.query(`
+      SELECT i.*,o.rule_id,o.run_id,o.requested_quantity,o.valid_quantity AS order_valid_quantity,
+        o.delivered_quantity,o.actual_paid_amount_cny,o.quoted_amount_cny,o.status AS order_status,
+        o.product,o.platform,o.target_pool_key,o.external_order_id,
+        r.name AS rule_name,m.target_group_ids,r.concurrency,r.priority,m.platform AS rule_platform,
+        r.verification_model,r.verification_prompt,
+        policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
+        policy.retry_limit AS recovery_policy_retry_limit,
+        policy.retry_interval_seconds AS recovery_retry_interval_seconds
+      FROM ${this.schema}.oauth_supply_order_items i
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+      JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+      LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=o.rule_id
+      WHERE i.status=ANY($2::text[])
+        AND ($3::boolean=FALSE OR i.next_import_retry_at IS NULL OR i.next_import_retry_at<=NOW())
+      ORDER BY i.updated_at,i.id LIMIT $1`, [limit, statuses, dueOnly]);
+    return result.rows.map((row) => ({
+      ...item(row),
+      order: {
+        id: Number(row.order_id), runId: Number(row.run_id), ruleId: Number(row.rule_id),
+        requestedQuantity: Number(row.requested_quantity || 0), validQuantity: Number(row.order_valid_quantity || 0),
+        deliveredQuantity: Number(row.delivered_quantity || 0), actualPaidAmountCny: number(row.actual_paid_amount_cny),
+        quotedAmountCny: number(row.quoted_amount_cny), status: row.order_status,
+        product: row.product, platform: row.platform, targetPoolKey: row.target_pool_key,
+        externalOrderId: row.external_order_id || '',
+      },
+      rule: {
+        id: Number(row.rule_id), name: row.rule_name, targetGroupIds: (row.target_group_ids || []).map(Number),
+        concurrency: Number(row.concurrency || 1), priority: Number(row.priority || 0),
+        platform: row.rule_platform || row.platform, verificationModel: row.verification_model,
+        verificationPrompt: row.verification_prompt,
+      },
+      recoveryPolicy: {
+        enabled: row.recovery_enabled === undefined ? true : Boolean(row.recovery_enabled),
+        mode: row.recovery_mode || 'manual',
+        retryLimit: row.recovery_policy_retry_limit === null || row.recovery_policy_retry_limit === undefined
+          ? null : Number(row.recovery_policy_retry_limit),
+        retryIntervalSeconds: Number(row.recovery_retry_interval_seconds || 60),
+      },
+    }));
+  }
+
   async updateOrder(id, updates) {
     if (this.demo) {
       const current = this.orders.find((entry) => entry.id === Number(id));
@@ -857,6 +1074,7 @@ export class ReplenishmentRepository {
           sub2apiAccountId: value.sub2apiAccountId || null, costLedgerStatus: value.costLedgerStatus || 'pending',
           costLedgerPeriodId: value.costLedgerPeriodId || null, costLedgerError: value.costLedgerError || '',
           errorMessage: value.errorMessage || '',
+          importAttemptCount: value.importAttemptCount || 0, nextImportRetryAt: value.nextImportRetryAt || null,
           healthStatus: value.healthStatus || 'unknown', quotaUsedPercent: value.quotaUsedPercent ?? null,
           quotaWindow: value.quotaWindow || '', lastHealthAt: value.lastHealthAt || null,
           metadata: value.metadata || {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -901,7 +1119,8 @@ export class ReplenishmentRepository {
         credential_version=$6,credential_ciphertext=$7,sub2api_account_id=$8,
         cost_ledger_status=$9,cost_ledger_period_id=$10,cost_ledger_error=$11,
         error_message=$12,metadata=$13::jsonb,health_status=$14,quota_used_percent=$15,
-        quota_window=$16,last_health_at=$17,updated_at=NOW()
+        quota_window=$16,last_health_at=$17,import_attempt_count=$18,
+        next_import_retry_at=$19,updated_at=NOW()
       WHERE id=$1 RETURNING *`,
     [id, merged.status, merged.verificationStatus, merged.individualCostCny, merged.finalCostCny,
       merged.credentialVersion || '', merged.credentialCiphertext || '', merged.sub2apiAccountId,
@@ -909,7 +1128,7 @@ export class ReplenishmentRepository {
       String(merged.costLedgerError || '').slice(0, 1000),
       String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(merged.metadata || {}),
       merged.healthStatus || 'unknown', merged.quotaUsedPercent ?? null, merged.quotaWindow || '',
-      merged.lastHealthAt || null]);
+      merged.lastHealthAt || null, Number(merged.importAttemptCount || 0), merged.nextImportRetryAt || null]);
     return item(result.rows[0]);
   }
 

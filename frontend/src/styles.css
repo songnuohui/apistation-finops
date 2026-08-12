@@ -428,6 +428,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .execution-event-details h3{margin:18px 0 0;font-size:13px}
 .execution-event-details dl{grid-template-columns:1fr;margin-top:8px}
 .spinning{animation:spin 1s linear infinite}
+.policy-editor{display:flex;align-items:center;gap:12px}.policy-editor>select{flex:1}.inline-toggle{display:flex!important;grid-template-columns:none!important;align-items:center;gap:7px!important;white-space:nowrap}.inline-toggle input{width:16px!important;height:16px!important;padding:0!important}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 @media (max-width:760px){

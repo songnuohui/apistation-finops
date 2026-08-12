@@ -69,6 +69,35 @@ test('blank recovery retry limit is stored as unlimited', async () => {
   assert.equal(saved.recoveryRetryLimit, null);
 });
 
+test('replenishment schedule accepts daily execution windows and intervals', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  const saved = await repository.saveRule({
+    ...current,
+    scheduleStartTime: '09:30',
+    scheduleEndTime: '21:15',
+    scheduleIntervalSeconds: 180,
+  });
+
+  assert.equal(saved.scheduleStartTime, '09:30');
+  assert.equal(saved.scheduleEndTime, '21:15');
+  assert.equal(saved.scheduleIntervalSeconds, 180);
+});
+
+test('recovery policy is independent from replenishment rule enablement', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  await repository.setRuleEnabled(1, false);
+
+  const policy = await repository.saveRecoveryPolicy({
+    ruleId: 1, enabled: true, mode: 'auto', retryLimit: null, retryIntervalSeconds: 45,
+  });
+
+  assert.equal(policy.enabled, true);
+  assert.equal(policy.mode, 'auto');
+  assert.equal((await repository.getRule(1)).enabled, false);
+});
+
 test('replenishment rules reject a missing product mapping before writing', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);
@@ -231,6 +260,50 @@ test('delivery falls back to paid amount divided by valid accounts when item pri
   assert.deepEqual(result.items.map((item) => item.finalCostCny), [4.5, 4.5]);
 });
 
+test('failed verification is queued for a later import retry and can complete without a new order', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.mode = 'auto';
+  rule.enabled = true;
+  await repository.saveRecoveryPolicy({
+    ruleId: rule.id, enabled: true, mode: 'auto', retryLimit: null, retryIntervalSeconds: 15,
+  });
+  const order = await repository.createPlannedOrder({
+    rule, trigger: 'manual', quantity: 1, availableBefore: 0, quotedAmountCny: 3,
+    actor: 'test', status: 'ordering', idempotencyKey: 'import-retry-order',
+  });
+  let shouldFail = true;
+  const gateway = {
+    async importAndVerify(input) {
+      await input.onCreated?.(901);
+      if (shouldFail) throw new Error('verification timed out');
+      return { id: 901 };
+    },
+    async configureAndVerify(input) {
+      assert.equal(input.accountId, 901);
+      if (shouldFail) throw new Error('verification timed out');
+      return { id: 901 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+
+  await service.processDelivery(order, rule, {
+    charged_fen: 300,
+    accounts: [{ email: 'retry@example.com', credentials: { access_token: 'retry-token' } }],
+  });
+  let savedOrder = await repository.getOrder(order.id);
+  assert.equal(savedOrder.status, 'import_retry');
+  assert.equal(savedOrder.items[0].status, 'retry_wait');
+  assert.equal(savedOrder.items[0].sub2apiAccountId, 901);
+
+  shouldFail = false;
+  await service.retryImportItem(savedOrder.items[0].id);
+  savedOrder = await repository.getOrder(order.id);
+  assert.equal(savedOrder.status, 'completed');
+  assert.equal(savedOrder.items[0].verificationStatus, 'passed');
+  assert.equal(savedOrder.items[0].sub2apiAccountId, 901);
+});
+
 test('cost ledger stays pending until FinOps synchronization exposes the imported account', async () => {
   const item = {
     id: 41,
@@ -364,6 +437,38 @@ test('effective inventory excludes accounts at the quota threshold and starts re
   assert.equal(snapshot.lowQuotaAccounts, 1);
   assert.equal(snapshot.repairingAccounts, 1);
   assert.equal((await repository.listRecoveries()).length, 1);
+});
+
+test('only normal and schedulable Sub2API accounts count as effective inventory', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.quotaWindow = 'any';
+  rule.quotaUnknownPolicy = 'ignore';
+  for (const [id, accountId] of [[31, 131], [32, 132], [33, 133], [34, 134], [35, 135]]) {
+    await trackedItem(repository, rule, id, accountId);
+  }
+  const accounts = new Map([
+    [131, { status: 'active', schedulable: true }],
+    [132, { status: 'active', schedulable: false }],
+    [133, { status: 'active' }],
+    [134, { status: 'inactive', schedulable: true }],
+    [135, { status: 'error', schedulable: true }],
+  ]);
+  const gateway = {
+    async getAccount(id) {
+      return { id, platform: 'openai', group_ids: [1], ...accounts.get(id) };
+    },
+    async getAccountUsage() {
+      return { codex_7d_used_percent: 20 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+
+  const snapshot = await service.inspectRuleInventory(rule);
+
+  assert.equal(snapshot.effectiveAccounts, 1);
+  assert.equal(snapshot.unavailableAccounts, 4);
+  assert.deepEqual(snapshot.accounts.map((account) => account.schedulable), [true, false, false, true, true]);
 });
 
 test('inventory at the inclusive threshold orders only enough to reach the target', async () => {

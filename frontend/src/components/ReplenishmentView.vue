@@ -45,8 +45,9 @@
                 <span>≤ {{ rule.minAvailableAccounts }} 触发</span>
                 <span>补到 {{ rule.targetAvailableAccounts }}</span>
                 <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
-                <span>修复等待 {{ duration(rule.repairGraceSeconds) }}</span>
-                <span>修复重试 {{ retryLimitLabel(rule.recoveryRetryLimit) }}</span>
+                <span>补号时段 {{ rule.scheduleStartTime }}-{{ rule.scheduleEndTime }}</span>
+                <span>补号间隔 {{ duration(rule.scheduleIntervalSeconds) }}</span>
+                <span>修复策略 {{ recoveryPolicyFor(rule).enabled ? (recoveryPolicyFor(rule).mode === 'auto' ? '自动' : '手动') : '停用' }}</span>
               </div>
               <div v-if="rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
                 <span>跟踪 {{ rule.lastInventorySnapshot.trackedAccounts || 0 }}</span>
@@ -167,15 +168,15 @@
     <section class="panel">
       <div class="panel-head"><div><h2>账号修复</h2><p>401 账号会退出有效库存；认领后先保存新版凭据，再更新原 Sub2API 账号并重新验号。</p></div><span class="table-note">最近 {{ recoveries.length }} 条</span></div>
       <div class="recovery-list">
-        <div v-for="recovery in recoveries" :key="recovery.id" class="recovery-row">
+        <div v-for="recovery in recoveries" :key="`${recovery.kind || 'account'}-${recovery.id}`" class="recovery-row">
           <div class="recovery-main">
             <strong>{{ recovery.accountName || `修复任务 #${recovery.id}` }}</strong>
-            <small>Sub2API #{{ recovery.targetAccountId }} · 版本 {{ recovery.credentialVersion || '--' }} · 尝试 {{ recovery.attemptCount || 0 }} 次</small>
+            <small>{{ recovery.kind === 'import' ? `订单 #${recovery.orderId} · 导入重试` : `Sub2API #${recovery.targetAccountId} · 版本 ${recovery.credentialVersion || '--'}` }} · 尝试 {{ recovery.attemptCount || 0 }} 次</small>
             <small v-if="recovery.lastError" class="recovery-error">{{ recovery.lastError }}</small>
           </div>
           <div class="recovery-actions">
             <span class="status-pill" :class="recoveryStatusClass(recovery.status)">{{ recoveryStatusLabel(recovery.status) }}</span>
-            <button v-if="recovery.ready && recovery.status !== 'recovered'" class="secondary-button compact-button" @click="claimRecovery(recovery)">立即重试</button>
+            <button v-if="recovery.ready && recovery.status !== 'recovered'" class="secondary-button compact-button" @click="retryRecovery(recovery)">立即重试</button>
           </div>
         </div>
         <div v-if="!recoveries.length" class="empty-state">暂无账号修复任务</div>
@@ -210,8 +211,18 @@
           <label>额度消耗阈值<input v-model.number="editor.quotaUsedThresholdPercent" type="number" min="0" max="100" step="1" /></label>
           <label>额度判断窗口<select v-model="editor.quotaWindow"><option value="any">任一窗口</option><option value="short">短窗口（5小时）</option><option value="long">长窗口（7天）</option></select></label>
           <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
+          <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
+          <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
+          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="30" max="86400" /></label>
           <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
-          <label>修复最大重试<input v-model="editor.recoveryRetryLimit" type="number" min="0" max="20" placeholder="留空为无限制" /><small class="field-hint">不填写时会持续重试，直到修复成功或人工处理。</small></label>
+          <label class="full-field">独立修复策略
+            <span class="policy-editor">
+              <select v-model="recoveryEditor.mode"><option value="manual">手动修复</option><option value="auto">自动修复</option></select>
+              <label class="inline-toggle"><input v-model="recoveryEditor.enabled" type="checkbox" />启用修复</label>
+            </span>
+          </label>
+          <label>修复最大重试<input v-model="recoveryEditor.retryLimit" type="number" min="0" max="20" placeholder="留空为无限制" /></label>
+          <label>修复重试间隔（秒）<input v-model.number="recoveryEditor.retryIntervalSeconds" type="number" min="15" max="86400" /></label>
           <label>固定并发数<input v-model.number="editor.concurrency" type="number" min="1" /></label>
           <label>固定优先级<input v-model.number="editor.priority" type="number" min="0" /></label>
           <label>单次成本上限<input v-model.number="editor.maxOrderAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
@@ -292,10 +303,12 @@ const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
 const orders = ref<any[]>([]);
 const recoveries = ref<any[]>([]);
+const recoveryPolicies = ref<any[]>([]);
 const executionEvents = ref<any[]>([]);
 const eventRuleId = ref('');
 const executionLogPanel = ref<HTMLElement | null>(null);
 const editor = ref<any | null>(null);
+const recoveryEditor = ref<any>({ enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 });
 const selectedOrder = ref<any | null>(null);
 const selectedEvent = ref<any | null>(null);
 
@@ -310,9 +323,9 @@ const dateTimeWithSeconds = (value: any) => value ? new Intl.DateTimeFormat('zh-
 const duration = (seconds: any) => Number(seconds) >= 3600 ? `${Math.round(Number(seconds) / 3600)} 小时` : `${Math.round(Number(seconds) / 60)} 分钟`;
 const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', auto: '全自动' } as Record<string, string>)[value] || value;
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
-const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
+const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
-const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
+const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
 const eventTypeLabel = (value: string) => ({
@@ -320,7 +333,8 @@ const eventTypeLabel = (value: string) => ({
   observed_replenishment: '观察记录', rule_execution_failed: '执行失败',
   rule_enabled: '策略启动', rule_disabled: '策略暂停',
   approval_required: '等待审批', order_planned: '准备下单', order_created: '订单已创建',
-  delivery_processed: '导入完成', import_failed: '导入失败',
+  delivery_processed: '导入完成', import_failed: '导入失败', import_retry_scheduled: '导入重试',
+  import_retry_succeeded: '重试成功', import_retry_manual_required: '人工处理',
   account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
   recovery_manual_required: '人工处理', recovery_verified: '修复完成',
 } as Record<string, string>)[value] || value || '操作记录';
@@ -331,6 +345,8 @@ const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : va
 const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
 const groupSummary = (ids: any[] = []) => ids.length ? ids.map((id) => groupById.value.get(Number(id))?.name || `分组 #${id}`).join('、') : '未选择正式分组';
 const orderGroupSummary = (order: any) => groupSummary(rules.value.find((rule) => Number(rule.id) === Number(order.ruleId))?.targetGroupIds || []);
+const recoveryPolicyFor = (rule: any) => recoveryPolicies.value.find((policy) => Number(policy.ruleId) === Number(rule.id))
+  || { enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 };
 const relatedOrder = (event: any) => event?.orderId
   ? orders.value.find((order) => Number(order.id) === Number(event.orderId)) || null
   : null;
@@ -377,19 +393,20 @@ async function load() {
   loading.value = true;
   error.value = '';
   try {
-    const [nextDashboard, nextCatalog, nextMappings, nextRules, nextOrders, nextRecoveries] = await Promise.all([
+    const [nextDashboard, nextCatalog, nextMappings, nextRules, nextRecoveryPolicies, nextOrders, nextRecoveries] = await Promise.all([
       get('/replenishment/dashboard'),
       get('/replenishment/catalog').catch((err: any) => ({
         groups: [], platforms: [], error: err?.message || 'Sub2API 分组目录暂时不可用',
       })),
       get('/replenishment/mappings'),
-      get('/replenishment/rules'), get('/replenishment/orders?limit=50'),
+      get('/replenishment/rules'), get('/replenishment/recovery-policies'), get('/replenishment/orders?limit=50'),
       get('/replenishment/recoveries').catch((err: any) => ({ items: [], error: err?.message || '账号修复记录暂时不可用' })),
     ]);
     dashboard.value = nextDashboard;
     catalog.value = nextCatalog;
     mappings.value = nextMappings;
     rules.value = nextRules;
+    recoveryPolicies.value = nextRecoveryPolicies;
     orders.value = nextOrders;
     recoveries.value = nextRecoveries.items || [];
     if (nextCatalog.error) error.value = nextCatalog.error;
@@ -472,13 +489,19 @@ function newRule() {
     minAvailableAccounts: 2, targetAvailableAccounts: 5, replenishQuantity: 3,
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
     repairGraceSeconds: 900, recoveryRetryLimit: null,
+    scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
     maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, priority: 20,
     verificationModel: 'gpt-5.6-luna',
     verificationPrompt: 'Reply with a short success marker if this account can complete a basic request.',
     pollIntervalSeconds: 5, retryLimit: 3, cooldownSeconds: 300,
   };
+  recoveryEditor.value = { enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 };
 }
-function editRule(rule: any) { editorError.value = ''; editor.value = { ...rule, kind: 'rule' }; }
+function editRule(rule: any) {
+  editorError.value = '';
+  editor.value = { ...rule, kind: 'rule' };
+  recoveryEditor.value = { ...recoveryPolicyFor(rule) };
+}
 function editMapping(mapping: any) { editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', targetGroupIds: [...(mapping.targetGroupIds || [])] }; }
 function onMappingPlatformChange() { editor.value.targetGroupIds = []; editorError.value = ''; }
 
@@ -506,10 +529,16 @@ async function saveEditor() {
         targetGroupIds: editor.value.targetGroupIds, notes: editor.value.notes, enabled: true,
       });
     } else {
-      await send(editor.value.id ? `/replenishment/rules/${editor.value.id}` : '/replenishment/rules', editor.value.id ? 'PATCH' : 'POST', {
+      const savedRule = await send(editor.value.id ? `/replenishment/rules/${editor.value.id}` : '/replenishment/rules', editor.value.id ? 'PATCH' : 'POST', {
         ...editor.value,
         kind: undefined,
         recoveryRetryLimit: editor.value.recoveryRetryLimit === '' ? null : editor.value.recoveryRetryLimit,
+      });
+      await send(`/replenishment/recovery-policies/${savedRule.id}`, 'PUT', {
+        enabled: recoveryEditor.value.enabled,
+        mode: recoveryEditor.value.mode,
+        retryLimit: recoveryEditor.value.retryLimit === '' ? null : recoveryEditor.value.retryLimit,
+        retryIntervalSeconds: recoveryEditor.value.retryIntervalSeconds,
       });
     }
     editor.value = null;
@@ -576,6 +605,13 @@ async function viewOrder(order: any) {
 async function claimRecovery(recovery: any) {
   try { await send(`/replenishment/recoveries/${recovery.id}/claim`, 'POST', {}); emit('toast', '修复任务已执行'); await load(); }
   catch (err: any) { error.value = err.message || '修复执行失败'; await load(); }
+}
+async function retryRecovery(recovery: any) {
+  try {
+    if (recovery.kind === 'import') await send(`/replenishment/import-retries/${recovery.orderItemId}/retry`, 'POST', {});
+    else await send(`/replenishment/recoveries/${recovery.id}/claim`, 'POST', {});
+    emit('toast', '修复任务已执行'); await load();
+  } catch (err: any) { error.value = err.message || '修复执行失败'; await load(); }
 }
 
 onMounted(load);

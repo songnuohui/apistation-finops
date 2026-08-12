@@ -148,6 +148,32 @@ function inventoryEventSummary(snapshot) {
   return summary;
 }
 
+function localMinutes(at, timezone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone || 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(at));
+  const values = Object.fromEntries(parts.map((entry) => [entry.type, entry.value]));
+  return Number(values.hour) * 60 + Number(values.minute);
+}
+
+function clockMinutes(value) {
+  const [hour, minute] = String(value || '00:00').split(':').map(Number);
+  return hour * 60 + minute;
+}
+
+function insideSchedule(rule, nowMs, timezone) {
+  const start = clockMinutes(rule.scheduleStartTime);
+  const end = clockMinutes(rule.scheduleEndTime);
+  if (start === end) return true;
+  const current = localMinutes(nowMs, timezone);
+  return start < end ? current >= start && current < end : current >= start || current < end;
+}
+
+function intervalElapsed(lastAt, seconds, nowMs) {
+  return !lastAt || !Number.isFinite(Date.parse(lastAt))
+    || nowMs - Date.parse(lastAt) >= Number(seconds || 0) * 1000;
+}
+
 export class ReplenishmentService {
   constructor(repository, oauthSupplyAuthService, sub2ApiGateway, config, logger = console, {
     client,
@@ -231,9 +257,26 @@ export class ReplenishmentService {
       this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
     });
     const entries = await this.repository.listRecoveries({ limit: 100 });
+    const importRetries = await this.repository.listImportRetryItems({ limit: 100, dueOnly: false, includeManual: true });
     return {
-      items: entries.map((entry) => ({
+      items: [
+        ...importRetries.map((entry) => ({
+          id: `import:${entry.id}`,
+          kind: 'import',
+          orderItemId: entry.id,
+          orderId: entry.orderId,
+          ruleId: entry.order?.ruleId,
+          accountName: entry.accountName,
+          status: entry.status,
+          ready: true,
+          attemptCount: entry.importAttemptCount,
+          nextRetryAt: entry.nextImportRetryAt,
+          lastError: entry.errorMessage,
+          targetAccountId: entry.sub2apiAccountId,
+        })),
+        ...entries.map((entry) => ({
         id: entry.id,
+        kind: 'account',
         orderItemId: entry.orderItemId,
         ruleId: entry.ruleId,
         accountName: entry.accountName || entry.accountKey,
@@ -247,8 +290,77 @@ export class ReplenishmentService {
         firstSeenAt: entry.firstSeenAt,
         recoveredAt: entry.recoveredAt,
         targetAccountId: entry.sub2apiAccountId,
-      })),
+        })),
+      ],
     };
+  }
+
+  async retryImportItem(itemId) {
+    const item = (await this.repository.listImportRetryItems({ limit: 500, dueOnly: false, includeManual: true }))
+      .find((entry) => Number(entry.id) === Number(itemId));
+    if (!item) throw errorWithStatus('导入重试任务不存在', 404);
+    const policy = item.recoveryPolicy || await this.repository.getRecoveryPolicyByRule(item.order?.ruleId);
+    if (!policy?.enabled) throw errorWithStatus('修复策略已停用', 409);
+    try {
+      if (!item.credentialCiphertext) throw errorWithStatus('已保存的账号凭据不存在', 409);
+      const saved = this.vault.decrypt(item.credentialCiphertext);
+      const credentials = saved.credentials || saved.raw?.credentials || saved;
+      const configuration = {
+        groupIds: item.rule.targetGroupIds,
+        concurrency: item.rule.concurrency,
+        priority: item.rule.priority,
+        modelId: item.rule.verificationModel,
+        prompt: item.rule.verificationPrompt,
+      };
+      const account = item.sub2apiAccountId
+        ? await this.sub2ApiGateway.configureAndVerify({ accountId: item.sub2apiAccountId, ...configuration })
+        : await this.sub2ApiGateway.importAndVerify({
+          name: item.accountName,
+          platform: item.rule.platform,
+          credentials,
+          expiresAt: item.metadata?.expiresAt || null,
+          ...configuration,
+          onCreated: async (accountId) => this.repository.updateOrderItem(item.id, {
+            status: 'importing', sub2apiAccountId: accountId,
+          }),
+        });
+      await this.repository.updateOrderItem(item.id, {
+        status: 'imported', verificationStatus: 'passed', sub2apiAccountId: account?.id || item.sub2apiAccountId,
+        importAttemptCount: Number(item.importAttemptCount || 0) + 1, nextImportRetryAt: null, errorMessage: '',
+      });
+      const order = await this.repository.getOrder(item.order.id);
+      const validQuantity = order.items.filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)).length;
+      const failedQuantity = Math.max(0, order.requestedQuantity - validQuantity);
+      const status = failedQuantity === 0 ? 'completed' : 'import_retry';
+      await this.repository.updateOrder(order.id, { status, validQuantity, lastError: failedQuantity ? `${failedQuantity} 个账号等待重新导入` : '' });
+      await this.repository.finishRun(order.runId, {
+        status, actualPaidAmountCny: order.actualPaidAmountCny, deliveredQuantity: order.deliveredQuantity,
+        validQuantity, failedQuantity, errorMessage: failedQuantity ? `${failedQuantity} 个账号等待重新导入` : '',
+      });
+      await this.repository.addEvent({
+        ruleId: item.order.ruleId, runId: item.order.runId, orderId: item.order.id, itemId: item.id,
+        eventType: 'import_retry_succeeded', message: '失败账号已重新导入并验号成功',
+        details: { attempts: Number(item.importAttemptCount || 0) + 1 },
+      });
+      return { ok: true, itemId: item.id, accountId: account?.id || item.sub2apiAccountId };
+    } catch (error) {
+      const attempts = Number(item.importAttemptCount || 0) + 1;
+      const retryLimit = policy?.retryLimit === null || policy?.retryLimit === undefined ? null : Number(policy.retryLimit);
+      const exhausted = retryLimit !== null && attempts > retryLimit;
+      await this.repository.updateOrderItem(item.id, {
+        status: exhausted ? 'manual_required' : 'retry_wait', verificationStatus: 'failed',
+        importAttemptCount: attempts,
+        nextImportRetryAt: exhausted ? null : new Date(this.now() + Number(policy?.retryIntervalSeconds || 60) * 1000).toISOString(),
+        errorMessage: String(error?.message || error),
+      });
+      await this.repository.updateOrder(item.order.id, { status: 'import_retry', lastError: String(error?.message || error) });
+      await this.repository.addEvent({
+        ruleId: item.order.ruleId, runId: item.order.runId, orderId: item.order.id, itemId: item.id,
+        eventType: exhausted ? 'import_retry_manual_required' : 'import_retry_scheduled',
+        message: String(error?.message || error), details: { attempts, retryLimit, exhausted },
+      });
+      throw error;
+    }
   }
 
   async rawRecoveries({ beforeId = 0 } = {}) {
@@ -309,6 +421,7 @@ export class ReplenishmentService {
     let job = await this.repository.getRecovery(recoveryId);
     if (!job) throw errorWithStatus('修复任务不存在', 404);
     if (job.status === 'recovered') return { ok: true, recoveryId: job.id, targetAccountId: job.sub2apiAccountId };
+    if (!job.recoveryEnabled) throw errorWithStatus('修复策略已停用', 409);
     try {
       let credentials;
       let credentialVersion = job.credentialVersion;
@@ -386,7 +499,8 @@ export class ReplenishmentService {
         ...job,
         status: exhausted ? 'manual_required' : 'retry_wait',
         attemptCount: attempts,
-        nextRetryAt: exhausted ? null : new Date(this.now() + retryDelayMs(attempts)).toISOString(),
+        nextRetryAt: exhausted ? null : new Date(this.now()
+          + Number(job.recoveryRetryIntervalSeconds || 60) * 1000).toISOString(),
         lastError: String(error?.message || error),
       });
       await this.repository.addEvent({
@@ -463,7 +577,10 @@ export class ReplenishmentService {
         && String(account?.status || '').toLowerCase() === 'active'
         && String(account?.platform || rule.platform) === rule.platform
         && groupMatched
-        && account?.schedulable !== false
+        // Sub2API exposes the UI's "normal" state as active + schedulable.
+        // Treat missing runtime eligibility conservatively so a partial API
+        // response cannot inflate the replenishment inventory.
+        && account?.schedulable === true
         && !expired
         && !authFailed
         && !repairing;
@@ -501,7 +618,7 @@ export class ReplenishmentService {
         quotaUsedPercent: selected.value,
         quotaWindow: selected.window,
         status: account?.status || '',
-        schedulable: account?.schedulable !== false,
+        schedulable: account?.schedulable === true,
         expiresAt,
         lastError: readError || account?.error_message || account?.errorMessage || '',
       });
@@ -834,9 +951,15 @@ export class ReplenishmentService {
         });
       } catch (error) {
         failedQuantity += 1;
+        const policy = await this.repository.getRecoveryPolicyByRule(rule.id);
+        const retryEnabled = policy?.enabled !== false && current.credentialCiphertext;
         await this.repository.updateOrderItem(current.id, {
-          status: 'failed',
+          status: retryEnabled ? 'retry_wait' : 'manual_required',
           verificationStatus: 'failed',
+          importAttemptCount: Number(current.importAttemptCount || 0) + 1,
+          nextImportRetryAt: retryEnabled
+            ? new Date(this.now() + Number(policy?.retryIntervalSeconds || 60) * 1000).toISOString()
+            : null,
           errorMessage: String(error?.message || error),
         });
         await this.repository.addEvent({
@@ -844,7 +967,7 @@ export class ReplenishmentService {
           runId: order.runId,
           orderId: order.id,
           itemId: current.id,
-          eventType: 'import_failed',
+          eventType: retryEnabled ? 'import_retry_scheduled' : 'import_retry_manual_required',
           message: String(error?.message || error),
         });
       }
@@ -863,7 +986,7 @@ export class ReplenishmentService {
     }
     const finalStatus = validQuantity === order.requestedQuantity
       ? 'completed'
-      : validQuantity > 0 ? 'partial_failed' : 'failed';
+      : 'import_retry';
     await this.repository.updateOrder(order.id, {
       status: finalStatus,
       deliveredQuantity: accounts.length,
@@ -988,12 +1111,26 @@ export class ReplenishmentService {
         this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
       });
       for (const recovery of await this.repository.listDueRecoveries({ limit: 30 })) {
-        if (recovery.mode !== 'auto') continue;
+        if (!recovery.recoveryEnabled || recovery.mode !== 'auto') continue;
         await this.claimRecovery(recovery.id).catch((error) => {
           this.logger.warn('[replenishment] recovery processing failed', error?.message || error);
         });
       }
+      for (const policy of await this.repository.listRecoveryPolicies()) {
+        if (!policy.enabled || policy.mode !== 'auto'
+          || !intervalElapsed(policy.lastScannedAt, policy.retryIntervalSeconds, this.now())) continue;
+        await this.repository.markRecoveryPolicyScanned(policy.ruleId, new Date(this.now()).toISOString());
+        for (const item of (await this.repository.listImportRetryItems({ limit: 30 }))
+          .filter((entry) => Number(entry.order?.ruleId) === Number(policy.ruleId))) {
+          await this.retryImportItem(item.id).catch((error) => {
+            this.logger.warn('[replenishment] import retry failed', error?.message || error);
+          });
+        }
+      }
       for (const rule of await this.repository.listRules({ enabledOnly: true })) {
+        if (!insideSchedule(rule, this.now(), this.config.timezone)
+          || !intervalElapsed(rule.lastScheduledAt, rule.scheduleIntervalSeconds, this.now())) continue;
+        await this.repository.markRuleScheduled(rule.id, new Date(this.now()).toISOString());
         try {
           await this.createOrderForRule(rule);
         } catch (error) {
