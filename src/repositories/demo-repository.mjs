@@ -1107,7 +1107,7 @@ export class DemoRepository {
     };
   }
 
-  async updateSupplierConnectionAccessToken(connectionId, credentialsCiphertext) {
+  async updateSupplierConnectionCredentials(connectionId, credentialsCiphertext) {
     const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
     if (connection) connection.credentialsCiphertext = credentialsCiphertext;
   }

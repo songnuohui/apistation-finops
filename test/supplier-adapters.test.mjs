@@ -182,6 +182,82 @@ test('Sub2API adapter supports password plus TOTP and probes only the documented
   ]);
 });
 
+test('Sub2API adapter refreshes an expiring rotating token pair before reading inventory', async () => {
+  const requests = [];
+  const registry = new SupplierAdapterRegistry(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      const parsed = new URL(url);
+      const body = requestBody(options);
+      requests.push({ path: parsed.pathname, authorization: options.headers.Authorization || '', body });
+      if (parsed.pathname === '/api/v1/auth/refresh') {
+        assert.deepEqual(body, { refresh_token: 'old-refresh' });
+        return json({ success: true, data: {
+          access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 900,
+        } });
+      }
+      assert.equal(options.headers.Authorization, 'Bearer new-access');
+      if (parsed.pathname === '/api/v1/auth/me') return json({ success: true, data: { email: 'operator@example.test', balance: 4 } });
+      if (parsed.pathname === '/api/v1/groups/available') return json({ success: true, data: [] });
+      if (parsed.pathname === '/api/v1/groups/rates') return json({ success: true, data: {} });
+      if (parsed.pathname === '/api/v1/keys') return json({ success: true, data: { items: [], pages: 1 } });
+      assert.fail(`unexpected request: ${parsed.pathname}`);
+    },
+  });
+
+  const snapshot = await registry.snapshot(
+    { adapterType: 'sub2api', authMode: 'token_refresh', baseUrl: 'https://supplier.example.test' },
+    {
+      accessToken: 'old-access',
+      refreshToken: 'old-refresh',
+      accessTokenExpiresAt: Date.now() + 30_000,
+    },
+  );
+
+  assert.equal(snapshot.accessToken, 'new-access');
+  assert.equal(snapshot.credentialUpdate.accessToken, 'new-access');
+  assert.equal(snapshot.credentialUpdate.refreshToken, 'new-refresh');
+  assert.ok(snapshot.credentialUpdate.accessTokenExpiresAt > Date.now() + 800_000);
+  assert.equal(requests.filter((request) => request.path === '/api/v1/auth/refresh').length, 1);
+});
+
+test('Sub2API adapter refreshes once and retries when a stored access token is rejected', async () => {
+  let oldAccessAttempts = 0;
+  let refreshAttempts = 0;
+  const registry = new SupplierAdapterRegistry(config, {
+    dnsLookup: publicDns,
+    fetchImpl: async (url, options) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/api/v1/auth/refresh') {
+        refreshAttempts += 1;
+        assert.deepEqual(requestBody(options), { refresh_token: 'old-refresh' });
+        return json({ success: true, data: {
+          access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 900,
+        } });
+      }
+      if (options.headers.Authorization === 'Bearer old-access') {
+        oldAccessAttempts += 1;
+        return json({ message: 'expired access token' }, 401);
+      }
+      assert.equal(options.headers.Authorization, 'Bearer new-access');
+      if (parsed.pathname === '/api/v1/auth/me') return json({ success: true, data: { email: 'operator@example.test' } });
+      if (parsed.pathname === '/api/v1/groups/available') return json({ success: true, data: [] });
+      if (parsed.pathname === '/api/v1/groups/rates') return json({ success: true, data: {} });
+      if (parsed.pathname === '/api/v1/keys') return json({ success: true, data: { items: [], pages: 1 } });
+      assert.fail(`unexpected request: ${parsed.pathname}`);
+    },
+  });
+
+  const snapshot = await registry.snapshot(
+    { adapterType: 'sub2api', authMode: 'token_refresh', baseUrl: 'https://supplier.example.test' },
+    { accessToken: 'old-access', refreshToken: 'old-refresh' },
+  );
+
+  assert.equal(oldAccessAttempts, 1);
+  assert.equal(refreshAttempts, 1);
+  assert.equal(snapshot.credentialUpdate.refreshToken, 'new-refresh');
+});
+
 test('NewAPI adapter handles password 2FA and does not request plaintext token keys', async () => {
   const requests = [];
   const registry = new SupplierAdapterRegistry(config, {

@@ -12,7 +12,7 @@ const CASH_TYPES = new Set([
 ]);
 const DIRECTIONS = new Set(['in', 'out']);
 const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_compatible', 'custom']);
-const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'api_key']);
+const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'token_refresh', 'api_key']);
 const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
 const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier']);
 const SUB2API_SERVICE_AUTH_MODES = new Set(['password', 'api_key']);
@@ -257,6 +257,7 @@ export function normalizeSupplierConnection(input) {
       username: textValue(credentials.username, 'credentials.username', { required: false, max: 255 }),
       password: textValue(credentials.password, 'credentials.password', { required: false, max: 8192 }),
       accessToken: textValue(credentials.accessToken, 'credentials.accessToken', { required: false, max: 16384 }),
+      refreshToken: textValue(credentials.refreshToken, 'credentials.refreshToken', { required: false, max: 16384 }),
       apiKey: textValue(credentials.apiKey, 'credentials.apiKey', { required: false, max: 16384 }),
       totpSecret: textValue(credentials.totpSecret, 'credentials.totpSecret', { required: false, max: 256 }),
       keyName: textValue(credentials.keyName, 'credentials.keyName', { required: false, max: 200 }),
@@ -285,6 +286,12 @@ export function mergeSupplierCredentials(existing = {}, incoming = {}) {
     merged.userId = '';
     merged.accessTokenExpiresAt = null;
   }
+  const refreshTokenChanged = incoming.refreshToken !== undefined && incoming.refreshToken !== null
+    && incoming.refreshToken !== '' && incoming.refreshToken !== existing.refreshToken;
+  if (refreshTokenChanged && !incoming.accessToken) {
+    merged.accessToken = '';
+    merged.accessTokenExpiresAt = null;
+  }
   return merged;
 }
 
@@ -296,12 +303,18 @@ export function assertSupplierCredentials(input, { existing = false } = {}) {
   if (['auto', 'sub2api', 'newapi'].includes(input.adapterType) && input.authMode === 'api_key') {
     throw badRequest(`${input.adapterType} does not support api_key portal authentication`);
   }
+  if (input.authMode === 'token_refresh' && input.adapterType !== 'sub2api') {
+    throw badRequest('token_refresh authentication requires the sub2api adapter');
+  }
   if (existing && !provided) return false;
   if (input.authMode === 'password' && (!input.credentials.username || !input.credentials.password)) {
     throw badRequest('password authentication requires username and password');
   }
   if (input.authMode === 'access_token' && !input.credentials.accessToken) {
     throw badRequest('access_token authentication requires accessToken');
+  }
+  if (input.authMode === 'token_refresh' && !input.credentials.refreshToken) {
+    throw badRequest('token_refresh authentication requires refreshToken');
   }
   if (input.authMode === 'api_key' && !input.credentials.apiKey) {
     throw badRequest('api_key authentication requires apiKey');

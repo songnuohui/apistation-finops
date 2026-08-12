@@ -278,6 +278,14 @@ test('replenishment execution logs and unlimited retries remain FinOps-owned', (
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
 
+test('supplier rotating token authentication keeps both tokens inside encrypted FinOps credentials', () => {
+  const migration = read('migrations/036_supplier_refresh_token_auth.sql');
+  assert.match(migration, /supplier_connections/);
+  assert.match(migration, /token_refresh/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\b(?:access_token|refresh_token)\s+(?:TEXT|VARCHAR)/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

@@ -169,28 +169,32 @@ export class SupplierMonitorService {
     try {
       const credentials = this.decryptCredentials(connection.credentialsCiphertext);
       const snapshot = await this.adapters.snapshot(connection, credentials);
-      // Portal access tokens are short lived. Keep the latest token encrypted
-      // in the FinOps connection so the next cycle can reuse it. Passwords
-      // remain the recovery path after expiry or a 401/403 response.
-      let persistAccessToken = Promise.resolve();
-      if (connection.authMode === 'password'
-        && (snapshot.accessToken || snapshot.sessionCookie)
-        && this.repository.updateSupplierConnectionAccessToken) {
-        const nextCredentials = {
-          ...credentials,
-          accessToken: snapshot.accessToken || '',
-          sessionCookie: snapshot.sessionCookie || '',
-          userId: snapshot.userId || '',
-          accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
-        };
-        persistAccessToken = this.repository.updateSupplierConnectionAccessToken(
+      // Persist rotated token pairs before any inventory data. A refresh token
+      // is one-time-use, so continuing after a failed encrypted update would
+      // leave the connection unable to renew again.
+      let persistCredentials = Promise.resolve();
+      if (snapshot.credentialUpdate && this.repository.updateSupplierConnectionCredentials) {
+        persistCredentials = this.repository.updateSupplierConnectionCredentials(
           connectionId,
-          this.encryptCredentials(nextCredentials),
+          this.encryptCredentials(snapshot.credentialUpdate),
+        );
+      } else if (connection.authMode === 'password'
+        && (snapshot.accessToken || snapshot.sessionCookie)
+        && this.repository.updateSupplierConnectionCredentials) {
+        persistCredentials = this.repository.updateSupplierConnectionCredentials(
+          connectionId,
+          this.encryptCredentials({
+            ...credentials,
+            accessToken: snapshot.accessToken || '',
+            sessionCookie: snapshot.sessionCookie || '',
+            userId: snapshot.userId || '',
+            accessTokenExpiresAt: snapshot.accessTokenExpiresAt || null,
+          }),
         );
       }
       for (const key of snapshot.keys) key.keyFingerprint = this.vault.fingerprint(key.rawKey || `${connection.id}:${key.externalId}`);
       const [, linkedExternalIdRows] = await Promise.all([
-        persistAccessToken,
+        persistCredentials,
         this.repository.listLinkedSupplierKeyExternalIds?.(connection.id) || Promise.resolve([]),
       ]);
       const linkedExternalIds = new Set(linkedExternalIdRows || []);
@@ -279,6 +283,7 @@ export class SupplierMonitorService {
         keys: snapshot.keys.map(({ rawKey, ...key }) => key),
       };
       delete sanitizedSnapshot.accessToken;
+      delete sanitizedSnapshot.credentialUpdate;
       delete sanitizedSnapshot.sessionCookie;
       delete sanitizedSnapshot.userId;
       await this.repository.recordSupplierSyncSuccess(connectionId, sanitizedSnapshot, checkResults);
@@ -323,6 +328,7 @@ export class SupplierMonitorService {
       ]);
       for (const key of snapshot.keys) key.rawKey = '';
       if ('accessToken' in snapshot) snapshot.accessToken = '';
+      if ('credentialUpdate' in snapshot) snapshot.credentialUpdate = null;
       if ('sessionCookie' in snapshot) snapshot.sessionCookie = '';
       if ('userId' in snapshot) snapshot.userId = '';
       return { ok: true, adapterType: snapshot.adapterType, keyCount: snapshot.keys.length, checked: checkResults.length };

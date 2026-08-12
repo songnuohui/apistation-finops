@@ -59,6 +59,7 @@ const adapterLabels: Record<string, string> = {
 const authLabels: Record<string, string> = {
   password: '账号密码',
   access_token: '访问令牌',
+  token_refresh: '令牌自动续期',
   api_key: 'API 密钥',
 };
 const statusLabels: Record<string, string> = {
@@ -252,6 +253,7 @@ function blankEditor(connection: AnyRecord | null = null) {
     username: '',
     password: '',
     accessToken: '',
+    refreshToken: '',
     apiKey: '',
     totpSecret: '',
     keyName: '',
@@ -271,8 +273,15 @@ function openEdit(connection: AnyRecord) {
 
 function authOptions(adapterType: string) {
   if (adapterType === 'openai_compatible') return [{ value: 'api_key', label: 'API 密钥' }];
-  if (['auto', 'sub2api', 'newapi'].includes(adapterType)) {
-    return [{ value: 'password', label: '账号密码' }, { value: 'access_token', label: '访问令牌' }];
+  if (adapterType === 'sub2api') {
+    return [
+      { value: 'password', label: '账号密码' },
+      { value: 'token_refresh', label: 'Access Token + Refresh Token' },
+      { value: 'access_token', label: '静态访问令牌' },
+    ];
+  }
+  if (['auto', 'newapi'].includes(adapterType)) {
+    return [{ value: 'password', label: '账号密码' }, { value: 'access_token', label: '静态访问令牌' }];
   }
   return [
     { value: 'password', label: '账号密码' },
@@ -312,6 +321,7 @@ async function saveConnection() {
         username: current.username || '',
         password: current.password || '',
         accessToken: current.accessToken || '',
+        refreshToken: current.refreshToken || '',
         apiKey: current.apiKey || '',
         totpSecret: current.totpSecret || '',
         keyName: current.keyName || '',
@@ -1004,7 +1014,15 @@ onMounted(async () => {
               <label>登录密码<input v-model="editor.password" type="password" autocomplete="new-password" /></label>
               <label v-if="editor.adapterType === 'sub2api'" class="full-field">TOTP 密钥（可选）<input v-model="editor.totpSecret" type="password" autocomplete="off" /></label>
             </template>
-            <label v-else-if="editor.authMode === 'access_token'" class="full-field">访问令牌<input v-model="editor.accessToken" type="password" autocomplete="off" /></label>
+            <template v-else-if="editor.authMode === 'token_refresh'">
+              <label>Access Token<input v-model="editor.accessToken" type="password" autocomplete="off" :placeholder="editor.editing && editor.credentialsConfigured ? '留空继续使用当前 Token' : '建议与 Refresh Token 一起填写'" /></label>
+              <label>Refresh Token<input v-model="editor.refreshToken" type="password" autocomplete="off" :placeholder="editor.editing && editor.credentialsConfigured ? '留空继续使用当前 Refresh Token' : '必填，用于自动续期'" /></label>
+              <div class="token-refresh-note full-field">
+                <ShieldCheck :size="18" />
+                <div><strong>自动续期已开启</strong><small>Token 会加密保存。Access Token 临近过期或请求返回 401 时，FinOps 会刷新并保存服务端返回的新 Token 对。</small></div>
+              </div>
+            </template>
+            <label v-else-if="editor.authMode === 'access_token'" class="full-field">静态访问令牌<input v-model="editor.accessToken" type="password" autocomplete="off" /></label>
             <label v-else class="full-field">API 密钥<input v-model="editor.apiKey" type="password" autocomplete="off" /></label>
             <template v-if="editor.adapterType === 'openai_compatible'">
               <label>密钥显示名<input v-model="editor.keyName" /></label>

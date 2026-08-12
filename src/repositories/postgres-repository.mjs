@@ -3280,11 +3280,11 @@ export class PostgresRepository {
     });
   }
 
-  async updateSupplierConnectionAccessToken(connectionId, credentialsCiphertext) {
+  async updateSupplierConnectionCredentials(connectionId, credentialsCiphertext) {
     await this.pool.query(`
       UPDATE ${this.schema}.supplier_connections
       SET credentials_ciphertext=$2,updated_at=NOW()
-      WHERE id=$1 AND auth_mode='password'`, [connectionId, credentialsCiphertext]);
+      WHERE id=$1 AND auth_mode IN ('password','token_refresh')`, [connectionId, credentialsCiphertext]);
   }
 
   async listDueSupplierConnections(limit = 5) {
