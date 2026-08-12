@@ -1421,7 +1421,8 @@ export class PostgresRepository {
              COALESCE(cp.name,cp.cost_type,'未绑定模板') AS cost_profile,
              COALESCE(NULLIF(p.supplier,''),NULLIF(a.supplier,''),'未标记供应商') AS supplier,
               COALESCE(NULLIF(p.purchase_batch,''),NULLIF(a.purchase_batch,''),'未标记批次') AS purchase_batch,
-              p.original_amount,p.fee_amount,p.tax_amount,p.total_cost_cny,
+              p.original_amount,p.fee_amount,p.tax_amount,
+              COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount) AS total_cost_cny,
               p.original_currency,p.effective_from,p.effective_to,p.status,p.notes,
               p.effective_from<=NOW() AS has_started,
              COUNT(*) OVER() AS total_count

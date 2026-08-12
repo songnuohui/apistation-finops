@@ -849,6 +849,8 @@ test('account cost history uses a bounded page query scoped to one account', asy
   const result = await repository.listAccountCostPeriods({ accountId: 8, page: 2, pageSize: 20, offset: 20 });
   assert.equal(result.total, 3);
   assert.equal(result.items[0].totalCost, 11);
+  assert.match(queries[0].text, /COALESCE\(p\.allocated_cost_cny,p\.base_amount\+p\.fee_amount\+p\.tax_amount\) AS total_cost_cny/);
+  assert.doesNotMatch(queries[0].text, /p\.total_cost_cny/);
   assert.deepEqual(queries[0].params, [8, 20, 20]);
   assert.match(queries[0].text, /WHERE p\.source_account_id=\$1/);
 });
