@@ -620,30 +620,6 @@ export class SupplierHttpClient {
   }
 }
 
-async function sub2ApiToken(connection, credentials, client) {
-  if (connection.authMode === 'access_token') {
-    if (!credentials.accessToken) throw new SupplierAdapterError('missing_credentials', 'access token is not configured', { statusCode: 400 });
-    return credentials.accessToken;
-  }
-  if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
-    throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
-  }
-  // Password connections may have an encrypted, previously issued token.
-  // Reuse it until the portal rejects it; the caller retries with a fresh login.
-  if (credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now())) {
-    return credentials.accessToken;
-  }
-  const login = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/login', {
-    method: 'POST', body: { email: credentials.username, password: credentials.password },
-  })).payload) || {};
-  if (!login.requires_2fa) return login.access_token;
-  if (!credentials.totpSecret) throw new SupplierAdapterError('two_factor_required', 'TOTP secret is required for this supplier account');
-  const verified = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/login/2fa', {
-    method: 'POST', body: { temp_token: login.temp_token, totp_code: totpCode(credentials.totpSecret) },
-  })).payload) || {};
-  return verified.access_token;
-}
-
 function tokenExpiry(token) {
   const parts = String(token || '').split('.');
   if (parts.length !== 3) return null;
@@ -656,6 +632,73 @@ function tokenExpiry(token) {
   }
 }
 
+async function refreshSub2ApiToken(connection, credentials, client) {
+  if (!credentials.refreshToken) {
+    throw new SupplierAdapterError('missing_credentials', 'refresh token is not configured', { statusCode: 400 });
+  }
+  const refreshed = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/refresh', {
+    method: 'POST',
+    body: { refresh_token: credentials.refreshToken },
+  })).payload) || {};
+  const accessToken = String(refreshed.access_token || '').trim();
+  const refreshToken = String(refreshed.refresh_token || '').trim();
+  if (!accessToken || !refreshToken) {
+    throw new SupplierAdapterError(
+      'invalid_refresh_response',
+      'supplier token refresh did not return a complete token pair',
+    );
+  }
+  const expiresIn = Number(refreshed.expires_in);
+  return {
+    accessToken,
+    credentialUpdate: {
+      ...credentials,
+      accessToken,
+      refreshToken,
+      accessTokenExpiresAt: Number.isFinite(expiresIn) && expiresIn > 0
+        ? Date.now() + expiresIn * 1000
+        : tokenExpiry(accessToken),
+    },
+  };
+}
+
+async function sub2ApiToken(connection, credentials, client, { forceRefresh = false } = {}) {
+  if (connection.authMode === 'access_token') {
+    if (!credentials.accessToken) throw new SupplierAdapterError('missing_credentials', 'access token is not configured', { statusCode: 400 });
+    return { accessToken: credentials.accessToken };
+  }
+  if (connection.authMode === 'token_refresh') {
+    if (!credentials.refreshToken) {
+      throw new SupplierAdapterError('missing_credentials', 'refresh token is not configured', { statusCode: 400 });
+    }
+    const expiryValue = credentials.accessTokenExpiresAt || tokenExpiry(credentials.accessToken);
+    const accessTokenExpiresAt = Number(expiryValue);
+    const expiringSoon = expiryValue !== null && expiryValue !== undefined && expiryValue !== ''
+      && Number.isFinite(accessTokenExpiresAt) && accessTokenExpiresAt <= Date.now() + 120_000;
+    if (!forceRefresh && credentials.accessToken && !expiringSoon) {
+      return { accessToken: credentials.accessToken };
+    }
+    return refreshSub2ApiToken(connection, credentials, client);
+  }
+  if (connection.authMode !== 'password' || !credentials.username || !credentials.password) {
+    throw new SupplierAdapterError('missing_credentials', 'username and password are not configured', { statusCode: 400 });
+  }
+  // Password connections may have an encrypted, previously issued token.
+  // Reuse it until the portal rejects it; the caller retries with a fresh login.
+  if (credentials.accessToken && (!credentials.accessTokenExpiresAt || Number(credentials.accessTokenExpiresAt) > Date.now())) {
+    return { accessToken: credentials.accessToken };
+  }
+  const login = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/login', {
+    method: 'POST', body: { email: credentials.username, password: credentials.password },
+  })).payload) || {};
+  if (!login.requires_2fa) return { accessToken: login.access_token };
+  if (!credentials.totpSecret) throw new SupplierAdapterError('two_factor_required', 'TOTP secret is required for this supplier account');
+  const verified = unwrap((await client.request(connection.baseUrl, '/api/v1/auth/login/2fa', {
+    method: 'POST', body: { temp_token: login.temp_token, totp_code: totpCode(credentials.totpSecret) },
+  })).payload) || {};
+  return { accessToken: verified.access_token };
+}
+
 async function sub2ApiSnapshotWithToken(connection, credentials, client, accessToken) {
   if (!accessToken) throw new SupplierAdapterError('authentication_failed', 'supplier login did not return an access token');
   const optionalRequest = async (pathname) => {
@@ -665,8 +708,10 @@ async function sub2ApiSnapshotWithToken(connection, credentials, client, accessT
       return null;
     }
   };
-  const [profileResult, groupsResult, ratesResult] = await Promise.all([
-    client.request(connection.baseUrl, '/api/v1/auth/me', { token: accessToken }),
+  // Verify the token before starting optional parallel reads. This keeps an
+  // expired token from generating several simultaneous 401 responses.
+  const profileResult = await client.request(connection.baseUrl, '/api/v1/auth/me', { token: accessToken });
+  const [groupsResult, ratesResult] = await Promise.all([
     optionalRequest('/api/v1/groups/available'),
     optionalRequest('/api/v1/groups/rates'),
   ]);
@@ -723,13 +768,23 @@ async function sub2ApiSnapshotWithToken(connection, credentials, client, accessT
 }
 
 async function sub2ApiSnapshot(connection, credentials, client) {
-  let accessToken = await sub2ApiToken(connection, credentials, client);
+  let authentication = await sub2ApiToken(connection, credentials, client);
   try {
-    return await sub2ApiSnapshotWithToken(connection, credentials, client, accessToken);
+    const snapshot = await sub2ApiSnapshotWithToken(connection, credentials, client, authentication.accessToken);
+    if (authentication.credentialUpdate) snapshot.credentialUpdate = authentication.credentialUpdate;
+    return snapshot;
   } catch (error) {
     if (connection.authMode === 'password' && credentials.accessToken && error?.code === 'authentication_failed') {
-      accessToken = await sub2ApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0 }, client);
-      return sub2ApiSnapshotWithToken(connection, credentials, client, accessToken);
+      authentication = await sub2ApiToken(connection, { ...credentials, accessToken: '', accessTokenExpiresAt: 0 }, client);
+      return sub2ApiSnapshotWithToken(connection, credentials, client, authentication.accessToken);
+    }
+    if (connection.authMode === 'token_refresh'
+      && !authentication.credentialUpdate
+      && error?.code === 'authentication_failed') {
+      authentication = await sub2ApiToken(connection, credentials, client, { forceRefresh: true });
+      const snapshot = await sub2ApiSnapshotWithToken(connection, credentials, client, authentication.accessToken);
+      snapshot.credentialUpdate = authentication.credentialUpdate;
+      return snapshot;
     }
     throw error;
   }

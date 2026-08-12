@@ -76,6 +76,58 @@ test('supplier monitor limits active checks and passes only sanitized inventory 
   assert.equal(inventory.accessToken, '');
 });
 
+test('supplier monitor encrypts and persists a rotated token pair before inventory success', async () => {
+  let encryptedCredentials = '';
+  let persistedBeforeInventory = false;
+  const repository = {
+    updateSupplierConnectionCredentials: async (_connectionId, ciphertext) => {
+      encryptedCredentials = ciphertext;
+      persistedBeforeInventory = true;
+    },
+    recordSupplierSyncSuccess: async (_connectionId, recordedSnapshot) => {
+      assert.equal(persistedBeforeInventory, true);
+      assert.equal(recordedSnapshot.credentialUpdate, undefined);
+      assert.equal(recordedSnapshot.accessToken, undefined);
+    },
+    recordSupplierSyncFailure: async () => assert.fail('unexpected sync failure'),
+  };
+  const service = new SupplierMonitorService(repository, config);
+  service.adapters = {
+    snapshot: async () => ({
+      adapterType: 'sub2api',
+      accessToken: 'new-access',
+      credentialUpdate: {
+        accessToken: 'new-access',
+        refreshToken: 'new-refresh',
+        accessTokenExpiresAt: Date.now() + 900_000,
+      },
+      balance: 1,
+      balanceCurrency: 'USD',
+      keys: [],
+    }),
+    check: async () => assert.fail('no keys should be checked'),
+  };
+  const supplierConnection = connection(19, {
+    authMode: 'token_refresh',
+    activeCheckEnabled: false,
+  });
+  supplierConnection.credentialsCiphertext = service.encryptCredentials({
+    accessToken: 'old-access',
+    refreshToken: 'old-refresh',
+  });
+
+  const result = await service.syncConnection(19, { connection: supplierConnection });
+
+  assert.equal(result.ok, true);
+  assert.ok(encryptedCredentials);
+  assert.doesNotMatch(encryptedCredentials, /new-access|new-refresh/);
+  assert.deepEqual(service.decryptCredentials(encryptedCredentials), {
+    accessToken: 'new-access',
+    refreshToken: 'new-refresh',
+    accessTokenExpiresAt: service.decryptCredentials(encryptedCredentials).accessTokenExpiresAt,
+  });
+});
+
 test('supplier monitor shares simultaneous syncs for one connection', async () => {
   const repository = {
     recordSupplierSyncSuccess: async () => {},

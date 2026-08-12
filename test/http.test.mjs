@@ -182,7 +182,7 @@ test('supplier connections validate encrypted portal and API-key credentials', (
   });
   assert.equal(connection.authMode, 'password');
   assert.deepEqual(Object.keys(connection.credentials).sort(), [
-    'accessToken', 'apiKey', 'balance', 'balanceCurrency', 'keyName', 'password', 'rateMultiplier', 'totpSecret', 'username',
+    'accessToken', 'apiKey', 'balance', 'balanceCurrency', 'keyName', 'password', 'rateMultiplier', 'refreshToken', 'totpSecret', 'username',
   ]);
   assert.equal(assertSupplierCredentials(connection), true);
   const missingPassword = normalizeSupplierConnection({
@@ -195,6 +195,20 @@ test('supplier connections validate encrypted portal and API-key credentials', (
     baseUrl: 'https://supplier.example.test', credentials: { accessToken: 'portal-token' },
   });
   assert.equal(assertSupplierCredentials(tokenConnection), true);
+  const renewableTokenConnection = normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'renewable token account', adapterType: 'sub2api', authMode: 'token_refresh',
+    baseUrl: 'https://supplier.example.test',
+    credentials: { accessToken: 'portal-token', refreshToken: 'rotating-refresh-token' },
+  });
+  assert.equal(assertSupplierCredentials(renewableTokenConnection), true);
+  assert.throws(() => assertSupplierCredentials(normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'missing refresh token', adapterType: 'sub2api', authMode: 'token_refresh',
+    baseUrl: 'https://supplier.example.test', credentials: { accessToken: 'portal-token' },
+  })), /requires refreshToken/);
+  assert.throws(() => assertSupplierCredentials(normalizeSupplierConnection({
+    supplierName: 'Upstream', name: 'wrong adapter', adapterType: 'newapi', authMode: 'token_refresh',
+    baseUrl: 'https://supplier.example.test', credentials: { refreshToken: 'rotating-refresh-token' },
+  })), /requires the sub2api adapter/);
   const openAi = normalizeSupplierConnection({
     supplierName: 'OpenAI compatible', name: 'key', adapterType: 'openai_compatible',
     baseUrl: 'https://supplier.example.test', credentials: { apiKey: 'sk-secret' },
@@ -221,6 +235,15 @@ test('editing supplier credentials can keep or partially replace the encrypted c
     accessToken: '',
     sessionCookie: '',
     userId: '',
+    accessTokenExpiresAt: null,
+  });
+  assert.deepEqual(mergeSupplierCredentials({
+    accessToken: 'old-access',
+    refreshToken: 'old-refresh',
+    accessTokenExpiresAt: 123,
+  }, { refreshToken: 'new-refresh' }), {
+    accessToken: '',
+    refreshToken: 'new-refresh',
     accessTokenExpiresAt: null,
   });
 });

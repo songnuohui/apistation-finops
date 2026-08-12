@@ -35,6 +35,12 @@
   .custom-range-fields{flex:1;min-width:250px}
   .trend-chart{height:240px}
 }
+
+.token-refresh-note{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border:1px solid #b9d8ca;border-radius:6px;background:#f1faf6;color:#216447}
+.token-refresh-note svg{flex:0 0 auto;margin-top:1px}
+.token-refresh-note strong,.token-refresh-note small{display:block}
+.token-refresh-note strong{font-size:13px}
+.token-refresh-note small{margin-top:4px;color:#4e7564;font-size:11px;line-height:17px}
 .profit-guard-box{margin-top:18px;padding-top:18px;border-top:1px solid var(--line)}.section-label{margin-bottom:10px;color:#31445d;font-size:13px;font-weight:700}.compact-grid{margin-top:10px}
 .supplier-key-table{min-width:1680px!important}.sort-button{display:inline-flex;align-items:center;gap:5px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:700;white-space:nowrap}.sort-button:hover{color:#1852c2}.platform-cell small{display:block;margin-top:4px;color:var(--muted);font-size:11px}.platform-cell .status-pill{display:inline-flex}
 
