@@ -84,3 +84,42 @@ test('OAuth Supply claim accepts same-origin relative URLs and rejects other ori
     /不属于已配置的站点/,
   );
 });
+
+test('OAuth Supply replacement status accepts same-origin URLs and maps one-time claim conflicts', async () => {
+  const requests = [];
+  const responses = [
+    { status: 200, body: { status: 'claimable', claim_url: '/api/customer/recoveries/9/claim?ticket=new' } },
+    { status: 409, body: { message: 'claim already consumed' } },
+  ];
+  const client = new OAuthSupplyClient(
+    config,
+    console,
+    async (url, options) => {
+      requests.push({ url, options });
+      const next = responses.shift();
+      return new Response(JSON.stringify(next.body), {
+        status: next.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+    Date.now,
+    async () => [{ address: '93.184.216.34', family: 4 }],
+  );
+
+  await client.getRecoveryStatus({
+    baseUrl: 'https://sogouedu.cc',
+    token: 'customer-token',
+    statusUrl: '/api/customer/recoveries/9',
+  });
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requests[0].url, 'https://sogouedu.cc/api/customer/recoveries/9');
+
+  await assert.rejects(
+    client.claimRecovery({
+      baseUrl: 'https://sogouedu.cc',
+      token: 'customer-token',
+      claimUrl: '/api/customer/recoveries/9/claim?ticket=old',
+    }),
+    (error) => error.code === 'claim_conflict' && error.httpStatus === 409,
+  );
+});

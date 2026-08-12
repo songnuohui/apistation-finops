@@ -131,9 +131,19 @@ export class OAuthSupplyClient {
         allowError: true,
       });
       if (!response.ok) {
-        const message = payload?.error || payload?.message || `OAuth Supply API failed (HTTP ${response.status})`;
+        const remoteCode = String(
+          payload?.error_code || payload?.code || payload?.error?.code
+          || (typeof payload?.error === 'string' ? payload.error : ''),
+        ).trim();
+        const message = payload?.error?.message || payload?.message
+          || (typeof payload?.error === 'string' ? payload.error : '')
+          || `OAuth Supply API failed (HTTP ${response.status})`;
+        const code = response.status === 401 ? 'token_expired'
+          : response.status === 409 ? 'claim_conflict'
+            : response.status === 429 ? 'rate_limited'
+              : remoteCode === 'recovery_payload_invalid' ? remoteCode : 'upstream_error';
         throw new OAuthSupplyClientError(
-          response.status === 401 ? 'token_expired' : response.status === 429 ? 'rate_limited' : 'upstream_error',
+          code,
           String(message).slice(0, 500),
           { statusCode: response.status === 401 ? 401 : response.status === 429 ? 429 : 502, httpStatus: response.status },
         );
@@ -201,23 +211,38 @@ export class OAuthSupplyClient {
   }
 
   async claimRecovery({ baseUrl, token, claimUrl }) {
-    const expected = new URL(this.baseUrl(baseUrl));
-    let parsed;
-    try {
-      parsed = new URL(String(claimUrl || ''), expected);
-    } catch {
-      throw new OAuthSupplyClientError('invalid_claim_url', 'OAuth Supply 返回了无效的认领地址', { statusCode: 502 });
-    }
-    if (parsed.origin !== expected.origin) {
-      throw new OAuthSupplyClientError('invalid_claim_url', 'OAuth Supply 认领地址不属于已配置的站点', { statusCode: 502 });
-    }
+    const pathname = this.sameOriginPath(baseUrl, claimUrl, '认领');
     return this.customerRequest({
       baseUrl,
       token,
-      pathname: `${parsed.pathname}${parsed.search}`,
+      pathname,
       method: 'POST',
       headers: { Accept: 'application/json' },
     });
+  }
+
+  async getRecoveryStatus({ baseUrl, token, statusUrl }) {
+    const pathname = this.sameOriginPath(baseUrl, statusUrl, '状态查询');
+    return this.customerRequest({
+      baseUrl,
+      token,
+      pathname,
+      headers: { Accept: 'application/json' },
+    });
+  }
+
+  sameOriginPath(baseUrl, value, label) {
+    const expected = new URL(this.baseUrl(baseUrl));
+    let parsed;
+    try {
+      parsed = new URL(String(value || ''), expected);
+    } catch {
+      throw new OAuthSupplyClientError('invalid_claim_url', `OAuth Supply 返回了无效的${label}地址`, { statusCode: 502 });
+    }
+    if (parsed.origin !== expected.origin) {
+      throw new OAuthSupplyClientError('invalid_claim_url', `OAuth Supply ${label}地址不属于已配置的站点`, { statusCode: 502 });
+    }
+    return `${parsed.pathname}${parsed.search}`;
   }
 }
 

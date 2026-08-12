@@ -223,7 +223,7 @@ test('delivery uses per-account charged amount and imports fixed account setting
   assert.equal(imports[0].expiresAt > Math.floor(Date.now() / 1000), true);
 });
 
-test('delivery falls back to paid amount divided by valid accounts when item prices are absent', async () => {
+test('delivery distributes the paid amount exactly across all delivered accounts when item prices are absent', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);
   const order = await repository.createPlannedOrder({
@@ -258,6 +258,38 @@ test('delivery falls back to paid amount divided by valid accounts when item pri
 
   const result = await repository.getOrder(order.id);
   assert.deepEqual(result.items.map((item) => item.finalCostCny), [4.5, 4.5]);
+});
+
+test('delivery assigns cost to a temporarily failed account without requiring manual cost entry', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const order = await repository.createPlannedOrder({
+    rule, trigger: 'manual', quantity: 3, availableBefore: 0, quotedAmountCny: 10,
+    actor: 'test', status: 'ordering', idempotencyKey: 'failed-cost-order',
+  });
+  let calls = 0;
+  const service = new ReplenishmentService(repository, authStub(), {
+    async importAndVerify(input) {
+      calls += 1;
+      await input.onCreated?.(300 + calls);
+      if (calls === 2) throw new Error('verification timed out');
+      return { id: 300 + calls };
+    },
+  }, config, console, { client: {} });
+
+  await service.processDelivery(order, rule, {
+    charged_fen: 1000,
+    accounts: [
+      { email: 'one@example.com', credentials: { access_token: 'one' } },
+      { email: 'two@example.com', credentials: { access_token: 'two' } },
+      { email: 'three@example.com', credentials: { access_token: 'three' } },
+    ],
+  });
+
+  const saved = await repository.getOrder(order.id);
+  assert.deepEqual(saved.items.map((item) => item.finalCostCny), [3.34, 3.33, 3.33]);
+  assert.equal(saved.items.reduce((sum, item) => sum + item.finalCostCny, 0), 10);
+  assert.equal(saved.items[1].verificationStatus, 'failed');
 });
 
 test('failed verification is queued for a later import retry and can complete without a new order', async () => {
@@ -489,6 +521,26 @@ test('cost ledger stays pending until FinOps synchronization exposes the importe
   assert.equal(createCount, 2);
 });
 
+test('repaired and previously failed cost items are automatically retried with the order cost fallback', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 81, 281);
+  await repository.updateOrder(tracked.orderId, {
+    externalOrderId: '60881', deliveredQuantity: 1, actualPaidAmountCny: 2.64,
+  });
+  await repository.updateOrderItem(tracked.id, {
+    verificationStatus: 'repaired', finalCostCny: null, individualCostCny: null,
+    costLedgerStatus: 'failed', costLedgerError: 'previous synchronization failure',
+  });
+
+  const [pending] = await repository.listPendingCostItems();
+
+  assert.equal(pending.id, tracked.id);
+  assert.equal(pending.finalCostCny, 2.64);
+  assert.equal(pending.persistedFinalCostCny, null);
+  assert.equal(pending.order.externalOrderId, '60881');
+});
+
 async function trackedItem(repository, rule, id, accountId) {
   const order = await repository.createPlannedOrder({
     rule,
@@ -664,4 +716,137 @@ test('recovery saves claimed credentials before retrying Sub2API and verifies th
   assert.equal(saved.credentialVersion, 'v2');
   assert.equal(claimCalls, 1);
   assert.equal((await repository.getOrderItem(tracked.id)).verificationStatus, 'repaired');
+});
+
+test('recovery imports credentials from a claimed replacement file payload', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 70, 170);
+  let applied = null;
+  const service = new ReplenishmentService(repository, authStub(), {
+    async applyOAuthCredentials(id, credentials) {
+      applied = { id, credentials };
+    },
+    async testAccount() {
+      return { success: true };
+    },
+  }, config, console, {
+    client: {
+      async claimRecovery() {
+        return { payload: { payload: { accounts: [{
+          email: tracked.externalAccountKey,
+          credential_version: 'v3',
+          credentials: { access_token: 'replacement-file-token' },
+        }] } } };
+      },
+    },
+  });
+  const job = await repository.upsertRecovery({
+    recoveryKey: `item:${tracked.id}:credential:v1`,
+    orderItemId: tracked.id,
+    ruleId: rule.id,
+    sub2apiAccountId: 170,
+    accountKey: tracked.externalAccountKey,
+    status: 'claimable',
+    claimUrlCiphertext: service.vault.encrypt({ claimUrl: '/api/customer/recoveries/70/claim?ticket=fresh' }),
+  });
+
+  await service.claimRecovery(job.id);
+
+  assert.equal(applied.id, 170);
+  assert.deepEqual(applied.credentials, {
+    access_token: 'replacement-file-token',
+    email: tracked.externalAccountKey,
+  });
+  assert.equal((await repository.getRecovery(job.id)).credentialVersion, 'v3');
+});
+
+test('recovery sync finds replacement files on the original order and exposes both order ids', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 71, 171);
+  await repository.updateOrder(tracked.orderId, { externalOrderId: '60881', status: 'import_retry' });
+  await repository.updateOrderItem(tracked.id, { verificationStatus: 'failed', status: 'waiting_supplier_recovery' });
+  await repository.upsertRecovery({
+    recoveryKey: `item:${tracked.id}:credential:v1`,
+    orderItemId: tracked.id,
+    ruleId: rule.id,
+    sub2apiAccountId: 171,
+    accountKey: tracked.externalAccountKey,
+    status: 'waiting_supplier',
+  });
+  let statusCalls = 0;
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async recoveries() {
+        return { payload: { items: [] } };
+      },
+      async getOrder({ orderId }) {
+        assert.equal(orderId, '60881');
+        return { payload: { replacement_files: [{
+          email: tracked.externalAccountKey,
+          status_url: '/api/customer/recoveries/71',
+          status: 'processing',
+        }] } };
+      },
+      async getRecoveryStatus() {
+        statusCalls += 1;
+        return { payload: {
+          delivery_status: 'claimable',
+          claim_url: '/api/customer/recoveries/71/claim?ticket=fresh',
+          credential_version: 'v2',
+        } };
+      },
+    },
+  });
+
+  const result = await service.recoveries();
+  const saved = result.items.find((entry) => entry.kind === 'account');
+
+  assert.equal(statusCalls, 1);
+  assert.equal(saved.status, 'claimable');
+  assert.equal(saved.orderId, tracked.orderId);
+  assert.equal(saved.externalOrderId, '60881');
+  assert.equal(saved.credentialVersion, 'v2');
+  assert.ok((await repository.getRecovery(saved.id)).claimUrlCiphertext);
+});
+
+test('a consumed recovery link is cleared and an already claimed replacement requires manual confirmation', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  const tracked = await trackedItem(repository, rule, 72, 172);
+  await repository.updateOrder(tracked.orderId, { externalOrderId: '60882', status: 'import_retry' });
+  await repository.updateOrderItem(tracked.id, { verificationStatus: 'failed', status: 'waiting_supplier_recovery' });
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async claimRecovery() {
+        throw Object.assign(new Error('claim already consumed'), { code: 'claim_conflict', httpStatus: 409 });
+      },
+      async recoveries() {
+        return { payload: { items: [] } };
+      },
+      async getOrder() {
+        return { payload: { replacement_files: [{
+          email: tracked.externalAccountKey,
+          delivery_status: 'claimed',
+        }] } };
+      },
+    },
+  });
+  const job = await repository.upsertRecovery({
+    recoveryKey: `item:${tracked.id}:credential:v1`,
+    orderItemId: tracked.id,
+    ruleId: rule.id,
+    sub2apiAccountId: 172,
+    accountKey: tracked.externalAccountKey,
+    status: 'claimable',
+    claimUrlCiphertext: service.vault.encrypt({ claimUrl: '/api/customer/recoveries/72/claim?ticket=old' }),
+  });
+
+  await assert.rejects(service.claimRecovery(job.id), /人工导入/);
+  const saved = await repository.getRecovery(job.id);
+  assert.equal(saved.status, 'manual_required');
+  assert.equal(saved.claimUrlCiphertext, '');
+  assert.equal(saved.attemptCount, 0);
+  assert.match(saved.lastError, /已被领取/);
 });

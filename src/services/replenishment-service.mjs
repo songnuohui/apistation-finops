@@ -105,6 +105,87 @@ function textIncludesAuthFailure(...values) {
   return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token[_ -]?invalidated|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
 }
 
+function allocateOrderCosts(items, totalCny) {
+  const resolved = items.map((entry) => entry.individualCostCny);
+  const missing = resolved.flatMap((value, index) => value === null ? [index] : []);
+  if (!missing.length || totalCny === null) return resolved;
+  const totalFen = Math.round(Number(totalCny) * 100);
+  const knownFen = resolved.reduce(
+    (sum, value) => sum + (value === null ? 0 : Math.round(Number(value) * 100)),
+    0,
+  );
+  const remainingFen = Math.max(0, totalFen - knownFen);
+  const baseFen = Math.floor(remainingFen / missing.length);
+  let remainder = remainingFen % missing.length;
+  for (const index of missing) {
+    resolved[index] = (baseFen + (remainder > 0 ? 1 : 0)) / 100;
+    if (remainder > 0) remainder -= 1;
+  }
+  return resolved;
+}
+
+function replacementFilesPayload(payload) {
+  const remote = orderPayload(payload);
+  const value = remote?.replacement_files || remote?.replacementFiles
+    || payload?.replacement_files || payload?.replacementFiles
+    || payload?.payload?.replacement_files || payload?.payload?.replacementFiles;
+  return Array.isArray(value) ? value : [];
+}
+
+function supplierAccountKey(raw) {
+  return String(
+    raw?.email || raw?.account_email || raw?.accountEmail
+    || raw?.account_id || raw?.accountId || raw?.inventory_account_id || '',
+  ).trim();
+}
+
+function supplierOrderId(raw) {
+  return String(
+    raw?.order_id || raw?.orderId || raw?.pickup_order_id || raw?.pickupOrderId
+    || raw?.order?.id || raw?.order?.order_id || raw?.order?.orderId
+    || raw?.replacement?.order_id || raw?.replacement?.orderId || '',
+  ).trim();
+}
+
+function replacementStatus(raw) {
+  return String(raw?.delivery_status || raw?.deliveryStatus || raw?.status || '').trim().toLowerCase();
+}
+
+function replacementClaimUrl(raw) {
+  return String(raw?.claim_url || raw?.claimUrl || '').trim();
+}
+
+function replacementStatusUrl(raw) {
+  return String(raw?.status_url || raw?.statusUrl || '').trim();
+}
+
+function manuallyClaimedReplacement(raw) {
+  return Boolean(raw?.claimed_at || raw?.claimedAt || raw?.taken_at || raw?.takenAt)
+    || /claimed|taken|downloaded|consumed|picked[_ -]?up|人工.*领/.test(replacementStatus(raw));
+}
+
+function replacementMatchesItem(raw, item) {
+  const values = [
+    supplierAccountKey(raw), raw?.external_item_id, raw?.externalItemId,
+    raw?.inventory_account_id, raw?.inventoryAccountId, raw?.item_id, raw?.itemId,
+  ].filter((value) => value !== null && value !== undefined && value !== '')
+    .map((value) => String(value).trim().toLowerCase());
+  return [item?.externalAccountKey, item?.accountName, item?.externalItemId]
+    .filter(Boolean).some((value) => values.includes(String(value).trim().toLowerCase()));
+}
+
+function credentialsFromRecoveryPayload(payload, accountKey) {
+  const accounts = accountsPayload(payload);
+  if (accounts.length) {
+    const selected = accounts.find((entry) => supplierAccountKey(entry) === String(accountKey || '').trim())
+      || (accounts.length === 1 ? accounts[0] : null);
+    return selected ? accountCredential(selected) : null;
+  }
+  const value = payload?.credentials || payload?.account?.credentials
+    || payload?.payload?.credentials || payload?.payload;
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
 function quotaNumber(...values) {
   for (const value of values) {
     const parsed = numeric(value);
@@ -269,6 +350,7 @@ export class ReplenishmentService {
           kind: 'import',
           orderItemId: entry.id,
           orderId: entry.orderId,
+          externalOrderId: entry.order?.externalOrderId || '',
           ruleId: entry.order?.ruleId,
           accountName: entry.accountName,
           status: entry.status,
@@ -282,6 +364,8 @@ export class ReplenishmentService {
         id: entry.id,
         kind: 'account',
         orderItemId: entry.orderItemId,
+        orderId: entry.orderId,
+        externalOrderId: entry.externalOrderId,
         ruleId: entry.ruleId,
         accountName: entry.accountName || entry.accountKey,
         deliveryStatus: entry.deliveryStatus,
@@ -364,6 +448,7 @@ export class ReplenishmentService {
         eventType: 'import_retry_succeeded', message: '失败账号已重新导入并验号成功',
         details: { attempts: Number(item.importAttemptCount || 0) + 1 },
       });
+      await this.reconcileCostLedgers();
       return { ok: true, itemId: item.id, accountId: account?.id || item.sub2apiAccountId };
     } catch (error) {
       if (await this.waitForSupplierRecovery({ item, rule: item.rule, order: item.order, error })) {
@@ -402,58 +487,129 @@ export class ReplenishmentService {
     const existing = await this.repository.listRecoveries({ limit: 500 });
     const activeByItem = new Map(existing.filter((entry) => OPEN_RECOVERY_STATUSES.has(entry.status))
       .map((entry) => [entry.orderItemId, entry]));
+    const mergeRecovery = async (entry, { externalOrderId = '', fallbackItem = null } = {}) => {
+      const accountKey = supplierAccountKey(entry) || fallbackItem?.externalAccountKey || fallbackItem?.accountName || '';
+      const supplierOrder = supplierOrderId(entry) || externalOrderId;
+      const matchingItem = fallbackItem
+        || (supplierOrder
+          ? await this.repository.findOrderItemByExternalOrderAndAccountKey(supplierOrder, accountKey)
+          : await this.repository.findOrderItemByAccountKey(accountKey));
+      if (!matchingItem?.sub2apiAccountId) return null;
+      const order = await this.repository.getOrder(matchingItem.orderId);
+      const current = activeByItem.get(matchingItem.id);
+      const claimUrl = replacementClaimUrl(entry);
+      const deliveryStatus = replacementStatus(entry);
+      const ready = Boolean(entry.ready || deliveryStatus === 'claimable' || claimUrl);
+      const manuallyClaimed = !claimUrl && manuallyClaimedReplacement(entry);
+      const recoveryKey = current?.recoveryKey
+        || `item:${matchingItem.id}:credential:${matchingItem.credentialVersion || 'initial'}`;
+      let status = ready ? 'claimable' : 'waiting_supplier';
+      if (manuallyClaimed) status = 'manual_required';
+      if (current && ['credentials_saved', 'retry_wait'].includes(current.status)) status = current.status;
+      if (current?.status === 'manual_required' && !claimUrl && !manuallyClaimed) status = current.status;
+      const manualMessage = manuallyClaimed
+        ? 'OAuth Supply 补发文件已被领取，FinOps 无法再次使用一次性链接；请确认是否已人工导入。'
+        : '';
+      let saved = await this.repository.upsertRecovery({
+        ...(current || {}),
+        recoveryKey,
+        supplierRecoveryId: entry.id || entry.recovery_id || entry.replacement_id || current?.supplierRecoveryId,
+        orderItemId: matchingItem.id,
+        ruleId: order?.ruleId,
+        sub2apiAccountId: matchingItem.sub2apiAccountId,
+        accountKey,
+        status,
+        deliveryStatus: deliveryStatus || current?.deliveryStatus || '',
+        credentialVersion: entry.credential_version || entry.credentialVersion || current?.credentialVersion || '',
+        claimUrlCiphertext: claimUrl && this.vault.available
+          ? this.vault.encrypt({ claimUrl })
+          : current?.claimUrlCiphertext || '',
+        lastError: manualMessage || (ready ? '' : current?.lastError || ''),
+        nextRetryAt: ready ? null : current?.nextRetryAt || null,
+      });
+      if (manuallyClaimed) {
+        saved = await this.repository.invalidateRecoveryClaim(saved.id, {
+          status: 'manual_required',
+          deliveryStatus: deliveryStatus || 'claimed',
+          lastError: manualMessage,
+        });
+      }
+      if (matchingItem.verificationStatus === 'failed'
+        && matchingItem.status !== 'waiting_supplier_recovery') {
+        await this.repository.updateOrderItem(matchingItem.id, {
+          status: 'waiting_supplier_recovery',
+          nextImportRetryAt: null,
+        });
+        await this.repository.addEvent({
+          ruleId: order?.ruleId,
+          runId: order?.runId || null,
+          orderId: matchingItem.orderId,
+          itemId: matchingItem.id,
+          eventType: 'import_recovery_waiting_supplier',
+          message: '账号凭据失效，已转入供应商恢复认领队列',
+          details: { recoveryId: saved.id, supplierRecoveryId: saved.supplierRecoveryId || '' },
+        });
+      }
+      saved = { ...saved, orderId: order?.id || matchingItem.orderId, externalOrderId: order?.externalOrderId || externalOrderId };
+      activeByItem.set(matchingItem.id, saved);
+      return saved;
+    };
     let beforeId = 0;
     for (let page = 0; page < 10; page += 1) {
-      const payload = await this.rawRecoveries({ beforeId });
+      let payload;
+      try {
+        payload = await this.rawRecoveries({ beforeId });
+      } catch (error) {
+        this.logger.warn('[replenishment] supplier recovery queue lookup failed', error?.message || error);
+        break;
+      }
       const entries = Array.isArray(payload) ? payload : payload.items || payload.recoveries || [];
       for (const entry of entries) {
-        const accountKey = entry.email || entry.account_email || entry.account_id || entry.accountId;
-        const matchingItem = await this.repository.findOrderItemByAccountKey(accountKey);
-        if (!matchingItem?.sub2apiAccountId) continue;
-        const order = await this.repository.getOrder(matchingItem.orderId);
-        const current = activeByItem.get(matchingItem.id);
-        const claimUrl = entry.claim_url || entry.claimUrl || '';
-        const ready = Boolean(entry.ready || entry.delivery_status === 'claimable' || claimUrl);
-        const recoveryKey = current?.recoveryKey
-          || `item:${matchingItem.id}:credential:${matchingItem.credentialVersion || 'initial'}`;
-        const status = current && ['credentials_saved', 'retry_wait', 'manual_required'].includes(current.status)
-          ? current.status
-          : ready ? 'claimable' : 'waiting_supplier';
-        const saved = await this.repository.upsertRecovery({
-          ...(current || {}),
-          recoveryKey,
-          supplierRecoveryId: entry.id || entry.recovery_id,
-          orderItemId: matchingItem.id,
-          ruleId: order?.ruleId,
-          sub2apiAccountId: matchingItem.sub2apiAccountId,
-          accountKey,
-          status,
-          deliveryStatus: entry.delivery_status || entry.status || '',
-          credentialVersion: entry.credential_version || entry.credentialVersion || current?.credentialVersion || '',
-          claimUrlCiphertext: claimUrl && this.vault.available
-            ? this.vault.encrypt({ claimUrl })
-            : current?.claimUrlCiphertext || '',
-        });
-        if (matchingItem.verificationStatus === 'failed'
-          && matchingItem.status !== 'waiting_supplier_recovery') {
-          await this.repository.updateOrderItem(matchingItem.id, {
-            status: 'waiting_supplier_recovery',
-            nextImportRetryAt: null,
-          });
-          await this.repository.addEvent({
-            ruleId: matchingItem.orderId ? (await this.repository.getOrder(matchingItem.orderId))?.ruleId : null,
-            orderId: matchingItem.orderId,
-            itemId: matchingItem.id,
-            eventType: 'import_recovery_waiting_supplier',
-            message: '账号凭据失效，已转入供应商恢复认领队列',
-            details: { recoveryId: saved.id, supplierRecoveryId: saved.supplierRecoveryId || '' },
-          });
-        }
-        activeByItem.set(matchingItem.id, saved);
+        await mergeRecovery(entry);
       }
       const next = numeric(payload.next_before_id ?? payload.nextBeforeId, 0);
       if (!entries.length || !next || next === beforeId) break;
       beforeId = next;
+    }
+
+    const orders = new Map();
+    for (const current of activeByItem.values()) {
+      if (!current.orderId || !current.externalOrderId || current.status === 'recovered') continue;
+      orders.set(current.orderId, current.externalOrderId);
+    }
+    for (const [orderId, externalOrderId] of orders) {
+      try {
+        const response = await this.customerRequest(({ settings, token }) => this.client.getOrder({
+          baseUrl: settings.baseUrl,
+          token,
+          orderId: externalOrderId,
+        }));
+        const payload = payloadOf(response) || {};
+        const order = await this.repository.getOrder(orderId);
+        const replacements = replacementFilesPayload(payload);
+        for (let entry of replacements) {
+          const matchingItem = order?.items?.find((item) => replacementMatchesItem(entry, item))
+            || (order?.items?.length === 1 && replacements.length === 1 ? order.items[0] : null);
+          if (!matchingItem) continue;
+          const statusUrl = replacementStatusUrl(entry);
+          if (statusUrl && !replacementClaimUrl(entry)) {
+            try {
+              const statusResponse = await this.customerRequest(({ settings, token }) => this.client.getRecoveryStatus({
+                baseUrl: settings.baseUrl,
+                token,
+                statusUrl,
+              }));
+              const latest = payloadOf(statusResponse) || {};
+              entry = { ...entry, ...(latest.replacement_file || latest.replacementFile || latest) };
+            } catch (error) {
+              this.logger.warn('[replenishment] replacement status refresh failed', error?.message || error);
+            }
+          }
+          await mergeRecovery(entry, { externalOrderId, fallbackItem: matchingItem });
+        }
+      } catch (error) {
+        this.logger.warn(`[replenishment] replacement lookup failed for order ${externalOrderId}`, error?.message || error);
+      }
     }
   }
 
@@ -477,9 +633,13 @@ export class ReplenishmentService {
           claimUrl,
         }));
         const claimedPayload = payloadOf(claimed) || {};
-        credentials = claimedPayload.credentials || claimedPayload.payload?.credentials || claimedPayload.payload;
+        credentials = credentialsFromRecoveryPayload(claimedPayload, job.accountKey);
         if (!credentials || typeof credentials !== 'object') throw errorWithStatus('供应商修复响应缺少账号凭据');
-        credentialVersion = claimedPayload.credential_version || claimedPayload.credentialVersion || credentialVersion;
+        const claimedAccount = accountsPayload(claimedPayload).find(
+          (entry) => supplierAccountKey(entry) === String(job.accountKey || '').trim(),
+        ) || (accountsPayload(claimedPayload).length === 1 ? accountsPayload(claimedPayload)[0] : null);
+        credentialVersion = claimedPayload.credential_version || claimedPayload.credentialVersion
+          || claimedAccount?.credential_version || claimedAccount?.credentialVersion || credentialVersion;
         job = await this.repository.upsertRecovery({
           ...job,
           status: 'credentials_saved',
@@ -578,6 +738,7 @@ export class ReplenishmentService {
         message: `账号 ${job.accountName || job.accountKey} 已认领、更新并验号通过`,
         details: { recoveryId: job.id, targetAccountId, credentialVersion },
       });
+      await this.reconcileCostLedgers();
       return {
         ok: true,
         recoveryId: job.id,
@@ -586,6 +747,32 @@ export class ReplenishmentService {
         imported: true,
       };
     } catch (error) {
+      const staleClaim = Number(error?.httpStatus) === 409 || error?.code === 'claim_conflict'
+        || error?.code === 'recovery_payload_invalid'
+        || /recovery_payload_invalid/i.test(String(error?.message || ''));
+      if (staleClaim && !job.credentialCiphertext) {
+        const reason = Number(error?.httpStatus) === 409 || error?.code === 'claim_conflict'
+          ? '认领链接已失效或已被使用，已清除旧链接并重新查询供应商。'
+          : '供应商暂时无法提供补发文件，已清除旧链接并等待新链接。';
+        job = await this.repository.invalidateRecoveryClaim(job.id, {
+          status: 'waiting_supplier',
+          deliveryStatus: 'claim link invalid',
+          lastError: reason,
+        });
+        await this.syncSupplierRecoveries().catch((syncError) => {
+          this.logger.warn('[replenishment] recovery refresh after stale claim failed', syncError?.message || syncError);
+        });
+        const refreshed = await this.repository.getRecovery(job.id);
+        await this.repository.addEvent({
+          ruleId: job.ruleId,
+          orderId: job.orderId || null,
+          itemId: job.orderItemId,
+          eventType: refreshed?.status === 'manual_required' ? 'recovery_manual_required' : 'recovery_claim_refreshed',
+          message: refreshed?.lastError || reason,
+          details: { recoveryId: job.id, supplierCode: error?.code || '', httpStatus: error?.httpStatus || 0 },
+        });
+        throw errorWithStatus(refreshed?.lastError || reason, refreshed?.status === 'manual_required' ? 409 : 502);
+      }
       const attempts = Number(job.attemptCount || 0) + 1;
       const retryLimit = job.recoveryRetryLimit === null || job.recoveryRetryLimit === undefined
         ? null : Number(job.recoveryRetryLimit);
@@ -1032,7 +1219,6 @@ export class ReplenishmentService {
     const items = await this.repository.addOrderItems(order.id, suppliedItems);
     let validQuantity = 0;
     let failedQuantity = 0;
-    const passedItemIds = new Set();
     for (let index = 0; index < items.length; index += 1) {
       const current = items[index];
       try {
@@ -1065,9 +1251,8 @@ export class ReplenishmentService {
                 sub2apiAccountId: accountId,
               });
             },
-          });
+        });
         validQuantity += 1;
-        passedItemIds.add(current.id);
         await this.repository.updateOrderItem(current.id, {
           status: 'imported',
           verificationStatus: 'passed',
@@ -1104,14 +1289,10 @@ export class ReplenishmentService {
         });
       }
     }
-    const perAccountCost = suppliedItems.every((entry) => entry.individualCostCny !== null)
-      ? null
-      : validQuantity > 0 && actualPaidAmountCny !== null
-        ? Number(actualPaidAmountCny) / validQuantity
-        : null;
-    for (const current of items) {
-      const cost = current.individualCostCny
-        ?? (passedItemIds.has(current.id) ? perAccountCost : null);
+    const allocatedCosts = allocateOrderCosts(suppliedItems, actualPaidAmountCny);
+    for (let index = 0; index < items.length; index += 1) {
+      const current = items[index];
+      const cost = allocatedCosts[index];
       await this.repository.updateOrderItem(current.id, {
         finalCostCny: cost,
       });
@@ -1140,7 +1321,7 @@ export class ReplenishmentService {
       orderId: order.id,
       eventType: 'delivery_processed',
       message: `已导入 ${validQuantity}/${accounts.length} 个账号`,
-      details: { validQuantity, failedQuantity, actualPaidAmountCny, perAccountCost },
+      details: { validQuantity, failedQuantity, actualPaidAmountCny, allocatedCosts },
     });
     await this.reconcileCostLedgers();
   }
@@ -1149,6 +1330,10 @@ export class ReplenishmentService {
     if (!this.ledgerRepository?.createAccountCostPeriod || this.config.demoMode) return;
     for (const item of await this.repository.listPendingCostItems({ limit: 50 })) {
       try {
+        if (item.finalCostCny === null || item.finalCostCny === undefined) continue;
+        if (Number(item.persistedFinalCostCny) !== Number(item.finalCostCny)) {
+          await this.repository.updateOrderItem(item.id, { finalCostCny: item.finalCostCny });
+        }
         const purchaseBatch = `oauth-supply:${item.order?.externalOrderId || item.orderId}`;
         const existing = await this.ledgerRepository.listAccountCostPeriods({
           accountId: item.sub2apiAccountId,

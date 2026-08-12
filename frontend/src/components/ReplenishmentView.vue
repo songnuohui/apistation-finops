@@ -171,7 +171,8 @@
         <div v-for="recovery in recoveries" :key="`${recovery.kind || 'account'}-${recovery.id}`" class="recovery-row">
           <div class="recovery-main">
             <strong>{{ recovery.accountName || `修复任务 #${recovery.id}` }}</strong>
-            <small>{{ recovery.kind === 'import' ? `订单 #${recovery.orderId} · 导入重试` : `Sub2API #${recovery.targetAccountId} · 版本 ${recovery.credentialVersion || '--'}` }} · 尝试 {{ recovery.attemptCount || 0 }} 次</small>
+            <small>FinOps 订单 #{{ recovery.orderId || '--' }} · OAuth Supply 订单 {{ recovery.externalOrderId || '--' }}</small>
+            <small>{{ recovery.kind === 'import' ? '导入重试' : `Sub2API #${recovery.targetAccountId} · 版本 ${recovery.credentialVersion || '--'}` }} · 尝试 {{ recovery.attemptCount || 0 }} 次</small>
             <small v-if="recovery.lastError" class="recovery-error">{{ recovery.lastError }}</small>
           </div>
           <div class="recovery-actions">
@@ -325,7 +326,7 @@ const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', a
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
-const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
+const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '补发文件可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '已人工领取/需处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
 const eventTypeLabel = (value: string) => ({

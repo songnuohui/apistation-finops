@@ -143,6 +143,8 @@ function recovery(row) {
     recoveryKey: row.recovery_key,
     supplierRecoveryId: row.supplier_recovery_id || '',
     orderItemId: Number(row.order_item_id),
+    orderId: number(row.order_id),
+    externalOrderId: row.external_order_id || '',
     ruleId: Number(row.rule_id),
     sub2apiAccountId: Number(row.sub2api_account_id),
     accountKey: row.account_key || '',
@@ -806,8 +808,12 @@ export class ReplenishmentRepository {
       if (!current) return null;
       const policy = this.recoveryPolicies.find((entry) => entry.ruleId === current.ruleId);
       const selectedRule = this.rules.find((entry) => entry.id === current.ruleId);
+      const selectedItem = this.items.find((entry) => entry.id === current.orderItemId);
+      const selectedOrder = this.orders.find((entry) => entry.id === selectedItem?.orderId);
       return {
         ...current,
+        orderId: selectedOrder?.id || selectedItem?.orderId || null,
+        externalOrderId: selectedOrder?.externalOrderId || '',
         mode: policy?.mode || 'manual', recoveryEnabled: policy?.enabled !== false,
         recoveryRetryLimit: policy?.retryLimit ?? null,
         recoveryRetryIntervalSeconds: policy?.retryIntervalSeconds || 60,
@@ -816,12 +822,13 @@ export class ReplenishmentRepository {
       };
     }
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+      SELECT rr.*,i.account_name,i.order_id,o.external_order_id,r.verification_model,r.verification_prompt,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
         policy.retry_limit AS recovery_policy_retry_limit,
         policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
       LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       WHERE rr.id=$1`, [id]);
@@ -832,12 +839,13 @@ export class ReplenishmentRepository {
     if (this.demo) return Promise.all([...this.recoveries].sort((a, b) => b.id - a.id).slice(0, limit)
       .map((entry) => this.getRecovery(entry.id)));
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+      SELECT rr.*,i.account_name,i.order_id,o.external_order_id,r.verification_model,r.verification_prompt,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
         policy.retry_limit AS recovery_policy_retry_limit,
         policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
       LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       ORDER BY rr.updated_at DESC,rr.id DESC LIMIT $1`, [limit]);
@@ -853,17 +861,37 @@ export class ReplenishmentRepository {
         .slice(0, limit).map((entry) => ({ ...entry }));
     }
     const result = await this.pool.query(`
-      SELECT rr.*,i.account_name,r.verification_model,r.verification_prompt,
+      SELECT rr.*,i.account_name,i.order_id,o.external_order_id,r.verification_model,r.verification_prompt,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
         policy.retry_limit AS recovery_policy_retry_limit,
         policy.retry_interval_seconds AS recovery_retry_interval_seconds
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
       JOIN ${this.schema}.replenishment_rules r ON r.id=rr.rule_id
       LEFT JOIN ${this.schema}.replenishment_recovery_policies policy ON policy.rule_id=rr.rule_id
       WHERE rr.status=ANY($1::text[]) AND (rr.next_retry_at IS NULL OR rr.next_retry_at<=NOW())
       ORDER BY rr.updated_at LIMIT $2`, [statuses, limit]);
     return result.rows.map(recovery);
+  }
+
+  async invalidateRecoveryClaim(id, { status = 'waiting_supplier', deliveryStatus = '', lastError = '' } = {}) {
+    if (this.demo) {
+      const current = this.recoveries.find((entry) => entry.id === Number(id));
+      if (!current) return null;
+      Object.assign(current, {
+        status, deliveryStatus, claimUrlCiphertext: '', nextRetryAt: null, lastError,
+        lastSeenAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      return this.getRecovery(current.id);
+    }
+    const result = await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_recoveries SET
+        status=$2,delivery_status=$3,claim_url_ciphertext='',next_retry_at=NULL,
+        last_error=$4,last_seen_at=NOW(),updated_at=NOW()
+      WHERE id=$1 RETURNING id`,
+    [id, status, String(deliveryStatus || '').slice(0, 80), String(lastError || '').slice(0, 1000)]);
+    return result.rowCount ? this.getRecovery(id) : null;
   }
 
   async dailySpend(ruleId) {
@@ -1143,26 +1171,43 @@ export class ReplenishmentRepository {
   async listPendingCostItems({ limit = 50 } = {}) {
     if (this.demo) {
       return this.items
-        .filter((entry) => entry.verificationStatus === 'passed'
-          && entry.sub2apiAccountId && entry.costLedgerStatus === 'pending')
+        .filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)
+          && entry.sub2apiAccountId && ['pending', 'failed'].includes(entry.costLedgerStatus))
         .slice(0, limit)
         .map((entry) => {
           const currentOrder = this.orders.find((candidate) => candidate.id === entry.orderId);
-          return { ...entry, order: currentOrder ? { ...currentOrder } : null };
+          const fallbackCost = currentOrder?.deliveredQuantity > 0 && currentOrder?.actualPaidAmountCny !== null
+            ? Number(currentOrder.actualPaidAmountCny) / Number(currentOrder.deliveredQuantity)
+            : null;
+          return {
+            ...entry,
+            persistedFinalCostCny: entry.finalCostCny,
+            finalCostCny: entry.finalCostCny ?? entry.individualCostCny ?? fallbackCost,
+            order: currentOrder ? { ...currentOrder } : null,
+          };
         });
     }
     const result = await this.pool.query(`
-      SELECT i.*,o.external_order_id,o.product,o.platform,o.target_pool_key,o.created_at AS order_created_at
+      SELECT i.*,o.external_order_id,o.product,o.platform,o.target_pool_key,o.created_at AS order_created_at,
+        COALESCE(i.final_cost_cny,i.individual_cost_cny,
+          CASE WHEN o.delivered_quantity>0 AND o.actual_paid_amount_cny IS NOT NULL
+            THEN o.actual_paid_amount_cny/o.delivered_quantity ELSE NULL END
+        ) AS resolved_final_cost_cny
       FROM ${this.schema}.oauth_supply_order_items i
       JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
-      WHERE i.verification_status='passed'
+      WHERE i.verification_status=ANY($2::text[])
         AND i.sub2api_account_id IS NOT NULL
-        AND i.final_cost_cny IS NOT NULL
-        AND i.cost_ledger_status='pending'
+        AND COALESCE(i.final_cost_cny,i.individual_cost_cny,
+          CASE WHEN o.delivered_quantity>0 AND o.actual_paid_amount_cny IS NOT NULL
+            THEN o.actual_paid_amount_cny/o.delivered_quantity ELSE NULL END
+        ) IS NOT NULL
+        AND i.cost_ledger_status=ANY($3::text[])
       ORDER BY i.id
-      LIMIT $1`, [limit]);
+      LIMIT $1`, [limit, ['passed', 'repaired'], ['pending', 'failed']]);
     return result.rows.map((row) => ({
       ...item(row),
+      persistedFinalCostCny: number(row.final_cost_cny),
+      finalCostCny: number(row.resolved_final_cost_cny),
       order: {
         id: Number(row.order_id),
         externalOrderId: row.external_order_id || '',
@@ -1185,6 +1230,24 @@ export class ReplenishmentRepository {
       SELECT * FROM ${this.schema}.oauth_supply_order_items
       WHERE external_account_key=$1 OR account_name=$1
       ORDER BY id DESC LIMIT 1`, [key]);
+    return result.rowCount ? item(result.rows[0]) : null;
+  }
+
+  async findOrderItemByExternalOrderAndAccountKey(externalOrderId, accountKey) {
+    const orderKey = String(externalOrderId || '').trim();
+    const key = String(accountKey || '').trim();
+    if (!orderKey || !key) return this.findOrderItemByAccountKey(key);
+    if (this.demo) {
+      const selectedOrder = this.orders.find((entry) => String(entry.externalOrderId) === orderKey);
+      const current = this.items.find((entry) => entry.orderId === selectedOrder?.id
+        && (entry.externalAccountKey === key || entry.accountName === key));
+      return current ? { ...current } : null;
+    }
+    const result = await this.pool.query(`
+      SELECT i.* FROM ${this.schema}.oauth_supply_order_items i
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      WHERE o.external_order_id=$1 AND (i.external_account_key=$2 OR i.account_name=$2)
+      ORDER BY i.id DESC LIMIT 1`, [orderKey, key]);
     return result.rowCount ? item(result.rows[0]) : null;
   }
 
