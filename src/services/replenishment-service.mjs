@@ -6,6 +6,10 @@ function errorWithStatus(message, statusCode = 502) {
   return Object.assign(new Error(message), { statusCode });
 }
 
+function isNotFound(error) {
+  return Number(error?.statusCode ?? error?.httpStatus) === 404;
+}
+
 function payloadOf(response) {
   const payload = response?.payload;
   return payload?.data && typeof payload.data === 'object' ? payload.data : payload;
@@ -312,18 +316,36 @@ export class ReplenishmentService {
         modelId: item.rule.verificationModel,
         prompt: item.rule.verificationPrompt,
       };
-      const account = item.sub2apiAccountId
-        ? await this.sub2ApiGateway.configureAndVerify({ accountId: item.sub2apiAccountId, ...configuration })
-        : await this.sub2ApiGateway.importAndVerify({
-          name: item.accountName,
-          platform: item.rule.platform,
-          credentials,
-          expiresAt: item.metadata?.expiresAt || null,
-          ...configuration,
-          onCreated: async (accountId) => this.repository.updateOrderItem(item.id, {
-            status: 'importing', sub2apiAccountId: accountId,
-          }),
-        });
+      const importAccount = () => this.sub2ApiGateway.importAndVerify({
+        name: item.accountName,
+        platform: item.rule.platform,
+        credentials,
+        expiresAt: item.metadata?.expiresAt || null,
+        ...configuration,
+        onCreated: async (accountId) => this.repository.updateOrderItem(item.id, {
+          status: 'importing', sub2apiAccountId: accountId,
+        }),
+      });
+      let account;
+      if (!item.sub2apiAccountId) {
+        account = await importAccount();
+      } else {
+        try {
+          account = await this.sub2ApiGateway.configureAndVerify({
+            accountId: item.sub2apiAccountId,
+            ...configuration,
+          });
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+          account = await importAccount();
+          await this.repository.addEvent({
+            ruleId: item.order.ruleId, runId: item.order.runId, orderId: item.order.id, itemId: item.id,
+            eventType: 'import_retry_reimported',
+            message: '原 Sub2API 账号不存在，已重新导入并验号',
+            details: { previousAccountId: item.sub2apiAccountId, accountId: account?.id || null },
+          });
+        }
+      }
       await this.repository.updateOrderItem(item.id, {
         status: 'imported', verificationStatus: 'passed', sub2apiAccountId: account?.id || item.sub2apiAccountId,
         importAttemptCount: Number(item.importAttemptCount || 0) + 1, nextImportRetryAt: null, errorMessage: '',

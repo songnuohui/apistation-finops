@@ -304,6 +304,47 @@ test('failed verification is queued for a later import retry and can complete wi
   assert.equal(savedOrder.items[0].sub2apiAccountId, 901);
 });
 
+test('import retry reimports credentials when the original Sub2API account no longer exists', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  await repository.saveRecoveryPolicy({
+    ruleId: rule.id, enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 15,
+  });
+  const order = await repository.createPlannedOrder({
+    rule, trigger: 'manual', quantity: 1, availableBefore: 0, quotedAmountCny: 3,
+    actor: 'test', status: 'ordering', idempotencyKey: 'import-retry-reimport-order',
+  });
+  let importCount = 0;
+  const gateway = {
+    async importAndVerify(input) {
+      importCount += 1;
+      const accountId = importCount === 1 ? 911 : 912;
+      await input.onCreated?.(accountId);
+      if (importCount === 1) throw new Error('verification timed out');
+      return { id: accountId };
+    },
+    async configureAndVerify() {
+      throw Object.assign(new Error('account not found'), { statusCode: 404 });
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, { client: {} });
+
+  await service.processDelivery(order, rule, {
+    charged_fen: 300,
+    accounts: [{ email: 'missing@example.com', credentials: { access_token: 'retry-token' } }],
+  });
+  const item = (await repository.getOrder(order.id)).items[0];
+  assert.equal(item.sub2apiAccountId, 911);
+
+  await service.retryImportItem(item.id);
+  const savedOrder = await repository.getOrder(order.id);
+  assert.equal(importCount, 2);
+  assert.equal(savedOrder.status, 'completed');
+  assert.equal(savedOrder.items[0].sub2apiAccountId, 912);
+  assert.equal(savedOrder.items[0].verificationStatus, 'passed');
+  assert.ok((await repository.listEvents({ ruleId: rule.id })).some((entry) => entry.eventType === 'import_retry_reimported'));
+});
+
 test('cost ledger stays pending until FinOps synchronization exposes the imported account', async () => {
   const item = {
     id: 41,

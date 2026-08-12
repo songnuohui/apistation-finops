@@ -334,7 +334,7 @@ const eventTypeLabel = (value: string) => ({
   rule_enabled: '策略启动', rule_disabled: '策略暂停',
   approval_required: '等待审批', order_planned: '准备下单', order_created: '订单已创建',
   delivery_processed: '导入完成', import_failed: '导入失败', import_retry_scheduled: '导入重试',
-  import_retry_succeeded: '重试成功', import_retry_manual_required: '人工处理',
+  import_retry_succeeded: '重试成功', import_retry_reimported: '重新导入', import_retry_manual_required: '人工处理',
   account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
   recovery_manual_required: '人工处理', recovery_verified: '修复完成',
 } as Record<string, string>)[value] || value || '操作记录';
