@@ -251,6 +251,11 @@ function inventoryEventSummary(snapshot) {
   return summary;
 }
 
+function metadataWithoutExpiration(metadata) {
+  const { expiresAt: _expiresAt, ...rest } = metadata || {};
+  return rest;
+}
+
 function scheduleSnapshot(account, {
   readError = '',
   expired = false,
@@ -516,10 +521,7 @@ export class ReplenishmentService {
       await this.repository.updateOrderItem(item.id, {
         status: 'imported', verificationStatus: 'passed', sub2apiAccountId: account?.id || item.sub2apiAccountId,
         importAttemptCount: Number(item.importAttemptCount || 0) + 1, nextImportRetryAt: null, errorMessage: '',
-        metadata: {
-          ...(item.metadata || {}),
-          expiresAt: null,
-        },
+        metadata: metadataWithoutExpiration(item.metadata),
       });
       const order = await this.repository.getOrder(item.order.id);
       const validQuantity = order.items.filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)).length;
@@ -816,10 +818,7 @@ export class ReplenishmentService {
         sub2apiAccountId: targetAccountId,
         credentialVersion,
         credentialCiphertext: encryptedCredentials,
-        metadata: {
-          ...(orderItem?.metadata || {}),
-          expiresAt: null,
-        },
+        metadata: metadataWithoutExpiration(orderItem?.metadata),
         errorMessage: '',
         lastHealthAt: new Date(this.now()).toISOString(),
       });
@@ -1381,6 +1380,7 @@ export class ReplenishmentService {
         const raw = accounts[index];
         const remoteItem = matchingOrderItem(raw, index, remoteItems);
         const credentials = accountCredential(raw);
+        const expiresAt = accountExpiresAt(raw, remoteItem);
         if (!Object.keys(credentials).length) throw new Error('交付账号凭据为空');
         if (!this.vault.available && !this.config.demoMode) throw new Error('服务端未配置 SUPPLIER_CREDENTIALS_KEY');
         const configuration = {
@@ -1407,7 +1407,7 @@ export class ReplenishmentService {
             name: current.accountName,
             platform: rule.platform,
             credentials,
-            expiresAt: accountExpiresAt(raw, remoteItem),
+            expiresAt,
             ...configuration,
             onCreated: async (accountId) => {
               await this.repository.updateOrderItem(current.id, {
@@ -1422,8 +1422,8 @@ export class ReplenishmentService {
           verificationStatus: 'passed',
           sub2apiAccountId: account?.id,
           metadata: {
-            ...current.metadata,
-            expiresAt: accountExpiresAt(raw, remoteItem),
+            ...metadataWithoutExpiration(current.metadata),
+            ...(expiresAt === null ? {} : { expiresAt }),
           },
         });
       } catch (error) {
