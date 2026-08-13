@@ -1163,7 +1163,8 @@ export class ReplenishmentRepository {
   }
 
   async listOrderPage({
-    page = 1, pageSize = 20, offset = 0, search = '', sortBy = 'created_at', sortOrder = 'desc',
+    page = 1, pageSize = 20, offset = 0, search = '', filters = {},
+    sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
     if (this.demo) {
       const rows = this.orders.map((entry) => {
@@ -1188,14 +1189,28 @@ export class ReplenishmentRepository {
         })
         .filter((entry) => {
           const query = String(search || '').toLocaleLowerCase();
-          if (!query) return true;
           const selectedItems = this.items.filter((itemEntry) => itemEntry.orderId === entry.id);
-          return [
+          const matchesSearch = !query || [
             entry.id, entry.externalOrderId, entry.ruleName, entry.product,
             ...selectedItems.flatMap((itemEntry) => [
               itemEntry.accountName, itemEntry.externalAccountKey, itemEntry.sub2apiAccountId,
             ]),
           ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query));
+          const includes = (value, filter) => !filter
+            || String(value ?? '').toLocaleLowerCase().includes(String(filter).toLocaleLowerCase());
+          return matchesSearch
+            && includes(entry.id, filters.orderId)
+            && includes(entry.externalOrderId, filters.externalOrderId)
+            && (!filters.accountName || selectedItems.some((itemEntry) => includes(
+              `${itemEntry.accountName} ${itemEntry.externalAccountKey}`,
+              filters.accountName,
+            )))
+            && (!filters.sub2apiAccountId || selectedItems.some((itemEntry) => includes(
+              itemEntry.sub2apiAccountId,
+              filters.sub2apiAccountId,
+            )))
+            && includes(`${entry.ruleName} ${entry.product}`, filters.ruleProduct)
+            && includes(entry.status, filters.status);
         });
       const demoSortKeys = {
         created_at: 'createdAt',
@@ -1219,6 +1234,14 @@ export class ReplenishmentRepository {
       };
     }
     const query = String(search || '').trim();
+    const selectedFilters = {
+      orderId: String(filters.orderId || '').trim(),
+      externalOrderId: String(filters.externalOrderId || '').trim(),
+      accountName: String(filters.accountName || '').trim(),
+      sub2apiAccountId: String(filters.sub2apiAccountId || '').trim(),
+      ruleProduct: String(filters.ruleProduct || '').trim(),
+      status: String(filters.status || '').trim(),
+    };
     const orderSortColumns = {
       created_at: 'created_at',
       updated_at: 'updated_at',
@@ -1259,13 +1282,33 @@ export class ReplenishmentRepository {
                   OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$2||'%'
                   OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$2||'%')
             ))
+            AND ($3='' OR o.id::text ILIKE '%'||$3||'%')
+            AND ($4='' OR COALESCE(o.external_order_id,'') ILIKE '%'||$4||'%')
+            AND ($5='' OR EXISTS (
+              SELECT 1 FROM ${this.schema}.oauth_supply_order_items account_item
+              WHERE account_item.order_id=o.id
+                AND (account_item.account_name ILIKE '%'||$5||'%'
+                  OR COALESCE(account_item.external_account_key,'') ILIKE '%'||$5||'%')
+            ))
+            AND ($6='' OR EXISTS (
+              SELECT 1 FROM ${this.schema}.oauth_supply_order_items sub2api_item
+              WHERE sub2api_item.order_id=o.id
+                AND COALESCE(sub2api_item.sub2api_account_id::text,'') ILIKE '%'||$6||'%'
+            ))
+            AND ($7='' OR r.name ILIKE '%'||$7||'%' OR o.product ILIKE '%'||$7||'%')
+            AND ($8='' OR o.status ILIKE '%'||$8||'%')
           GROUP BY o.id,r.name,run.trigger,run.mode,run.failed_quantity,m.target_group_ids
         )
         SELECT order_rows.*
         FROM order_rows
         ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
-        LIMIT $3 OFFSET $4`,
-      [['healthy', 'quota_unknown'], query, pageSize, offset]),
+        LIMIT $9 OFFSET $10`,
+      [
+        ['healthy', 'quota_unknown'], query,
+        selectedFilters.orderId, selectedFilters.externalOrderId, selectedFilters.accountName,
+        selectedFilters.sub2apiAccountId, selectedFilters.ruleProduct, selectedFilters.status,
+        pageSize, offset,
+      ]),
       this.pool.query(`
         SELECT COUNT(*)::int AS total
         FROM ${this.schema}.oauth_supply_orders o
@@ -1281,7 +1324,25 @@ export class ReplenishmentRepository {
               AND (search_item.account_name ILIKE '%'||$1||'%'
                 OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$1||'%'
                 OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$1||'%')
-          ))`, [query]),
+          ))
+          AND ($2='' OR o.id::text ILIKE '%'||$2||'%')
+          AND ($3='' OR COALESCE(o.external_order_id,'') ILIKE '%'||$3||'%')
+          AND ($4='' OR EXISTS (
+            SELECT 1 FROM ${this.schema}.oauth_supply_order_items account_item
+            WHERE account_item.order_id=o.id
+              AND (account_item.account_name ILIKE '%'||$4||'%'
+                OR COALESCE(account_item.external_account_key,'') ILIKE '%'||$4||'%')
+          ))
+          AND ($5='' OR EXISTS (
+            SELECT 1 FROM ${this.schema}.oauth_supply_order_items sub2api_item
+            WHERE sub2api_item.order_id=o.id
+              AND COALESCE(sub2api_item.sub2api_account_id::text,'') ILIKE '%'||$5||'%'
+          ))
+          AND ($6='' OR r.name ILIKE '%'||$6||'%' OR o.product ILIKE '%'||$6||'%')
+          AND ($7='' OR o.status ILIKE '%'||$7||'%')`, [
+        query, selectedFilters.orderId, selectedFilters.externalOrderId, selectedFilters.accountName,
+        selectedFilters.sub2apiAccountId, selectedFilters.ruleProduct, selectedFilters.status,
+      ]),
     ]);
     const total = Number(countResult.rows[0]?.total || 0);
     return {
@@ -1295,7 +1356,7 @@ export class ReplenishmentRepository {
 
   async listRecoveryFeed({
     scope = 'pending', page = 1, pageSize = 20, offset = 0,
-    search = '', sortBy = 'created_at', sortOrder = 'desc',
+    search = '', filters = {}, sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
     if (this.demo) {
       const recoveryItemIds = new Set(this.recoveries.map((entry) => Number(entry.orderItemId)));
@@ -1430,10 +1491,20 @@ export class ReplenishmentRepository {
         });
       const query = String(search || '').toLocaleLowerCase();
       const all = [...accountEntries, ...importEntries, ...completedImports]
-        .filter((entry) => !query || [
-          entry.accountName, entry.externalAccountKey, entry.orderId, entry.externalOrderId,
-          entry.targetAccountId, entry.product, entry.ruleName, entry.status,
-        ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query)));
+        .filter((entry) => {
+          const includes = (value, filter) => !filter
+            || String(value ?? '').toLocaleLowerCase().includes(String(filter).toLocaleLowerCase());
+          const matchesSearch = !query || [
+            entry.accountName, entry.externalAccountKey, entry.orderId, entry.externalOrderId,
+            entry.targetAccountId, entry.product, entry.ruleName, entry.status,
+          ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query));
+          return matchesSearch
+            && includes(`${entry.accountName} ${entry.externalAccountKey}`, filters.accountName)
+            && includes(entry.orderId, filters.orderId)
+            && includes(entry.externalOrderId, filters.externalOrderId)
+            && includes(entry.targetAccountId, filters.sub2apiAccountId)
+            && includes(entry.status, filters.status);
+        });
       const demoSortKeys = {
         created_at: 'createdAt',
         updated_at: 'updatedAt',
@@ -1529,6 +1600,13 @@ export class ReplenishmentRepository {
           )
       )`;
     const query = String(search || '').trim();
+    const selectedFilters = {
+      accountName: String(filters.accountName || '').trim(),
+      orderId: String(filters.orderId || '').trim(),
+      externalOrderId: String(filters.externalOrderId || '').trim(),
+      sub2apiAccountId: String(filters.sub2apiAccountId || '').trim(),
+      status: String(filters.status || '').trim(),
+    };
     const recoverySortColumns = {
       created_at: 'created_at',
       updated_at: 'updated_at',
@@ -1553,6 +1631,17 @@ export class ReplenishmentRepository {
         OR product ILIKE '%'||${placeholder}||'%'
         OR rule_name ILIKE '%'||${placeholder}||'%'
         OR status ILIKE '%'||${placeholder}||'%')`;
+    const filterCondition = (startIndex) => `
+      AND ($${startIndex}='' OR account_name ILIKE '%'||$${startIndex}||'%'
+        OR COALESCE(external_account_key,'') ILIKE '%'||$${startIndex}||'%')
+      AND ($${startIndex + 1}='' OR order_id::text ILIKE '%'||$${startIndex + 1}||'%')
+      AND ($${startIndex + 2}='' OR COALESCE(external_order_id,'') ILIKE '%'||$${startIndex + 2}||'%')
+      AND ($${startIndex + 3}='' OR COALESCE(sub2api_account_id::text,'') ILIKE '%'||$${startIndex + 3}||'%')
+      AND ($${startIndex + 4}='' OR status ILIKE '%'||$${startIndex + 4}||'%')`;
+    const filterValues = [
+      selectedFilters.accountName, selectedFilters.orderId, selectedFilters.externalOrderId,
+      selectedFilters.sub2apiAccountId, selectedFilters.status,
+    ];
     const [itemsResult, totalsResult] = await Promise.all([
       this.pool.query(`${feedSql}
         SELECT recovery_feed.*,COUNT(*) OVER() AS total_count
@@ -1561,14 +1650,16 @@ export class ReplenishmentRepository {
           OR ($1='completed' AND status='recovered')
           OR ($1='pending' AND status<>'recovered'))
           AND ${searchCondition('$2')}
+          ${filterCondition(3)}
         ORDER BY ${sortColumn} ${direction} NULLS LAST,order_item_id DESC,feed_id DESC
-        LIMIT $3 OFFSET $4`, [scope, query, pageSize, offset]),
+        LIMIT $8 OFFSET $9`, [scope, query, ...filterValues, pageSize, offset]),
       this.pool.query(`${feedSql}
         SELECT
           COUNT(*) FILTER (WHERE status<>'recovered')::int AS pending_total,
           COUNT(*) FILTER (WHERE status='recovered')::int AS completed_total
         FROM recovery_feed
-        WHERE ${searchCondition('$1')}`, [query]),
+        WHERE ${searchCondition('$1')}
+          ${filterCondition(2)}`, [query, ...filterValues]),
     ]);
     const pendingTotal = Number(totalsResult.rows[0]?.pending_total || 0);
     const completedTotal = Number(totalsResult.rows[0]?.completed_total || 0);

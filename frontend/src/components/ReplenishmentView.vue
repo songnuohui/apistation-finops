@@ -152,13 +152,17 @@
 
     <section v-if="activeSection === 'orders'" class="panel">
       <div class="panel-head"><div><h2>补号订单</h2><p>购买数量已经扣除有效库存和在途账号，避免重复或超量下单。</p></div><span class="table-note">共 {{ orderData.total || 0 }} 条</span></div>
-      <form class="toolbar-row replenishment-list-toolbar" @submit.prevent="applyOrderSearch">
-        <label class="search-box">
-          <Search :size="16" />
-          <input v-model.trim="orderSearch" placeholder="搜索账号、订单号、OAuth Supply 或 Sub2API 编号" />
-          <button v-if="orderSearch" type="button" class="search-clear-button" title="清除搜索" @click="clearOrderSearch"><X :size="14" /></button>
-        </label>
-        <button class="secondary-button" type="submit">查询</button>
+      <form class="replenishment-filterbar" @submit.prevent="applyOrderFilters">
+        <label><span>FinOps 订单</span><input v-model.trim="orderFilters.orderId" placeholder="例如 27" /></label>
+        <label><span>OAuth Supply 订单</span><input v-model.trim="orderFilters.externalOrderId" placeholder="供应商订单号" /></label>
+        <label class="filter-wide"><span>账号</span><input v-model.trim="orderFilters.accountName" placeholder="账号名称或邮箱" /></label>
+        <label><span>Sub2API</span><input v-model.trim="orderFilters.sub2apiAccountId" placeholder="账号编号" /></label>
+        <label><span>策略 / 商品</span><input v-model.trim="orderFilters.ruleProduct" placeholder="策略或商品" /></label>
+        <label><span>状态</span><select v-model="orderFilters.status"><option value="">全部状态</option><option v-for="option in orderStatusOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+        <div class="filter-actions">
+          <button class="icon-button filter-submit" type="submit" title="查询"><Search :size="15" /></button>
+          <button class="icon-button" type="button" title="清空筛选" @click="clearOrderFilters"><RotateCcw :size="15" /></button>
+        </div>
       </form>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table">
@@ -196,13 +200,16 @@
         <button :class="{ active: recoveryTab === 'pending' }" role="tab" @click="changeRecoveryTab('pending')">待修复 <span>{{ recoveryData.pendingTotal || 0 }}</span></button>
         <button :class="{ active: recoveryTab === 'completed' }" role="tab" @click="changeRecoveryTab('completed')">已修复 <span>{{ recoveryData.completedTotal || 0 }}</span></button>
       </div>
-      <form class="toolbar-row replenishment-list-toolbar" @submit.prevent="applyRecoverySearch">
-        <label class="search-box">
-          <Search :size="16" />
-          <input v-model.trim="recoverySearch" placeholder="搜索账号、订单号、OAuth Supply 或 Sub2API 编号" />
-          <button v-if="recoverySearch" type="button" class="search-clear-button" title="清除搜索" @click="clearRecoverySearch"><X :size="14" /></button>
-        </label>
-        <button class="secondary-button" type="submit">查询</button>
+      <form class="replenishment-filterbar recovery-filterbar" @submit.prevent="applyRecoveryFilters">
+        <label class="filter-wide"><span>账号</span><input v-model.trim="recoveryFilters.accountName" placeholder="账号名称或邮箱" /></label>
+        <label><span>FinOps 订单</span><input v-model.trim="recoveryFilters.orderId" placeholder="订单编号" /></label>
+        <label><span>OAuth Supply 订单</span><input v-model.trim="recoveryFilters.externalOrderId" placeholder="供应商订单号" /></label>
+        <label><span>Sub2API</span><input v-model.trim="recoveryFilters.sub2apiAccountId" placeholder="账号编号" /></label>
+        <label><span>状态</span><select v-model="recoveryFilters.status"><option value="">全部状态</option><option v-for="option in recoveryStatusOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
+        <div class="filter-actions">
+          <button class="icon-button filter-submit" type="submit" title="查询"><Search :size="15" /></button>
+          <button class="icon-button" type="button" title="清空筛选" @click="clearRecoveryFilters"><RotateCcw :size="15" /></button>
+        </div>
       </form>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table recovery-table">
@@ -357,7 +364,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import {
-  ArrowDown, ArrowUp, ChevronRight, History, Pause, Play, Plus, RefreshCw, Search,
+  ArrowDown, ArrowUp, ChevronRight, History, Pause, Play, Plus, RefreshCw, RotateCcw, Search,
   Settings2, ShoppingCart, Trash2, Wrench, X, Zap,
 } from 'lucide-vue-next';
 import { get, send } from '../api';
@@ -379,14 +386,20 @@ const orders = ref<any[]>([]);
 const recoveries = ref<any[]>([]);
 const orderPage = ref(1);
 const orderData = ref<any>({ items: [], page: 1, pageSize: 20, total: 0, pages: 0 });
-const orderSearch = ref('');
-const appliedOrderSearch = ref('');
+const emptyOrderFilters = () => ({
+  orderId: '', externalOrderId: '', accountName: '', sub2apiAccountId: '', ruleProduct: '', status: '',
+});
+const orderFilters = ref(emptyOrderFilters());
+const appliedOrderFilters = ref(emptyOrderFilters());
 const orderSortBy = ref('created_at');
 const orderSortOrder = ref<'asc' | 'desc'>('desc');
 const recoveryPage = ref(1);
 const recoveryData = ref<any>({ items: [], page: 1, pageSize: 20, total: 0, pages: 0, pendingTotal: 0, completedTotal: 0 });
-const recoverySearch = ref('');
-const appliedRecoverySearch = ref('');
+const emptyRecoveryFilters = () => ({
+  accountName: '', orderId: '', externalOrderId: '', sub2apiAccountId: '', status: '',
+});
+const recoveryFilters = ref(emptyRecoveryFilters());
+const appliedRecoveryFilters = ref(emptyRecoveryFilters());
 const recoverySortBy = ref('created_at');
 const recoverySortOrder = ref<'asc' | 'desc'>('desc');
 const recoveryPolicies = ref<any[]>([]);
@@ -422,8 +435,19 @@ const duration = (seconds: any) => Number(seconds) >= 3600 ? `${Math.round(Numbe
 const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', auto: '全自动' } as Record<string, string>)[value] || value;
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
+const orderStatusOptions = Object.entries({
+  approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中',
+  ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复',
+  completed: '已完成', partial_failed: '部分失败', failed: '失败',
+}).map(([value, label]) => ({ value, label }));
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
 const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '补发文件可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
+const recoveryStatusOptions = Object.entries({
+  detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复',
+  claimable: '补发文件可认领', credentials_saved: '凭据已保存',
+  updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中',
+  retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复',
+}).map(([value, label]) => ({ value, label }));
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
 const recoveryCompletionLabel = (recovery: any) => ({
@@ -527,9 +551,14 @@ async function loadOrders() {
   const params = new URLSearchParams({
     page: String(orderPage.value),
     page_size: String(orderData.value.pageSize || 20),
-    search: appliedOrderSearch.value,
     sort_by: orderSortBy.value,
     sort_order: orderSortOrder.value,
+    order_id: appliedOrderFilters.value.orderId,
+    external_order_id: appliedOrderFilters.value.externalOrderId,
+    account_name: appliedOrderFilters.value.accountName,
+    sub2api_account_id: appliedOrderFilters.value.sub2apiAccountId,
+    rule_product: appliedOrderFilters.value.ruleProduct,
+    status: appliedOrderFilters.value.status,
   });
   const data = await get(`/replenishment/orders?${params}`);
   orderData.value = data;
@@ -541,24 +570,28 @@ async function loadRecoveries() {
     scope: recoveryTab.value,
     page: String(recoveryPage.value),
     page_size: String(recoveryData.value.pageSize || 20),
-    search: appliedRecoverySearch.value,
     sort_by: recoverySortBy.value,
     sort_order: recoverySortOrder.value,
+    account_name: appliedRecoveryFilters.value.accountName,
+    order_id: appliedRecoveryFilters.value.orderId,
+    external_order_id: appliedRecoveryFilters.value.externalOrderId,
+    sub2api_account_id: appliedRecoveryFilters.value.sub2apiAccountId,
+    status: appliedRecoveryFilters.value.status,
   });
   const data = await get(`/replenishment/recoveries?${params}`);
   recoveryData.value = data;
   recoveries.value = data.items || [];
 }
 
-async function applyOrderSearch() {
-  appliedOrderSearch.value = orderSearch.value;
+async function applyOrderFilters() {
+  appliedOrderFilters.value = { ...orderFilters.value };
   orderPage.value = 1;
   await loadOrders();
 }
 
-async function clearOrderSearch() {
-  orderSearch.value = '';
-  await applyOrderSearch();
+async function clearOrderFilters() {
+  orderFilters.value = emptyOrderFilters();
+  await applyOrderFilters();
 }
 
 async function toggleOrderSort(sortBy: string) {
@@ -572,15 +605,15 @@ async function toggleOrderSort(sortBy: string) {
   await loadOrders();
 }
 
-async function applyRecoverySearch() {
-  appliedRecoverySearch.value = recoverySearch.value;
+async function applyRecoveryFilters() {
+  appliedRecoveryFilters.value = { ...recoveryFilters.value };
   recoveryPage.value = 1;
   await loadRecoveries();
 }
 
-async function clearRecoverySearch() {
-  recoverySearch.value = '';
-  await applyRecoverySearch();
+async function clearRecoveryFilters() {
+  recoveryFilters.value = emptyRecoveryFilters();
+  await applyRecoveryFilters();
 }
 
 async function toggleRecoverySort(sortBy: string) {

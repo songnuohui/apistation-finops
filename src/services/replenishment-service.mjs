@@ -463,13 +463,13 @@ export class ReplenishmentService {
 
   async recoveries({
     scope = 'pending', page = 1, pageSize = 20, offset = 0,
-    search = '', sortBy = 'created_at', sortOrder = 'desc',
+    search = '', filters = {}, sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
     await this.syncSupplierRecoveries().catch((error) => {
       this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
     });
     return this.repository.listRecoveryFeed({
-      scope, page, pageSize, offset, search, sortBy, sortOrder,
+      scope, page, pageSize, offset, search, filters, sortBy, sortOrder,
     });
   }
 
@@ -687,6 +687,40 @@ export class ReplenishmentService {
       if (!matchingItem?.sub2apiAccountId) return null;
       const order = await this.repository.getOrder(matchingItem.orderId);
       const current = currentByItem.get(matchingItem.id);
+      if (matchingItem.repairCompletionSource === 'manual_compensation') {
+        const completedAt = current?.recoveredAt || matchingItem.updatedAt || new Date(this.now()).toISOString();
+        const completed = current?.status === 'recovered'
+          && current?.completionSource === 'manual_compensation'
+          ? current
+          : current
+            ? await this.repository.completeRecovery(current.id, {
+              completionSource: 'manual_compensation',
+              deliveryStatus: current.deliveryStatus || replacementStatus(entry) || 'manual compensation',
+              recoveredAt: completedAt,
+            })
+            : await this.repository.upsertRecovery({
+              recoveryKey: `item:${matchingItem.id}:manual-compensation`,
+              supplierRecoveryId: entry.id || entry.recovery_id || entry.replacement_id || '',
+              orderItemId: matchingItem.id,
+              ruleId: order?.ruleId,
+              sub2apiAccountId: matchingItem.sub2apiAccountId,
+              accountKey,
+              status: 'recovered',
+              deliveryStatus: replacementStatus(entry) || 'manual compensation',
+              credentialVersion: matchingItem.credentialVersion || '',
+              recoveredAt: completedAt,
+              completionSource: 'manual_compensation',
+            });
+        if (completed) {
+          currentByItem.set(matchingItem.id, completed);
+          activeByItem.delete(matchingItem.id);
+          return {
+            ...completed,
+            orderId: order?.id || matchingItem.orderId,
+            externalOrderId: order?.externalOrderId || externalOrderId,
+          };
+        }
+      }
       if (current?.status === 'recovered') {
         const remoteRecoveryId = String(entry.id || entry.recovery_id || entry.replacement_id || '');
         const remoteVersion = String(entry.credential_version || entry.credentialVersion || '');
@@ -1093,8 +1127,13 @@ export class ReplenishmentService {
         usage?.error,
         usage?.error_code,
       ) || Boolean(usage?.needs_reauth);
+      const manuallyCompleted = tracked.repairCompletionSource === 'manual_compensation';
       let recoveryJob = openByItem.get(tracked.id);
-      if (authFailed && !recoveryJob) {
+      if (manuallyCompleted) {
+        recoveryJob = null;
+        openByItem.delete(tracked.id);
+      }
+      if (authFailed && !recoveryJob && !manuallyCompleted) {
         recoveryJob = await this.repository.upsertRecovery({
           recoveryKey: `item:${tracked.id}:credential:${tracked.credentialVersion || 'initial'}`,
           orderItemId: tracked.id,

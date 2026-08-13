@@ -103,6 +103,10 @@ export function searchTerm(searchParams) {
   return (searchParams.get('search') || '').trim().slice(0, 120);
 }
 
+export function filterTerm(searchParams, name, maxLength = 120) {
+  return (searchParams.get(name) || '').trim().slice(0, maxLength);
+}
+
 export function listSort(searchParams, allowed, defaultSort = 'created_at') {
   const sortBy = searchParams.get('sort_by') || defaultSort;
   const sortOrder = searchParams.get('sort_order') || 'desc';
