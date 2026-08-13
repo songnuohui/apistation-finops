@@ -16,6 +16,18 @@ function conflict(message) {
   return Object.assign(new Error(message), { statusCode: 409 });
 }
 
+function itemMetadata(value) {
+  const metadata = { ...(value || {}) };
+  const rawExpiresAt = metadata.expiresAt;
+  const numericExpiresAt = Number(rawExpiresAt);
+  const datedExpiresAt = Date.parse(String(rawExpiresAt || ''));
+  if (rawExpiresAt === null || rawExpiresAt === undefined || rawExpiresAt === ''
+    || (Number.isFinite(numericExpiresAt) ? numericExpiresAt <= 0 : !Number.isFinite(datedExpiresAt))) {
+    delete metadata.expiresAt;
+  }
+  return metadata;
+}
+
 function mappingPoolKey(platform, groupIds) {
   return `${platform}:groups:${groupIds.join('-')}`;
 }
@@ -1550,7 +1562,7 @@ export class ReplenishmentRepository {
           importAttemptCount: value.importAttemptCount || 0, nextImportRetryAt: value.nextImportRetryAt || null,
           healthStatus: value.healthStatus || 'unknown', quotaUsedPercent: value.quotaUsedPercent ?? null,
           quotaWindow: value.quotaWindow || '', lastHealthAt: value.lastHealthAt || null,
-          metadata: value.metadata || {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          metadata: itemMetadata(value.metadata), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
         };
         this.items.push(record);
         created.push({ ...record });
@@ -1568,7 +1580,7 @@ export class ReplenishmentRepository {
       [orderId, value.externalItemId || null, value.externalAccountKey || null, value.accountName || '',
         value.status || 'delivered', value.verificationStatus || 'pending',
         value.individualCostCny ?? null, value.finalCostCny ?? null, value.credentialVersion || '',
-        value.credentialCiphertext || '', JSON.stringify(value.metadata || {})]);
+        value.credentialCiphertext || '', JSON.stringify(itemMetadata(value.metadata))]);
       created.push(item(result.rows[0]));
     }
     return created;
@@ -1599,7 +1611,7 @@ export class ReplenishmentRepository {
       merged.credentialVersion || '', merged.credentialCiphertext || '', merged.sub2apiAccountId,
       merged.costLedgerStatus || 'pending', merged.costLedgerPeriodId,
       String(merged.costLedgerError || '').slice(0, 1000),
-      String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(merged.metadata || {}),
+      String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(itemMetadata(merged.metadata)),
       merged.healthStatus || 'unknown', merged.quotaUsedPercent ?? null, merged.quotaWindow || '',
       merged.lastHealthAt || null, Number(merged.importAttemptCount || 0), merged.nextImportRetryAt || null]);
     return item(result.rows[0]);

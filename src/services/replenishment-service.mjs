@@ -87,6 +87,7 @@ function matchingOrderItem(raw, index, items) {
 }
 
 function epochSeconds(value) {
+  if (value === null || value === undefined || value === '') return null;
   const direct = numeric(value);
   if (direct !== null) return Math.floor(direct > 10_000_000_000 ? direct / 1000 : direct);
   const parsed = Date.parse(String(value || ''));
