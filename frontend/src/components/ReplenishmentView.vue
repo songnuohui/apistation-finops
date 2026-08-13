@@ -152,9 +152,26 @@
 
     <section v-if="activeSection === 'orders'" class="panel">
       <div class="panel-head"><div><h2>补号订单</h2><p>购买数量已经扣除有效库存和在途账号，避免重复或超量下单。</p></div><span class="table-note">共 {{ orderData.total || 0 }} 条</span></div>
+      <form class="toolbar-row replenishment-list-toolbar" @submit.prevent="applyOrderSearch">
+        <label class="search-box">
+          <Search :size="16" />
+          <input v-model.trim="orderSearch" placeholder="搜索账号、订单号、OAuth Supply 或 Sub2API 编号" />
+          <button v-if="orderSearch" type="button" class="search-clear-button" title="清除搜索" @click="clearOrderSearch"><X :size="14" /></button>
+        </label>
+        <button class="secondary-button" type="submit">查询</button>
+      </form>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table">
-          <thead><tr><th>订单</th><th>策略 / 商品</th><th>状态 / 触发</th><th>数量拆分</th><th>健康分类</th><th>金额</th><th>时间</th><th></th></tr></thead>
+          <thead><tr>
+            <th><button class="column-sort" @click="toggleOrderSort('id')">订单 <ArrowUp v-if="orderSortBy === 'id' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'id'" :size="13" /></button></th>
+            <th>策略 / 商品</th>
+            <th><button class="column-sort" @click="toggleOrderSort('status')">状态 / 触发 <ArrowUp v-if="orderSortBy === 'status' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'status'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleOrderSort('valid_quantity')">数量拆分 <ArrowUp v-if="orderSortBy === 'valid_quantity' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'valid_quantity'" :size="13" /></button></th>
+            <th>健康分类</th>
+            <th><button class="column-sort" @click="toggleOrderSort('actual_paid_amount_cny')">金额 <ArrowUp v-if="orderSortBy === 'actual_paid_amount_cny' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'actual_paid_amount_cny'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleOrderSort('created_at')">时间 <ArrowUp v-if="orderSortBy === 'created_at' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'created_at'" :size="13" /></button></th>
+            <th></th>
+          </tr></thead>
           <tbody>
             <tr v-for="order in orders" :key="order.id">
               <td><strong>#{{ order.id }}</strong><small>OAuth Supply {{ order.externalOrderId || '--' }}</small><small>运行 #{{ order.runId || '--' }}</small></td>
@@ -179,9 +196,27 @@
         <button :class="{ active: recoveryTab === 'pending' }" role="tab" @click="changeRecoveryTab('pending')">待修复 <span>{{ recoveryData.pendingTotal || 0 }}</span></button>
         <button :class="{ active: recoveryTab === 'completed' }" role="tab" @click="changeRecoveryTab('completed')">已修复 <span>{{ recoveryData.completedTotal || 0 }}</span></button>
       </div>
+      <form class="toolbar-row replenishment-list-toolbar" @submit.prevent="applyRecoverySearch">
+        <label class="search-box">
+          <Search :size="16" />
+          <input v-model.trim="recoverySearch" placeholder="搜索账号、订单号、OAuth Supply 或 Sub2API 编号" />
+          <button v-if="recoverySearch" type="button" class="search-clear-button" title="清除搜索" @click="clearRecoverySearch"><X :size="14" /></button>
+        </label>
+        <button class="secondary-button" type="submit">查询</button>
+      </form>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table recovery-table">
-          <thead><tr><th>类型 / 账号</th><th>关联订单</th><th>Sub2API</th><th>状态 / 来源</th><th>健康 / 额度</th><th>成本</th><th>领取 / 完成时间</th><th>尝试 / 下次重试</th><th>错误 / 操作</th></tr></thead>
+          <thead><tr>
+            <th><button class="column-sort" @click="toggleRecoverySort('account_name')">类型 / 账号 <ArrowUp v-if="recoverySortBy === 'account_name' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'account_name'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleRecoverySort('order_id')">关联订单 <ArrowUp v-if="recoverySortBy === 'order_id' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'order_id'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleRecoverySort('sub2api_account_id')">Sub2API <ArrowUp v-if="recoverySortBy === 'sub2api_account_id' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'sub2api_account_id'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleRecoverySort('status')">状态 / 来源 <ArrowUp v-if="recoverySortBy === 'status' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'status'" :size="13" /></button></th>
+            <th>健康 / 额度</th>
+            <th><button class="column-sort" @click="toggleRecoverySort('account_cost_cny')">成本 <ArrowUp v-if="recoverySortBy === 'account_cost_cny' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'account_cost_cny'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleRecoverySort('created_at')">领取 / 完成时间 <ArrowUp v-if="recoverySortBy === 'created_at' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'created_at'" :size="13" /></button></th>
+            <th><button class="column-sort" @click="toggleRecoverySort('attempt_count')">尝试 / 下次重试 <ArrowUp v-if="recoverySortBy === 'attempt_count' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'attempt_count'" :size="13" /></button></th>
+            <th>错误 / 操作</th>
+          </tr></thead>
           <tbody>
             <tr v-for="recovery in recoveries" :key="`${recovery.kind || 'account'}-${recovery.id}`">
               <td><strong>{{ recovery.accountName || `修复任务 #${recovery.id}` }}</strong><small>{{ recovery.kind === 'import' ? '导入重试' : '账号凭据修复' }}</small><small>{{ recovery.externalAccountKey || '--' }}</small></td>
@@ -192,7 +227,13 @@
               <td>{{ money(recovery.accountCostCny) }}</td>
               <td><small>领取 {{ dateTime(recovery.claimedAt) }}</small><small>完成 {{ dateTime(recovery.recoveredAt) }}</small><small>发现 {{ dateTime(recovery.firstSeenAt) }}</small></td>
               <td><small>{{ recovery.attemptCount || 0 }} 次</small><small>下次 {{ dateTime(recovery.nextRetryAt) }}</small></td>
-              <td><small v-if="recovery.lastError" class="recovery-error">{{ recovery.lastError }}</small><small v-else>--</small><button v-if="recovery.ready && recovery.status !== 'recovered'" class="secondary-button compact-button" @click="retryRecovery(recovery)">立即重试</button></td>
+              <td>
+                <small v-if="recovery.lastError" class="recovery-error">{{ recovery.lastError }}</small><small v-else>--</small>
+                <div v-if="recoveryTab === 'pending' && recovery.status !== 'recovered'" class="recovery-actions">
+                  <button v-if="recovery.ready" class="secondary-button compact-button" :disabled="actioningId === `recovery-${recovery.id}`" @click="retryRecovery(recovery)">立即重试</button>
+                  <button class="secondary-button compact-button" :disabled="actioningId === `recovery-${recovery.id}`" @click="completeRecoveryManually(recovery)">标记已修复</button>
+                </div>
+              </td>
             </tr>
             <tr v-if="!recoveries.length"><td colspan="9" class="empty-cell">{{ recoveryTab === 'pending' ? '当前没有待修复任务' : '暂无已修复记录' }}</td></tr>
           </tbody>
@@ -315,7 +356,10 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { ChevronRight, History, Pause, Play, Plus, RefreshCw, Settings2, ShoppingCart, Trash2, Wrench, X, Zap } from 'lucide-vue-next';
+import {
+  ArrowDown, ArrowUp, ChevronRight, History, Pause, Play, Plus, RefreshCw, Search,
+  Settings2, ShoppingCart, Trash2, Wrench, X, Zap,
+} from 'lucide-vue-next';
 import { get, send } from '../api';
 
 const props = defineProps<{ refreshToken: number }>();
@@ -335,8 +379,16 @@ const orders = ref<any[]>([]);
 const recoveries = ref<any[]>([]);
 const orderPage = ref(1);
 const orderData = ref<any>({ items: [], page: 1, pageSize: 20, total: 0, pages: 0 });
+const orderSearch = ref('');
+const appliedOrderSearch = ref('');
+const orderSortBy = ref('created_at');
+const orderSortOrder = ref<'asc' | 'desc'>('desc');
 const recoveryPage = ref(1);
 const recoveryData = ref<any>({ items: [], page: 1, pageSize: 20, total: 0, pages: 0, pendingTotal: 0, completedTotal: 0 });
+const recoverySearch = ref('');
+const appliedRecoverySearch = ref('');
+const recoverySortBy = ref('created_at');
+const recoverySortOrder = ref<'asc' | 'desc'>('desc');
 const recoveryPolicies = ref<any[]>([]);
 const executionEvents = ref<any[]>([]);
 const eventRuleId = ref('');
@@ -374,7 +426,11 @@ const orderStatusClass = (value: string) => value === 'completed' ? 'success' : 
 const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '补发文件可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
-const recoveryCompletionLabel = (recovery: any) => recovery.completionSource === 'manual_claimed' ? '人工领取完成' : '系统修复并导入';
+const recoveryCompletionLabel = (recovery: any) => ({
+  manual_claimed: '历史人工领取完成',
+  manual_compensation: '人工补偿已修复',
+  system: '系统修复并导入',
+} as Record<string, string>)[recovery.completionSource] || '系统修复并导入';
 const eventTypeLabel = (value: string) => ({
   inventory_healthy: '库存正常', order_skipped: '已跳过', rule_blocked: '已阻止',
   observed_replenishment: '观察记录', rule_execution_failed: '执行失败',
@@ -384,7 +440,9 @@ const eventTypeLabel = (value: string) => ({
   import_retry_succeeded: '重试成功', import_retry_reimported: '重新导入', import_retry_manual_required: '人工处理',
   import_recovery_waiting_supplier: '等待供应商恢复', recovery_reimported: '认领后重新导入',
   account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
-  recovery_manual_required: '人工处理', recovery_manual_completed: '人工领取完成', recovery_verified: '修复完成',
+  recovery_manual_required: '人工处理', recovery_manual_completed: '人工领取完成',
+  recovery_manual_compensated: '人工补偿已修复', import_retry_manual_compensated: '导入人工补偿已修复',
+  recovery_verified: '修复完成',
   recovery_supplier_claim_observed: '供应商领取状态',
 } as Record<string, string>)[value] || value || '操作记录';
 const eventTone = (value: string) => ['rule_execution_failed', 'import_failed', 'recovery_manual_required'].includes(value)
@@ -466,15 +524,74 @@ async function load() {
 }
 
 async function loadOrders() {
-  const data = await get(`/replenishment/orders?page=${orderPage.value}&page_size=${orderData.value.pageSize || 20}`);
+  const params = new URLSearchParams({
+    page: String(orderPage.value),
+    page_size: String(orderData.value.pageSize || 20),
+    search: appliedOrderSearch.value,
+    sort_by: orderSortBy.value,
+    sort_order: orderSortOrder.value,
+  });
+  const data = await get(`/replenishment/orders?${params}`);
   orderData.value = data;
   orders.value = data.items || [];
 }
 
 async function loadRecoveries() {
-  const data = await get(`/replenishment/recoveries?scope=${recoveryTab.value}&page=${recoveryPage.value}&page_size=${recoveryData.value.pageSize || 20}`);
+  const params = new URLSearchParams({
+    scope: recoveryTab.value,
+    page: String(recoveryPage.value),
+    page_size: String(recoveryData.value.pageSize || 20),
+    search: appliedRecoverySearch.value,
+    sort_by: recoverySortBy.value,
+    sort_order: recoverySortOrder.value,
+  });
+  const data = await get(`/replenishment/recoveries?${params}`);
   recoveryData.value = data;
   recoveries.value = data.items || [];
+}
+
+async function applyOrderSearch() {
+  appliedOrderSearch.value = orderSearch.value;
+  orderPage.value = 1;
+  await loadOrders();
+}
+
+async function clearOrderSearch() {
+  orderSearch.value = '';
+  await applyOrderSearch();
+}
+
+async function toggleOrderSort(sortBy: string) {
+  if (orderSortBy.value === sortBy) {
+    orderSortOrder.value = orderSortOrder.value === 'asc' ? 'desc' : 'asc';
+  } else {
+    orderSortBy.value = sortBy;
+    orderSortOrder.value = sortBy === 'created_at' ? 'desc' : 'asc';
+  }
+  orderPage.value = 1;
+  await loadOrders();
+}
+
+async function applyRecoverySearch() {
+  appliedRecoverySearch.value = recoverySearch.value;
+  recoveryPage.value = 1;
+  await loadRecoveries();
+}
+
+async function clearRecoverySearch() {
+  recoverySearch.value = '';
+  await applyRecoverySearch();
+}
+
+async function toggleRecoverySort(sortBy: string) {
+  if (recoverySortBy.value === sortBy) {
+    recoverySortOrder.value = recoverySortOrder.value === 'asc' ? 'desc' : 'asc';
+  } else {
+    recoverySortBy.value = sortBy;
+    recoverySortOrder.value = sortBy === 'created_at' ? 'desc' : 'asc';
+  }
+  recoveryPage.value = 1;
+  await loadRecoveries();
 }
 
 async function moveOrderPage(delta: number) {
@@ -686,11 +803,30 @@ async function claimRecovery(recovery: any) {
   catch (err: any) { error.value = err.message || '修复执行失败'; await load(); }
 }
 async function retryRecovery(recovery: any) {
+  actioningId.value = `recovery-${recovery.id}`;
   try {
     if (recovery.kind === 'import') await send(`/replenishment/import-retries/${recovery.orderItemId}/retry`, 'POST', {});
     else await send(`/replenishment/recoveries/${recovery.id}/claim`, 'POST', {});
     emit('toast', '修复任务已执行'); await load();
   } catch (err: any) { error.value = err.message || '修复执行失败'; await load(); }
+  finally { actioningId.value = ''; }
+}
+async function completeRecoveryManually(recovery: any) {
+  if (!window.confirm('确定将此任务标记为已修复吗？\n这只记录 FinOps 的人工补偿结果，不会验证、修改或中断 Sub2API。')) return;
+  actioningId.value = `recovery-${recovery.id}`;
+  try {
+    const endpoint = recovery.kind === 'import'
+      ? `/replenishment/import-retries/${recovery.orderItemId}/complete`
+      : `/replenishment/recoveries/${recovery.recoveryId}/complete`;
+    await send(endpoint, 'POST', {});
+    emit('toast', '已记录人工补偿并标记为已修复');
+    await load();
+  } catch (err: any) {
+    error.value = err.message || '人工补偿失败';
+    await load();
+  } finally {
+    actioningId.value = '';
+  }
 }
 
 onMounted(load);

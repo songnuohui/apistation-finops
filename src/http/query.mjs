@@ -103,6 +103,18 @@ export function searchTerm(searchParams) {
   return (searchParams.get('search') || '').trim().slice(0, 120);
 }
 
+export function listSort(searchParams, allowed, defaultSort = 'created_at') {
+  const sortBy = searchParams.get('sort_by') || defaultSort;
+  const sortOrder = searchParams.get('sort_order') || 'desc';
+  if (!allowed.includes(sortBy)) {
+    throw Object.assign(new Error('invalid sort_by'), { statusCode: 400 });
+  }
+  if (!['asc', 'desc'].includes(sortOrder)) {
+    throw Object.assign(new Error('invalid sort_order'), { statusCode: 400 });
+  }
+  return { sortBy, sortOrder };
+}
+
 export function accountScope(searchParams) {
   const scope = searchParams.get('scope') || 'current';
   if (!['current', 'deleted', 'all'].includes(scope)) {

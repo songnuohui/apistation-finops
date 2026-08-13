@@ -16,6 +16,30 @@ function conflict(message) {
   return Object.assign(new Error(message), { statusCode: 409 });
 }
 
+function compareListValues(left, right, direction) {
+  const multiplier = direction === 'asc' ? 1 : -1;
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (left !== null && left !== undefined && right !== null && right !== undefined
+    && String(left).trim() !== '' && String(right).trim() !== ''
+    && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+    return (leftNumber - rightNumber) * multiplier;
+  }
+  const leftDate = Date.parse(String(left || ''));
+  const rightDate = Date.parse(String(right || ''));
+  if (Number.isFinite(leftDate) && Number.isFinite(rightDate)) {
+    return (leftDate - rightDate) * multiplier;
+  }
+  return String(left || '').localeCompare(String(right || ''), 'zh-CN') * multiplier;
+}
+
+function sortDemoRows(rows, sortKey, sortOrder) {
+  return [...rows].sort((left, right) => {
+    const result = compareListValues(left[sortKey], right[sortKey], sortOrder);
+    return result || Number(right.id || 0) - Number(left.id || 0);
+  });
+}
+
 function itemMetadata(value) {
   const metadata = { ...(value || {}) };
   const rawExpiresAt = metadata.expiresAt;
@@ -166,6 +190,7 @@ function item(row) {
     credentialCiphertext: row.credential_ciphertext || '',
     importAttemptCount: Number(row.import_attempt_count || 0),
     nextImportRetryAt: row.next_import_retry_at || null,
+    repairCompletionSource: row.repair_completion_source || '',
   };
 }
 
@@ -1112,11 +1137,11 @@ export class ReplenishmentRepository {
     return result.rows.map((row) => ({ ...order(row), itemCount: Number(row.item_count || 0) }));
   }
 
-  async listOrderPage({ page = 1, pageSize = 20, offset = 0 } = {}) {
+  async listOrderPage({
+    page = 1, pageSize = 20, offset = 0, search = '', sortBy = 'created_at', sortOrder = 'desc',
+  } = {}) {
     if (this.demo) {
-      const rows = [...this.orders]
-        .sort((left, right) => right.id - left.id)
-        .map((entry) => {
+      const rows = this.orders.map((entry) => {
           const selectedItems = this.items.filter((itemEntry) => itemEntry.orderId === entry.id);
           const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === entry.ruleId);
           const selectedRun = this.runs.find((runEntry) => runEntry.id === entry.runId);
@@ -1135,16 +1160,53 @@ export class ReplenishmentRepository {
             unavailableItemCount: selectedItems.filter((itemEntry) => itemEntry.healthStatus === 'unavailable').length,
             repairingItemCount: selectedItems.filter((itemEntry) => itemEntry.healthStatus === 'repairing').length,
           };
+        })
+        .filter((entry) => {
+          const query = String(search || '').toLocaleLowerCase();
+          if (!query) return true;
+          const selectedItems = this.items.filter((itemEntry) => itemEntry.orderId === entry.id);
+          return [
+            entry.id, entry.externalOrderId, entry.ruleName, entry.product,
+            ...selectedItems.flatMap((itemEntry) => [
+              itemEntry.accountName, itemEntry.externalAccountKey, itemEntry.sub2apiAccountId,
+            ]),
+          ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query));
         });
-      const total = rows.length;
+      const demoSortKeys = {
+        created_at: 'createdAt',
+        updated_at: 'updatedAt',
+        id: 'id',
+        external_order_id: 'externalOrderId',
+        status: 'status',
+        requested_quantity: 'requestedQuantity',
+        delivered_quantity: 'deliveredQuantity',
+        valid_quantity: 'validQuantity',
+        actual_paid_amount_cny: 'actualPaidAmountCny',
+      };
+      const sortedRows = sortDemoRows(rows, demoSortKeys[sortBy] || 'createdAt', sortOrder);
+      const total = sortedRows.length;
       return {
-        items: rows.slice(offset, offset + pageSize),
+        items: sortedRows.slice(offset, offset + pageSize),
         page,
         pageSize,
         total,
         pages: Math.ceil(total / pageSize),
       };
     }
+    const query = String(search || '').trim();
+    const orderSortColumns = {
+      created_at: 'created_at',
+      updated_at: 'updated_at',
+      id: 'id',
+      external_order_id: 'external_order_id',
+      status: 'status',
+      requested_quantity: 'requested_quantity',
+      delivered_quantity: 'delivered_quantity',
+      valid_quantity: 'valid_quantity',
+      actual_paid_amount_cny: 'actual_paid_amount_cny',
+    };
+    const sortColumn = orderSortColumns[sortBy] || orderSortColumns.created_at;
+    const direction = sortOrder === 'asc' ? 'ASC' : 'DESC';
     const [result, countResult] = await Promise.all([
       this.pool.query(`
         WITH order_rows AS (
@@ -1160,14 +1222,41 @@ export class ReplenishmentRepository {
           JOIN ${this.schema}.replenishment_runs run ON run.id=o.run_id
           JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
           LEFT JOIN ${this.schema}.oauth_supply_order_items i ON i.order_id=o.id
+          WHERE ($2='' OR o.id::text ILIKE '%'||$2||'%'
+            OR COALESCE(o.external_order_id,'') ILIKE '%'||$2||'%'
+            OR r.name ILIKE '%'||$2||'%'
+            OR o.product ILIKE '%'||$2||'%'
+            OR EXISTS (
+              SELECT 1
+              FROM ${this.schema}.oauth_supply_order_items search_item
+              WHERE search_item.order_id=o.id
+                AND (search_item.account_name ILIKE '%'||$2||'%'
+                  OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$2||'%'
+                  OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$2||'%')
+            ))
           GROUP BY o.id,r.name,run.trigger,run.mode,run.failed_quantity,m.target_group_ids
         )
         SELECT order_rows.*
         FROM order_rows
-        ORDER BY id DESC
-        LIMIT $2 OFFSET $3`,
-      [['healthy', 'quota_unknown'], pageSize, offset]),
-      this.pool.query(`SELECT COUNT(*)::int AS total FROM ${this.schema}.oauth_supply_orders`),
+        ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
+        LIMIT $3 OFFSET $4`,
+      [['healthy', 'quota_unknown'], query, pageSize, offset]),
+      this.pool.query(`
+        SELECT COUNT(*)::int AS total
+        FROM ${this.schema}.oauth_supply_orders o
+        JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+        WHERE ($1='' OR o.id::text ILIKE '%'||$1||'%'
+          OR COALESCE(o.external_order_id,'') ILIKE '%'||$1||'%'
+          OR r.name ILIKE '%'||$1||'%'
+          OR o.product ILIKE '%'||$1||'%'
+          OR EXISTS (
+            SELECT 1
+            FROM ${this.schema}.oauth_supply_order_items search_item
+            WHERE search_item.order_id=o.id
+              AND (search_item.account_name ILIKE '%'||$1||'%'
+                OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$1||'%'
+                OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$1||'%')
+          ))`, [query]),
     ]);
     const total = Number(countResult.rows[0]?.total || 0);
     return {
@@ -1179,7 +1268,10 @@ export class ReplenishmentRepository {
     };
   }
 
-  async listRecoveryFeed({ scope = 'pending', page = 1, pageSize = 20, offset = 0 } = {}) {
+  async listRecoveryFeed({
+    scope = 'pending', page = 1, pageSize = 20, offset = 0,
+    search = '', sortBy = 'created_at', sortOrder = 'desc',
+  } = {}) {
     if (this.demo) {
       const recoveryItemIds = new Set(this.recoveries.map((entry) => Number(entry.orderItemId)));
       const accountEntries = await Promise.all(this.recoveries.map(async (entry) => {
@@ -1311,11 +1403,29 @@ export class ReplenishmentRepository {
             ready: false,
           };
         });
+      const query = String(search || '').toLocaleLowerCase();
       const all = [...accountEntries, ...importEntries, ...completedImports]
-        .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0));
-      const pendingTotal = all.filter((entry) => entry.status !== 'recovered').length;
-      const completedTotal = all.filter((entry) => entry.status === 'recovered').length;
-      const filtered = all.filter((entry) => scope === 'all'
+        .filter((entry) => !query || [
+          entry.accountName, entry.externalAccountKey, entry.orderId, entry.externalOrderId,
+          entry.targetAccountId, entry.product, entry.ruleName, entry.status,
+        ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query)));
+      const demoSortKeys = {
+        created_at: 'createdAt',
+        updated_at: 'updatedAt',
+        account_name: 'accountName',
+        order_id: 'orderId',
+        external_order_id: 'externalOrderId',
+        sub2api_account_id: 'targetAccountId',
+        status: 'status',
+        attempt_count: 'attemptCount',
+        claimed_at: 'claimedAt',
+        recovered_at: 'recoveredAt',
+        account_cost_cny: 'accountCostCny',
+      };
+      const sorted = sortDemoRows(all, demoSortKeys[sortBy] || 'createdAt', sortOrder);
+      const pendingTotal = sorted.filter((entry) => entry.status !== 'recovered').length;
+      const completedTotal = sorted.filter((entry) => entry.status === 'recovered').length;
+      const filtered = sorted.filter((entry) => scope === 'all'
         || (scope === 'completed' ? entry.status === 'recovered' : entry.status !== 'recovered'));
       return {
         items: filtered.slice(offset, offset + pageSize),
@@ -1377,7 +1487,8 @@ export class ReplenishmentRepository {
           i.import_attempt_count AS attempt_count,NULL::timestamptz AS next_retry_at,
           i.created_at AS first_seen_at,i.updated_at AS last_seen_at,
           NULL::timestamptz AS claimed_at,i.updated_at AS recovered_at,
-          'system'::text AS completion_source,i.health_status,i.quota_used_percent,i.quota_window,
+          COALESCE(NULLIF(i.repair_completion_source,''),'system')::text AS completion_source,
+          i.health_status,i.quota_used_percent,i.quota_window,
           i.last_health_at,COALESCE(i.final_cost_cny,i.individual_cost_cny) AS account_cost_cny,
           ''::text AS last_error,i.created_at,i.updated_at
         FROM ${this.schema}.oauth_supply_order_items i
@@ -1392,6 +1503,31 @@ export class ReplenishmentRepository {
             WHERE rr.order_item_id=i.id
           )
       )`;
+    const query = String(search || '').trim();
+    const recoverySortColumns = {
+      created_at: 'created_at',
+      updated_at: 'updated_at',
+      account_name: 'account_name',
+      order_id: 'order_id',
+      external_order_id: 'external_order_id',
+      sub2api_account_id: 'sub2api_account_id',
+      status: 'status',
+      attempt_count: 'attempt_count',
+      claimed_at: 'claimed_at',
+      recovered_at: 'recovered_at',
+      account_cost_cny: 'account_cost_cny',
+    };
+    const sortColumn = recoverySortColumns[sortBy] || recoverySortColumns.created_at;
+    const direction = sortOrder === 'asc' ? 'ASC' : 'DESC';
+    const searchCondition = (placeholder) => `
+      (${placeholder}='' OR account_name ILIKE '%'||${placeholder}||'%'
+        OR COALESCE(external_account_key,'') ILIKE '%'||${placeholder}||'%'
+        OR order_id::text ILIKE '%'||${placeholder}||'%'
+        OR COALESCE(external_order_id,'') ILIKE '%'||${placeholder}||'%'
+        OR COALESCE(sub2api_account_id::text,'') ILIKE '%'||${placeholder}||'%'
+        OR product ILIKE '%'||${placeholder}||'%'
+        OR rule_name ILIKE '%'||${placeholder}||'%'
+        OR status ILIKE '%'||${placeholder}||'%')`;
     const [itemsResult, totalsResult] = await Promise.all([
       this.pool.query(`${feedSql}
         SELECT recovery_feed.*,COUNT(*) OVER() AS total_count
@@ -1399,13 +1535,15 @@ export class ReplenishmentRepository {
         WHERE ($1='all'
           OR ($1='completed' AND status='recovered')
           OR ($1='pending' AND status<>'recovered'))
-        ORDER BY updated_at DESC,order_item_id DESC,feed_id DESC
-        LIMIT $2 OFFSET $3`, [scope, pageSize, offset]),
+          AND ${searchCondition('$2')}
+        ORDER BY ${sortColumn} ${direction} NULLS LAST,order_item_id DESC,feed_id DESC
+        LIMIT $3 OFFSET $4`, [scope, query, pageSize, offset]),
       this.pool.query(`${feedSql}
         SELECT
           COUNT(*) FILTER (WHERE status<>'recovered')::int AS pending_total,
           COUNT(*) FILTER (WHERE status='recovered')::int AS completed_total
-        FROM recovery_feed`),
+        FROM recovery_feed
+        WHERE ${searchCondition('$1')}`, [query]),
     ]);
     const pendingTotal = Number(totalsResult.rows[0]?.pending_total || 0);
     const completedTotal = Number(totalsResult.rows[0]?.completed_total || 0);
@@ -1560,6 +1698,7 @@ export class ReplenishmentRepository {
           costLedgerPeriodId: value.costLedgerPeriodId || null, costLedgerError: value.costLedgerError || '',
           errorMessage: value.errorMessage || '',
           importAttemptCount: value.importAttemptCount || 0, nextImportRetryAt: value.nextImportRetryAt || null,
+          repairCompletionSource: value.repairCompletionSource || '',
           healthStatus: value.healthStatus || 'unknown', quotaUsedPercent: value.quotaUsedPercent ?? null,
           quotaWindow: value.quotaWindow || '', lastHealthAt: value.lastHealthAt || null,
           metadata: itemMetadata(value.metadata), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -1605,7 +1744,7 @@ export class ReplenishmentRepository {
         cost_ledger_status=$9,cost_ledger_period_id=$10,cost_ledger_error=$11,
         error_message=$12,metadata=$13::jsonb,health_status=$14,quota_used_percent=$15,
         quota_window=$16,last_health_at=$17,import_attempt_count=$18,
-        next_import_retry_at=$19,updated_at=NOW()
+        next_import_retry_at=$19,repair_completion_source=$20,updated_at=NOW()
       WHERE id=$1 RETURNING *`,
     [id, merged.status, merged.verificationStatus, merged.individualCostCny, merged.finalCostCny,
       merged.credentialVersion || '', merged.credentialCiphertext || '', merged.sub2apiAccountId,
@@ -1613,7 +1752,8 @@ export class ReplenishmentRepository {
       String(merged.costLedgerError || '').slice(0, 1000),
       String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(itemMetadata(merged.metadata)),
       merged.healthStatus || 'unknown', merged.quotaUsedPercent ?? null, merged.quotaWindow || '',
-      merged.lastHealthAt || null, Number(merged.importAttemptCount || 0), merged.nextImportRetryAt || null]);
+      merged.lastHealthAt || null, Number(merged.importAttemptCount || 0), merged.nextImportRetryAt || null,
+      merged.repairCompletionSource || '']);
     return item(result.rows[0]);
   }
 

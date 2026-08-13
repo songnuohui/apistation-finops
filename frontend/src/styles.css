@@ -605,6 +605,11 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .recovery-tabs{margin:-4px 0 10px}
 .recovery-tabs button{min-width:124px}
 .recovery-completion{color:#08734d!important}
+.replenishment-list-toolbar{margin:0 0 14px}
+.replenishment-list-toolbar .search-box{max-width:620px}
+.search-clear-button{width:26px;height:26px;display:grid;place-items:center;flex:0 0 auto;padding:0;border:0;border-radius:5px;background:transparent;color:#7b8ba0}
+.search-clear-button:hover{background:#edf2f8;color:#31445d}
+.recovery-actions{margin-top:8px;flex-wrap:wrap}
 .auto-ledger-label{display:inline-flex;align-items:center;gap:5px;color:#08734d;font-size:11px;white-space:nowrap}
 
 @media (max-width:1280px){

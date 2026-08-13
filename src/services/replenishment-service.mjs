@@ -461,11 +461,111 @@ export class ReplenishmentService {
     return payloadOf(response) || {};
   }
 
-  async recoveries({ scope = 'pending', page = 1, pageSize = 20, offset = 0 } = {}) {
+  async recoveries({
+    scope = 'pending', page = 1, pageSize = 20, offset = 0,
+    search = '', sortBy = 'created_at', sortOrder = 'desc',
+  } = {}) {
     await this.syncSupplierRecoveries().catch((error) => {
       this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
     });
-    return this.repository.listRecoveryFeed({ scope, page, pageSize, offset });
+    return this.repository.listRecoveryFeed({
+      scope, page, pageSize, offset, search, sortBy, sortOrder,
+    });
+  }
+
+  async refreshOrderCompletion(orderId) {
+    const order = await this.repository.getOrder(orderId);
+    if (!order) return null;
+    const validQuantity = order.items
+      .filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)).length;
+    const failedQuantity = Math.max(0, order.requestedQuantity - validQuantity);
+    const status = failedQuantity === 0 ? 'completed' : 'import_retry';
+    const lastError = failedQuantity ? `${failedQuantity} 个账号等待修复` : '';
+    await this.repository.updateOrder(order.id, { status, validQuantity, lastError });
+    await this.repository.finishRun(order.runId, {
+      status,
+      actualPaidAmountCny: order.actualPaidAmountCny,
+      deliveredQuantity: order.deliveredQuantity,
+      validQuantity,
+      failedQuantity,
+      errorMessage: lastError,
+    });
+    return { ...order, status, validQuantity, failedQuantity, lastError };
+  }
+
+  async completeRecoveryManually(recoveryId, actor = 'system') {
+    const job = await this.repository.getRecovery(recoveryId);
+    if (!job) throw errorWithStatus('修复任务不存在', 404);
+    if (job.status === 'recovered') return { ok: true, recoveryId: job.id, alreadyCompleted: true };
+    const orderItem = await this.repository.getOrderItem(job.orderItemId);
+    if (!orderItem) throw errorWithStatus('修复任务关联账号不存在', 404);
+    const completedAt = new Date(this.now()).toISOString();
+    await this.repository.updateOrderItem(orderItem.id, {
+      status: 'imported',
+      verificationStatus: 'repaired',
+      healthStatus: 'unknown',
+      nextImportRetryAt: null,
+      errorMessage: '',
+      repairCompletionSource: 'manual_compensation',
+      metadata: metadataWithoutExpiration(orderItem.metadata),
+    });
+    const completed = await this.repository.completeRecovery(job.id, {
+      completionSource: 'manual_compensation',
+      deliveryStatus: 'manual compensation',
+      recoveredAt: completedAt,
+    });
+    const order = await this.refreshOrderCompletion(orderItem.orderId);
+    await this.repository.addEvent({
+      ruleId: job.ruleId,
+      runId: order?.runId || null,
+      orderId: orderItem.orderId,
+      itemId: orderItem.id,
+      eventType: 'recovery_manual_compensated',
+      message: `账号 ${job.accountName || job.accountKey || orderItem.accountName} 已人工标记为修复完成`,
+      details: {
+        recoveryId: job.id,
+        targetAccountId: job.sub2apiAccountId,
+        finopsOnly: true,
+      },
+      actor,
+    });
+    return { ok: true, recoveryId: completed.id, itemId: orderItem.id, completedAt };
+  }
+
+  async completeImportRetryManually(itemId, actor = 'system') {
+    const orderItem = await this.repository.getOrderItem(itemId);
+    if (!orderItem) throw errorWithStatus('导入修复任务不存在', 404);
+    if (orderItem.status === 'imported' && ['passed', 'repaired'].includes(orderItem.verificationStatus)) {
+      return { ok: true, itemId: orderItem.id, alreadyCompleted: true };
+    }
+    if (!['retry_wait', 'manual_required'].includes(orderItem.status)) {
+      throw errorWithStatus('当前账号不在可人工补偿的修复状态', 409);
+    }
+    const completedAt = new Date(this.now()).toISOString();
+    await this.repository.updateOrderItem(orderItem.id, {
+      status: 'imported',
+      verificationStatus: 'repaired',
+      healthStatus: 'unknown',
+      nextImportRetryAt: null,
+      errorMessage: '',
+      repairCompletionSource: 'manual_compensation',
+      metadata: metadataWithoutExpiration(orderItem.metadata),
+    });
+    const order = await this.refreshOrderCompletion(orderItem.orderId);
+    await this.repository.addEvent({
+      ruleId: order?.ruleId || null,
+      runId: order?.runId || null,
+      orderId: orderItem.orderId,
+      itemId: orderItem.id,
+      eventType: 'import_retry_manual_compensated',
+      message: `账号 ${orderItem.accountName || `#${orderItem.id}`} 已人工标记为修复完成`,
+      details: {
+        targetAccountId: orderItem.sub2apiAccountId,
+        finopsOnly: true,
+      },
+      actor,
+    });
+    return { ok: true, itemId: orderItem.id, completedAt };
   }
 
   async retryImportItem(itemId) {
