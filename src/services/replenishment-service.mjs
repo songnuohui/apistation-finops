@@ -1242,10 +1242,6 @@ export class ReplenishmentService {
         await recordDecision('order_skipped', '账号仍在修复等待期，本轮暂不补号', { reason: 'repair_grace', inventory: snapshot });
         return { status: 'repair_grace', inventory: snapshot };
       }
-      if (!force && rule.lastTriggeredAt && this.now() - Date.parse(rule.lastTriggeredAt) < rule.cooldownSeconds * 1000) {
-        await recordDecision('order_skipped', '策略处于下单冷却期，本轮暂不补号', { reason: 'cooldown', inventory: snapshot });
-        return { status: 'cooldown', inventory: snapshot };
-      }
       const desired = Math.max(0,
         Number(rule.targetAvailableAccounts) - snapshot.effectiveAccounts - snapshot.pendingAccounts);
       if (!desired) {

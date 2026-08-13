@@ -687,7 +687,7 @@ function newRule() {
     verificationModel: 'gpt-5.6-luna',
     modelWhitelist: [],
     verificationPrompt: 'Reply with a short success marker if this account can complete a basic request.',
-    pollIntervalSeconds: 5, retryLimit: 3, cooldownSeconds: 300,
+    pollIntervalSeconds: 5, retryLimit: 3,
   };
   recoveryEditor.value = { enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 };
 }
