@@ -101,6 +101,14 @@ const OPEN_RECOVERY_STATUSES = new Set([
   'updating_sub2api', 'verifying', 'retry_wait', 'manual_required',
 ]);
 
+function latestRecoveryByItem(entries, predicate = () => true) {
+  const result = new Map();
+  for (const entry of entries) {
+    if (predicate(entry) && !result.has(entry.orderItemId)) result.set(entry.orderItemId, entry);
+  }
+  return result;
+}
+
 function textIncludesAuthFailure(...values) {
   return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token[_ -]?invalidated|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
 }
@@ -343,6 +351,8 @@ export class ReplenishmentService {
     });
     const entries = await this.repository.listRecoveries({ limit: 100 });
     const importRetries = await this.repository.listImportRetryItems({ limit: 100, dueOnly: false, includeManual: true });
+    const completedImports = await this.repository.listCompletedImportRepairs({ limit: 100 });
+    const recoveryItemIds = new Set(entries.map((entry) => Number(entry.orderItemId)));
     return {
       items: [
         ...importRetries.map((entry) => ({
@@ -358,6 +368,22 @@ export class ReplenishmentService {
           attemptCount: entry.importAttemptCount,
           nextRetryAt: entry.nextImportRetryAt,
           lastError: entry.errorMessage,
+          targetAccountId: entry.sub2apiAccountId,
+        })),
+        ...completedImports.filter((entry) => !recoveryItemIds.has(Number(entry.id))).map((entry) => ({
+          id: `import-completed:${entry.id}`,
+          kind: 'import',
+          orderItemId: entry.id,
+          orderId: entry.orderId,
+          externalOrderId: entry.order?.externalOrderId || '',
+          ruleId: entry.order?.ruleId,
+          accountName: entry.accountName,
+          status: 'recovered',
+          ready: false,
+          attemptCount: entry.importAttemptCount,
+          lastError: '',
+          recoveredAt: entry.updatedAt,
+          completionSource: 'system',
           targetAccountId: entry.sub2apiAccountId,
         })),
         ...entries.map((entry) => ({
@@ -377,6 +403,7 @@ export class ReplenishmentService {
         lastError: entry.lastError,
         firstSeenAt: entry.firstSeenAt,
         recoveredAt: entry.recoveredAt,
+        completionSource: entry.completionSource,
         targetAccountId: entry.sub2apiAccountId,
         })),
       ],
@@ -489,8 +516,8 @@ export class ReplenishmentService {
 
   async syncSupplierRecoveries() {
     const existing = await this.repository.listRecoveries({ limit: 500 });
-    const activeByItem = new Map(existing.filter((entry) => OPEN_RECOVERY_STATUSES.has(entry.status))
-      .map((entry) => [entry.orderItemId, entry]));
+    const currentByItem = latestRecoveryByItem(existing);
+    const activeByItem = latestRecoveryByItem(existing, (entry) => OPEN_RECOVERY_STATUSES.has(entry.status));
     const mergeRecovery = async (entry, { externalOrderId = '', fallbackItem = null } = {}) => {
       const accountKey = supplierAccountKey(entry) || fallbackItem?.externalAccountKey || fallbackItem?.accountName || '';
       const supplierOrder = supplierOrderId(entry) || externalOrderId;
@@ -500,42 +527,76 @@ export class ReplenishmentService {
           : await this.repository.findOrderItemByAccountKey(accountKey));
       if (!matchingItem?.sub2apiAccountId) return null;
       const order = await this.repository.getOrder(matchingItem.orderId);
-      const current = activeByItem.get(matchingItem.id);
+      const current = currentByItem.get(matchingItem.id);
+      if (current?.status === 'recovered') {
+        const remoteRecoveryId = String(entry.id || entry.recovery_id || entry.replacement_id || '');
+        const remoteVersion = String(entry.credential_version || entry.credentialVersion || '');
+        const reopened = replacementClaimUrl(entry) && (
+          (remoteRecoveryId && remoteRecoveryId !== String(current.supplierRecoveryId || ''))
+          || (remoteVersion && remoteVersion !== String(current.credentialVersion || ''))
+        );
+        if (reopened) {
+          currentByItem.delete(matchingItem.id);
+        } else {
+          return {
+            ...current,
+            orderId: order?.id || matchingItem.orderId,
+            externalOrderId: order?.externalOrderId || externalOrderId,
+          };
+        }
+      }
+      const activeCurrent = currentByItem.get(matchingItem.id);
+      if (activeCurrent?.status === 'recovered') {
+        return {
+          ...activeCurrent,
+          orderId: order?.id || matchingItem.orderId,
+          externalOrderId: order?.externalOrderId || externalOrderId,
+        };
+      }
       const claimUrl = replacementClaimUrl(entry);
       const deliveryStatus = replacementStatus(entry);
       const ready = Boolean(entry.ready || deliveryStatus === 'claimable' || claimUrl);
       const manuallyClaimed = !claimUrl && manuallyClaimedReplacement(entry);
-      const recoveryKey = current?.recoveryKey
+      const recoveryKey = activeCurrent?.recoveryKey
         || `item:${matchingItem.id}:credential:${matchingItem.credentialVersion || 'initial'}`;
       let status = ready ? 'claimable' : 'waiting_supplier';
       if (manuallyClaimed) status = 'manual_required';
-      if (current && ['credentials_saved', 'retry_wait'].includes(current.status)) status = current.status;
-      if (current?.status === 'manual_required' && !claimUrl && !manuallyClaimed) status = current.status;
+      if (activeCurrent && ['credentials_saved', 'retry_wait'].includes(activeCurrent.status)) status = activeCurrent.status;
+      if (activeCurrent?.status === 'manual_required' && !claimUrl && !manuallyClaimed) status = activeCurrent.status;
       const manualMessage = manuallyClaimed
         ? 'OAuth Supply 补发文件已被领取，FinOps 无法再次使用一次性链接；请确认是否已人工导入。'
         : '';
       let saved = await this.repository.upsertRecovery({
-        ...(current || {}),
+        ...(activeCurrent || {}),
         recoveryKey,
-        supplierRecoveryId: entry.id || entry.recovery_id || entry.replacement_id || current?.supplierRecoveryId,
+        supplierRecoveryId: entry.id || entry.recovery_id || entry.replacement_id || activeCurrent?.supplierRecoveryId,
         orderItemId: matchingItem.id,
         ruleId: order?.ruleId,
         sub2apiAccountId: matchingItem.sub2apiAccountId,
         accountKey,
         status,
-        deliveryStatus: deliveryStatus || current?.deliveryStatus || '',
-        credentialVersion: entry.credential_version || entry.credentialVersion || current?.credentialVersion || '',
+        deliveryStatus: deliveryStatus || activeCurrent?.deliveryStatus || '',
+        credentialVersion: entry.credential_version || entry.credentialVersion || activeCurrent?.credentialVersion || '',
         claimUrlCiphertext: claimUrl && this.vault.available
           ? this.vault.encrypt({ claimUrl })
-          : current?.claimUrlCiphertext || '',
-        lastError: manualMessage || (ready ? '' : current?.lastError || ''),
-        nextRetryAt: ready ? null : current?.nextRetryAt || null,
+          : activeCurrent?.claimUrlCiphertext || '',
+        lastError: manualMessage || (ready ? '' : activeCurrent?.lastError || ''),
+        nextRetryAt: ready ? null : activeCurrent?.nextRetryAt || null,
       });
       if (manuallyClaimed) {
-        saved = await this.repository.invalidateRecoveryClaim(saved.id, {
-          status: 'manual_required',
+        saved = await this.repository.completeRecovery(saved.id, {
+          completionSource: 'manual_claimed',
           deliveryStatus: deliveryStatus || 'claimed',
-          lastError: manualMessage,
+          recoveredAt: entry.claimed_at || entry.claimedAt || entry.taken_at || entry.takenAt || null,
+        });
+        await this.repository.addEvent({
+          ruleId: order?.ruleId,
+          runId: order?.runId || null,
+          orderId: matchingItem.orderId,
+          itemId: matchingItem.id,
+          eventType: 'recovery_manual_completed',
+          message: 'OAuth Supply 补发文件已人工领取，修复任务已归档',
+          details: { recoveryId: saved.id, supplierRecoveryId: saved.supplierRecoveryId || '' },
         });
       }
       if (matchingItem.verificationStatus === 'failed'
@@ -555,7 +616,9 @@ export class ReplenishmentService {
         });
       }
       saved = { ...saved, orderId: order?.id || matchingItem.orderId, externalOrderId: order?.externalOrderId || externalOrderId };
-      activeByItem.set(matchingItem.id, saved);
+      currentByItem.set(matchingItem.id, saved);
+      if (OPEN_RECOVERY_STATUSES.has(saved.status)) activeByItem.set(matchingItem.id, saved);
+      else activeByItem.delete(matchingItem.id);
       return saved;
     };
     let beforeId = 0;
@@ -734,6 +797,7 @@ export class ReplenishmentService {
         nextRetryAt: null,
         lastError: '',
         recoveredAt: new Date(this.now()).toISOString(),
+        completionSource: 'system',
       });
       await this.repository.addEvent({
         ruleId: job.ruleId,
@@ -838,8 +902,8 @@ export class ReplenishmentService {
   async inspectRuleInventory(rule) {
     const items = await this.repository.listTrackedItems(rule.id);
     const recoveries = await this.repository.listRecoveries({ limit: 500 });
-    const openByItem = new Map(recoveries.filter((entry) => OPEN_RECOVERY_STATUSES.has(entry.status))
-      .map((entry) => [entry.orderItemId, entry]));
+    const latestByItem = latestRecoveryByItem(recoveries);
+    const openByItem = latestRecoveryByItem(recoveries, (entry) => OPEN_RECOVERY_STATUSES.has(entry.status));
     const accounts = [];
     let effectiveAccounts = 0;
     let lowQuotaAccounts = 0;
@@ -869,7 +933,8 @@ export class ReplenishmentService {
         usage?.error_code,
       ) || Boolean(usage?.needs_reauth);
       let recoveryJob = openByItem.get(tracked.id);
-      if (authFailed && !recoveryJob) {
+      const latestRecovery = latestByItem.get(tracked.id);
+      if (authFailed && !recoveryJob && latestRecovery?.completionSource !== 'manual_claimed') {
         recoveryJob = await this.repository.upsertRecovery({
           recoveryKey: `item:${tracked.id}:credential:${tracked.credentialVersion || 'initial'}`,
           orderItemId: tracked.id,
@@ -909,20 +974,23 @@ export class ReplenishmentService {
       const quotaUnknown = selected.value === null;
       const lowQuota = selected.value !== null && selected.value >= rule.quotaUsedThresholdPercent;
       const unknownCountsLow = quotaUnknown && rule.quotaUnknownPolicy === 'low';
-      const effective = healthyStatus && !lowQuota && !unknownCountsLow;
-      if (effective) effectiveAccounts += 1;
-      if (lowQuota) lowQuotaAccounts += 1;
-      if (quotaUnknown) unknownQuotaAccounts += 1;
-      if (!healthyStatus && !repairing) unavailableAccounts += 1;
+      let healthStatus;
       if (repairing) {
+        healthStatus = 'repairing';
         repairingAccounts += 1;
         const ageMs = this.now() - Date.parse(recoveryJob.firstSeenAt || new Date(this.now()).toISOString());
         if (ageMs < rule.repairGraceSeconds * 1000) graceRepairingAccounts += 1;
+      } else if (!healthyStatus) {
+        healthStatus = 'unavailable';
+        unavailableAccounts += 1;
+      } else if (lowQuota || unknownCountsLow) {
+        healthStatus = 'low_quota';
+        lowQuotaAccounts += 1;
+      } else {
+        healthStatus = quotaUnknown ? 'quota_unknown' : 'healthy';
+        effectiveAccounts += 1;
       }
-      const healthStatus = repairing ? 'repairing'
-        : !healthyStatus ? 'unavailable'
-          : lowQuota || unknownCountsLow ? 'low_quota'
-            : quotaUnknown ? 'quota_unknown' : 'healthy';
+      if (healthyStatus && quotaUnknown) unknownQuotaAccounts += 1;
       await this.repository.updateOrderItem(tracked.id, {
         healthStatus,
         quotaUsedPercent: selected.value,

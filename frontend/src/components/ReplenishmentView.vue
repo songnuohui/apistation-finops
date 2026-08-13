@@ -2,8 +2,7 @@
   <div class="page-view replenishment-view">
     <section class="replenishment-hero">
       <div>
-        <div class="eyebrow-line"><RefreshCw :size="15" /> 供应链自动化</div>
-        <h2>自动补号</h2>
+        <div class="eyebrow-line"><RefreshCw :size="15" /> 库存自动化</div>
         <p>根据 FinOps 已采购账号的健康状态、剩余额度和修复进度自动维持目标库存。</p>
       </div>
       <div class="replenishment-hero-actions">
@@ -24,7 +23,14 @@
       <div class="metric-card"><span>OAuth 可用余额</span><strong>{{ moneyFen(dashboard.oauthSupply?.balance?.available_fen) }}</strong><small>总余额 {{ moneyFen(dashboard.oauthSupply?.balance?.balance_fen) }}</small></div>
     </section>
 
-    <div class="replenishment-layout">
+    <nav class="replenishment-tabs" aria-label="自动补号工作区">
+      <button :class="{ active: activeSection === 'setup' }" @click="activeSection = 'setup'"><Settings2 :size="16" /><span>策略与映射</span><small>{{ rules.length }}</small></button>
+      <button :class="{ active: activeSection === 'logs' }" @click="activeSection = 'logs'"><History :size="16" /><span>执行日志</span><small>{{ executionEvents.length }}</small></button>
+      <button :class="{ active: activeSection === 'orders' }" @click="activeSection = 'orders'"><ShoppingCart :size="16" /><span>补号订单</span><small>{{ orders.length }}</small></button>
+      <button :class="{ active: activeSection === 'repairs' }" @click="activeSection = 'repairs'"><Wrench :size="16" /><span>账号修复</span><small>{{ pendingRecoveries.length }}</small></button>
+    </nav>
+
+    <div v-if="activeSection === 'setup'" class="replenishment-layout">
       <section class="panel">
         <div class="panel-head">
           <div><h2>补号策略</h2><p>有效库存达到阈值时补到目标数量；在途订单和修复等待会自动扣除。</p></div>
@@ -87,7 +93,7 @@
       </section>
     </div>
 
-    <section ref="executionLogPanel" class="panel execution-log-panel">
+    <section v-if="activeSection === 'logs'" ref="executionLogPanel" class="panel execution-log-panel">
       <div class="panel-head execution-log-head">
         <div><h2>执行日志</h2><p>记录策略库存检查、跳过或阻止原因、下单、导入和账号修复操作。</p></div>
         <div class="execution-log-actions">
@@ -144,7 +150,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section v-if="activeSection === 'orders'" class="panel">
       <div class="panel-head"><div><h2>补号订单</h2><p>购买数量已经扣除有效库存和在途账号，避免重复或超量下单。</p></div><span class="table-note">最近 {{ orders.length }} 条</span></div>
       <div class="order-table-wrap">
         <table class="data-table replenishment-table">
@@ -165,14 +171,19 @@
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head"><div><h2>账号修复</h2><p>401 账号会退出有效库存；认领后先保存新版凭据，再更新原 Sub2API 账号并重新验号。</p></div><span class="table-note">最近 {{ recoveries.length }} 条</span></div>
+    <section v-if="activeSection === 'repairs'" class="panel recovery-panel">
+      <div class="panel-head"><div><h2>账号修复</h2><p>待修复仅保留仍需领取、重试或验证的任务；人工领取补发文件和系统导入成功都归入已修复。</p></div><span class="table-note">共 {{ recoveries.length }} 条</span></div>
+      <div class="view-segmented recovery-tabs" role="tablist" aria-label="账号修复状态">
+        <button :class="{ active: recoveryTab === 'pending' }" role="tab" @click="recoveryTab = 'pending'">待修复 <span>{{ pendingRecoveries.length }}</span></button>
+        <button :class="{ active: recoveryTab === 'completed' }" role="tab" @click="recoveryTab = 'completed'">已修复 <span>{{ completedRecoveries.length }}</span></button>
+      </div>
       <div class="recovery-list">
-        <div v-for="recovery in recoveries" :key="`${recovery.kind || 'account'}-${recovery.id}`" class="recovery-row">
+        <div v-for="recovery in visibleRecoveries" :key="`${recovery.kind || 'account'}-${recovery.id}`" class="recovery-row">
           <div class="recovery-main">
             <strong>{{ recovery.accountName || `修复任务 #${recovery.id}` }}</strong>
             <small>FinOps 订单 #{{ recovery.orderId || '--' }} · OAuth Supply 订单 {{ recovery.externalOrderId || '--' }}</small>
             <small>{{ recovery.kind === 'import' ? '导入重试' : `Sub2API #${recovery.targetAccountId} · 版本 ${recovery.credentialVersion || '--'}` }} · 尝试 {{ recovery.attemptCount || 0 }} 次</small>
+            <small v-if="recovery.status === 'recovered'" class="recovery-completion">{{ recoveryCompletionLabel(recovery) }} · {{ dateTime(recovery.recoveredAt) }}</small>
             <small v-if="recovery.lastError" class="recovery-error">{{ recovery.lastError }}</small>
           </div>
           <div class="recovery-actions">
@@ -180,7 +191,7 @@
             <button v-if="recovery.ready && recovery.status !== 'recovered'" class="secondary-button compact-button" @click="retryRecovery(recovery)">立即重试</button>
           </div>
         </div>
-        <div v-if="!recoveries.length" class="empty-state">暂无账号修复任务</div>
+        <div v-if="!visibleRecoveries.length" class="empty-state">{{ recoveryTab === 'pending' ? '当前没有待修复任务' : '暂无已修复记录' }}</div>
       </div>
     </section>
 
@@ -298,7 +309,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { ChevronRight, History, Pause, Play, Plus, RefreshCw, Settings2, Trash2, X, Zap } from 'lucide-vue-next';
+import { ChevronRight, History, Pause, Play, Plus, RefreshCw, Settings2, ShoppingCart, Trash2, Wrench, X, Zap } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 const props = defineProps<{ refreshToken: number }>();
@@ -319,6 +330,8 @@ const recoveries = ref<any[]>([]);
 const recoveryPolicies = ref<any[]>([]);
 const executionEvents = ref<any[]>([]);
 const eventRuleId = ref('');
+const activeSection = ref<'setup' | 'logs' | 'orders' | 'repairs'>('setup');
+const recoveryTab = ref<'pending' | 'completed'>('pending');
 const executionLogPanel = ref<HTMLElement | null>(null);
 const editor = ref<any | null>(null);
 const recoveryEditor = ref<any>({ enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 });
@@ -339,6 +352,9 @@ const filteredRuleModels = computed(() => {
   return [...new Set([...(models as any[]).map(String), ...selected.map(String)])]
     .filter((model) => !query || model.toLowerCase().includes(query));
 });
+const completedRecoveries = computed(() => recoveries.value.filter((entry) => entry.status === 'recovered'));
+const pendingRecoveries = computed(() => recoveries.value.filter((entry) => entry.status !== 'recovered'));
+const visibleRecoveries = computed(() => recoveryTab.value === 'completed' ? completedRecoveries.value : pendingRecoveries.value);
 const money = (value: any) => value === null || value === undefined ? '--' : `¥${Number(value || 0).toFixed(2)}`;
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
@@ -348,9 +364,10 @@ const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', a
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusClass = (value: string) => value === 'completed' ? 'success' : ['failed', 'partial_failed'].includes(value) ? 'danger' : 'warning';
-const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '补发文件可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '已人工领取/需处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
+const recoveryStatusLabel = (value: string) => ({ detected: '发现401', waiting_supplier: '等待供应商', waiting_supplier_recovery: '等待供应商恢复', claimable: '补发文件可认领', credentials_saved: '凭据已保存', updating_sub2api: '更新账号中', importing: '导入中', verifying: '验号中', retry_wait: '等待重试', manual_required: '需要人工处理', recovered: '已恢复' } as Record<string, string>)[value] || value;
 const recoveryStatusClass = (value: string) => value === 'recovered' ? 'success' : value === 'manual_required' ? 'danger' : 'warning';
 const retryLimitLabel = (value: any) => value === null || value === undefined || value === '' ? '无限制' : `${value} 次`;
+const recoveryCompletionLabel = (recovery: any) => recovery.completionSource === 'manual_claimed' ? '人工领取完成' : '系统修复并导入';
 const eventTypeLabel = (value: string) => ({
   inventory_healthy: '库存正常', order_skipped: '已跳过', rule_blocked: '已阻止',
   observed_replenishment: '观察记录', rule_execution_failed: '执行失败',
@@ -360,7 +377,7 @@ const eventTypeLabel = (value: string) => ({
   import_retry_succeeded: '重试成功', import_retry_reimported: '重新导入', import_retry_manual_required: '人工处理',
   import_recovery_waiting_supplier: '等待供应商恢复', recovery_reimported: '认领后重新导入',
   account_recovery_detected: '发现异常', recovery_retry_scheduled: '等待重试',
-  recovery_manual_required: '人工处理', recovery_verified: '修复完成',
+  recovery_manual_required: '人工处理', recovery_manual_completed: '人工领取完成', recovery_verified: '修复完成',
 } as Record<string, string>)[value] || value || '操作记录';
 const eventTone = (value: string) => ['rule_execution_failed', 'import_failed', 'recovery_manual_required'].includes(value)
   ? 'danger' : ['rule_blocked', 'order_skipped', 'approval_required', 'recovery_retry_scheduled', 'account_recovery_detected', 'rule_disabled'].includes(value)
@@ -456,6 +473,7 @@ async function loadEvents() {
 }
 
 async function openRuleLogs(rule: any) {
+  activeSection.value = 'logs';
   eventRuleId.value = String(rule.id);
   await loadEvents();
   await nextTick();

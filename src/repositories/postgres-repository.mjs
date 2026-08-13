@@ -1156,7 +1156,7 @@ export class PostgresRepository {
                COALESCE(rule.cost_mode,cp.cost_mode,
                  CASE
                    WHEN cp.cost_type='free' THEN 'free'
-                   WHEN COALESCE(c.cost_record_count,0)>0 THEN 'fixed_purchase'
+                   WHEN COALESCE(c.cost_record_count,0)>0 OR period.id IS NOT NULL THEN 'fixed_purchase'
                    WHEN NULLIF(m.cost_mode,'unconfigured') IS NOT NULL THEN m.cost_mode
                    WHEN linked_key.status='active' AND linked_key.rate_multiplier IS NOT NULL
                      AND linked_key.rate_multiplier>=0 THEN 'probe_multiplier'
@@ -1197,6 +1197,8 @@ export class PostgresRepository {
                linked_supplier.name AS linked_supplier_name,
                COALESCE(c.cost_record_count,0) AS cost_record_count,
               period.id AS current_cost_period_id,period.cost_profile_id AS current_cost_profile_id,
+              period.supplier AS current_cost_supplier,period.purchase_batch AS current_cost_purchase_batch,
+              period.period_total_cost_cny AS current_total_cost_cny,
               period.original_amount AS current_original_amount,period.fee_amount AS current_fee_amount,
               period.tax_amount AS current_tax_amount,period.effective_from AS current_effective_from,
               period.effective_to AS current_effective_to,period.notes AS current_cost_notes,
@@ -1253,13 +1255,15 @@ export class PostgresRepository {
         ) DESC,o.id DESC LIMIT 1
       ) probe ON TRUE
       LEFT JOIN LATERAL (
-        SELECT p.id,p.cost_profile_id,p.original_amount,p.fee_amount,p.tax_amount,p.effective_from,p.effective_to,p.notes
+        SELECT p.id,p.cost_profile_id,p.supplier,p.purchase_batch,p.period_total_cost_cny,
+          p.original_amount,p.fee_amount,p.tax_amount,p.effective_from,p.effective_to,p.notes
         FROM ${this.schema}.account_fixed_cost_periods p
         WHERE p.source_account_id=a.source_account_id AND p.status='active'
         ORDER BY p.effective_from DESC,p.id DESC LIMIT 1
       ) period ON TRUE
       WHERE ${scopePredicate}
-        AND ($5='' OR a.name ILIKE '%'||$5||'%' OR a.platform ILIKE '%'||$5||'%' OR a.supplier ILIKE '%'||$5||'%')
+        AND ($5='' OR a.name ILIKE '%'||$5||'%' OR a.platform ILIKE '%'||$5||'%'
+          OR COALESCE(NULLIF(period.supplier,''),a.supplier) ILIKE '%'||$5||'%')
       ORDER BY revenue_cny DESC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset]);
     return pageResult(result.rows.map((row) => {
       const revenue = number(row.revenue_cny);
@@ -1267,7 +1271,7 @@ export class PostgresRepository {
       const requests = number(row.requests);
       const effectiveCost = number(row.effective_cost_cny);
       const grossProfit = revenue - effectiveCost;
-      const hasCostRecord = number(row.cost_record_count) > 0;
+      const hasCostRecord = number(row.cost_record_count) > 0 || Boolean(row.current_cost_period_id);
       const unpricedUserChargeCny = number(row.unpriced_user_charge_cny);
       const costCoverageStatus = row.cost_type === 'free'
         || (row.cost_type === 'fixed_purchase' && hasCostRecord)
@@ -1281,7 +1285,8 @@ export class PostgresRepository {
         costMode: row.cost_type,
         costType: row.cost_type,
         costProfileId: row.cost_profile_id ? number(row.cost_profile_id) : null,
-        purchaseBatch: row.purchase_batch || '',
+        supplier: row.current_cost_supplier || row.supplier || '',
+        purchaseBatch: row.current_cost_purchase_batch || row.purchase_batch || '',
         revenue,
         revenueCny: revenue,
         recognizedRevenueCny: revenue,
@@ -1308,6 +1313,9 @@ export class PostgresRepository {
         tokens: number(row.tokens),
         currentCostPeriodId: row.current_cost_period_id ? number(row.current_cost_period_id) : null,
         currentCostProfileId: row.current_cost_profile_id ? number(row.current_cost_profile_id) : null,
+        currentCostSupplier: row.current_cost_supplier || '',
+        currentCostPurchaseBatch: row.current_cost_purchase_batch || '',
+        currentTotalCostCny: number(row.current_total_cost_cny),
         currentOriginalAmount: number(row.current_original_amount),
         currentFeeAmount: number(row.current_fee_amount),
         currentTaxAmount: number(row.current_tax_amount),

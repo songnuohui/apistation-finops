@@ -30,6 +30,12 @@ const supplierBatches = computed(() => {
   return (catalog.value.batches || []).filter((item: AnyRecord) => !supplier || item.supplier === supplier);
 });
 
+function isOAuthSupplyAccount(account: AnyRecord) {
+  return account.currentCostSupplier === 'OAuth Supply'
+    || account.supplier === 'OAuth Supply'
+    || String(account.currentCostPurchaseBatch || account.purchaseBatch || '').startsWith('oauth-supply:');
+}
+
 function notify(message: string) { emit('toast', message); }
 function money(value: any) {
   return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -109,8 +115,8 @@ function openPeriodEditor(account: AnyRecord, period: AnyRecord | null = null) {
     fxRate: period?.fxRate || 1,
     effectiveFrom: inputDateTime(period?.effectiveFrom || account.currentEffectiveFrom || new Date()),
     effectiveTo: inputDateTime(period?.effectiveTo || account.currentEffectiveTo || new Date(Date.now() + 30 * 86400000)),
-    supplier: period?.supplier || account.supplier || '',
-    purchaseBatch: period?.purchaseBatch || account.purchaseBatch || '',
+    supplier: period?.supplier || account.currentCostSupplier || account.supplier || '',
+    purchaseBatch: period?.purchaseBatch || account.currentCostPurchaseBatch || account.purchaseBatch || '',
     notes: period?.notes || account.currentCostNotes || '',
   };
 }
@@ -235,16 +241,16 @@ onMounted(load);
       <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
     </div>
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>账号成本台账</h2><p>账号绑定供应商密钥后，直接使用密钥倍率自动计算成本；销售倍率来自每笔实际消费记录。</p></div><WalletCards :size="20" class="head-icon" /></div>
+      <div class="panel-head"><div><h2>账号成本台账</h2><p>OAuth Supply 账号按采购订单自动登记供应商、批次和账号成本；其他账号继续使用固定成本或供应商倍率规则。</p></div><WalletCards :size="20" class="head-icon" /></div>
       <div class="table-wrap"><table class="account-table"><thead><tr><th>账号</th><th>平台 / 供应商</th><th>成本模式</th><th class="number">销售额</th><th class="number">总成本</th><th class="number">毛利</th><th>覆盖状态</th><th>操作</th></tr></thead><tbody>
         <tr v-if="loading && !rows.length"><td colspan="8" class="table-empty">正在读取账号成本</td></tr>
         <tr v-for="account in rows" :key="account.id">
           <td><strong>{{ account.name }}</strong><small>ID {{ account.id }} · {{ account.platform }}</small></td>
           <td>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}<small>{{ account.purchaseBatch || account.supplierKeyName || '未关联采购批次' }}</small></td>
-          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ modeLabel(account.costMode) }}</span><small>{{ account.supplierKeyInventoryMultiplier != null ? `密钥 ${account.supplierKeyInventoryMultiplier}x` : account.upstreamMultiplier != null ? `上游 ${account.upstreamMultiplier}x` : account.supplierKeyName || '' }}</small></td>
+          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ isOAuthSupplyAccount(account) ? '自动采购成本' : modeLabel(account.costMode) }}</span><small>{{ isOAuthSupplyAccount(account) ? `账号成本 ${money(account.currentTotalCostCny ?? account.currentOriginalAmount)}` : account.supplierKeyInventoryMultiplier != null ? `密钥 ${account.supplierKeyInventoryMultiplier}x` : account.upstreamMultiplier != null ? `上游 ${account.upstreamMultiplier}x` : account.supplierKeyName || '' }}</small></td>
           <td class="number">{{ money(account.userChargeCny) }}</td><td class="number">{{ money(account.bookedCostCny || account.effectiveCostCny) }}</td><td class="number positive">{{ money(account.bookedProfitCny || account.grossProfitCny) }}</td>
           <td><span class="status-pill" :class="statusClass(account.costCoverageStatus)">{{ account.costCoverageStatus === 'complete' ? '已覆盖' : account.costCoverageStatus === 'missing' ? '待补成本' : account.costCoverageStatus || '待检查' }}</span></td>
-          <td><div class="row-actions"><button class="small-button" @click="openEditor(account)"><Edit3 :size="14" />成本规则</button><button class="icon-button mini-action" title="登记固定成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button><button class="icon-button mini-action" title="查看历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
+          <td><div class="row-actions"><template v-if="!isOAuthSupplyAccount(account)"><button class="small-button" @click="openEditor(account)"><Edit3 :size="14" />成本规则</button><button class="icon-button mini-action" title="登记固定成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button></template><span v-else class="auto-ledger-label"><Link2 :size="14" />订单自动登记</span><button class="icon-button mini-action" title="查看历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
         </tr>
         <tr v-if="!loading && !rows.length"><td colspan="8" class="table-empty">没有找到账号</td></tr>
       </tbody></table></div>

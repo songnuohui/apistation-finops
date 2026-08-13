@@ -162,6 +162,7 @@ function recovery(row) {
     lastSeenAt: row.last_seen_at || null,
     claimedAt: row.claimed_at || null,
     recoveredAt: row.recovered_at || null,
+    completionSource: row.completion_source || '',
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
     mode: row.recovery_mode || row.mode || 'manual',
@@ -739,7 +740,6 @@ export class ReplenishmentRepository {
       JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
       WHERE o.rule_id=$1
         AND i.sub2api_account_id IS NOT NULL
-        AND i.verification_status IN ('passed','repaired')
       ORDER BY i.id`, [ruleId]);
     return result.rows.map(item);
   }
@@ -762,6 +762,7 @@ export class ReplenishmentRepository {
       lastError: String(input.lastError || ''),
       claimedAt: input.claimedAt || null,
       recoveredAt: input.recoveredAt || null,
+      completionSource: String(input.completionSource || '').trim(),
     };
     if (!values.recoveryKey || !Number.isSafeInteger(values.orderItemId) || !Number.isSafeInteger(values.ruleId)
       || !Number.isSafeInteger(values.sub2apiAccountId)) {
@@ -784,8 +785,8 @@ export class ReplenishmentRepository {
       INSERT INTO ${this.schema}.replenishment_recoveries(
         recovery_key,supplier_recovery_id,order_item_id,rule_id,sub2api_account_id,account_key,status,
         delivery_status,credential_version,claim_url_ciphertext,credential_ciphertext,attempt_count,
-        next_retry_at,last_error,claimed_at,recovered_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        next_retry_at,last_error,claimed_at,recovered_at,completion_source)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
       ON CONFLICT(recovery_key) DO UPDATE SET
         supplier_recovery_id=COALESCE(NULLIF(EXCLUDED.supplier_recovery_id,''),${this.schema}.replenishment_recoveries.supplier_recovery_id),
         sub2api_account_id=EXCLUDED.sub2api_account_id,
@@ -795,14 +796,19 @@ export class ReplenishmentRepository {
         credential_ciphertext=COALESCE(NULLIF(EXCLUDED.credential_ciphertext,''),${this.schema}.replenishment_recoveries.credential_ciphertext),
         status=EXCLUDED.status,attempt_count=EXCLUDED.attempt_count,next_retry_at=EXCLUDED.next_retry_at,
         last_error=EXCLUDED.last_error,claimed_at=COALESCE(EXCLUDED.claimed_at,${this.schema}.replenishment_recoveries.claimed_at),
-        recovered_at=COALESCE(EXCLUDED.recovered_at,${this.schema}.replenishment_recoveries.recovered_at),
+        recovered_at=CASE WHEN EXCLUDED.status='recovered'
+          THEN COALESCE(EXCLUDED.recovered_at,${this.schema}.replenishment_recoveries.recovered_at)
+          ELSE NULL END,
+        completion_source=CASE WHEN EXCLUDED.status='recovered'
+          THEN COALESCE(NULLIF(EXCLUDED.completion_source,''),${this.schema}.replenishment_recoveries.completion_source)
+          ELSE '' END,
         last_seen_at=NOW(),updated_at=NOW()
       RETURNING *`,
     [values.recoveryKey, values.supplierRecoveryId || null, values.orderItemId, values.ruleId,
       values.sub2apiAccountId, values.accountKey, values.status, values.deliveryStatus,
       values.credentialVersion, values.claimUrlCiphertext, values.credentialCiphertext,
       values.attemptCount, values.nextRetryAt, values.lastError.slice(0, 1000),
-      values.claimedAt, values.recoveredAt]);
+      values.claimedAt, values.recoveredAt, values.completionSource]);
     return recovery(result.rows[0]);
   }
 
@@ -895,6 +901,34 @@ export class ReplenishmentRepository {
         last_error=$4,last_seen_at=NOW(),updated_at=NOW()
       WHERE id=$1 RETURNING id`,
     [id, status, String(deliveryStatus || '').slice(0, 80), String(lastError || '').slice(0, 1000)]);
+    return result.rowCount ? this.getRecovery(id) : null;
+  }
+
+  async completeRecovery(id, { completionSource = 'system', deliveryStatus = '', recoveredAt = null } = {}) {
+    const completedAt = recoveredAt || new Date().toISOString();
+    if (this.demo) {
+      const current = this.recoveries.find((entry) => entry.id === Number(id));
+      if (!current) return null;
+      Object.assign(current, {
+        status: 'recovered',
+        completionSource,
+        deliveryStatus: deliveryStatus || current.deliveryStatus || '',
+        claimUrlCiphertext: '',
+        nextRetryAt: null,
+        lastError: '',
+        recoveredAt: completedAt,
+        lastSeenAt: completedAt,
+        updatedAt: completedAt,
+      });
+      return this.getRecovery(current.id);
+    }
+    const result = await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_recoveries SET
+        status='recovered',completion_source=$2,delivery_status=COALESCE(NULLIF($3,''),delivery_status),
+        claim_url_ciphertext='',next_retry_at=NULL,last_error='',recovered_at=$4,
+        last_seen_at=NOW(),updated_at=NOW()
+      WHERE id=$1 RETURNING id`,
+    [id, completionSource, String(deliveryStatus || '').slice(0, 80), completedAt]);
     return result.rowCount ? this.getRecovery(id) : null;
   }
 
@@ -1072,6 +1106,38 @@ export class ReplenishmentRepository {
     }));
   }
 
+  async listCompletedImportRepairs({ limit = 100 } = {}) {
+    if (this.demo) {
+      return this.items
+        .filter((entry) => entry.status === 'imported'
+          && ['passed', 'repaired'].includes(entry.verificationStatus)
+          && Number(entry.importAttemptCount || 0) > 0)
+        .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0))
+        .slice(0, limit)
+        .map((entry) => ({
+          ...entry,
+          order: this.orders.find((candidate) => candidate.id === entry.orderId) || null,
+        }));
+    }
+    const result = await this.pool.query(`
+      SELECT i.*,o.rule_id,o.external_order_id
+      FROM ${this.schema}.oauth_supply_order_items i
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      WHERE i.status='imported'
+        AND i.verification_status=ANY($2::text[])
+        AND i.import_attempt_count>0
+      ORDER BY i.updated_at DESC,i.id DESC
+      LIMIT $1`, [limit, ['passed', 'repaired']]);
+    return result.rows.map((row) => ({
+      ...item(row),
+      order: {
+        id: Number(row.order_id),
+        ruleId: Number(row.rule_id),
+        externalOrderId: row.external_order_id || '',
+      },
+    }));
+  }
+
   async updateOrder(id, updates) {
     if (this.demo) {
       const current = this.orders.find((entry) => entry.id === Number(id));
@@ -1176,8 +1242,7 @@ export class ReplenishmentRepository {
   async listPendingCostItems({ limit = 50 } = {}) {
     if (this.demo) {
       return this.items
-        .filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)
-          && entry.sub2apiAccountId && ['pending', 'failed'].includes(entry.costLedgerStatus))
+        .filter((entry) => entry.sub2apiAccountId && ['pending', 'failed'].includes(entry.costLedgerStatus))
         .slice(0, limit)
         .map((entry) => {
           const currentOrder = this.orders.find((candidate) => candidate.id === entry.orderId);
@@ -1200,15 +1265,14 @@ export class ReplenishmentRepository {
         ) AS resolved_final_cost_cny
       FROM ${this.schema}.oauth_supply_order_items i
       JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
-      WHERE i.verification_status=ANY($2::text[])
-        AND i.sub2api_account_id IS NOT NULL
+      WHERE i.sub2api_account_id IS NOT NULL
         AND COALESCE(i.final_cost_cny,i.individual_cost_cny,
           CASE WHEN o.delivered_quantity>0 AND o.actual_paid_amount_cny IS NOT NULL
             THEN o.actual_paid_amount_cny/o.delivered_quantity ELSE NULL END
         ) IS NOT NULL
-        AND i.cost_ledger_status=ANY($3::text[])
+        AND i.cost_ledger_status=ANY($2::text[])
       ORDER BY i.id
-      LIMIT $1`, [limit, ['passed', 'repaired'], ['pending', 'failed']]);
+      LIMIT $1`, [limit, ['pending', 'failed']]);
     return result.rows.map((row) => ({
       ...item(row),
       persistedFinalCostCny: number(row.final_cost_cny),
