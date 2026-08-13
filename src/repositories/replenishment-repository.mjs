@@ -1137,6 +1137,31 @@ export class ReplenishmentRepository {
     return result.rows.map((row) => ({ ...order(row), itemCount: Number(row.item_count || 0) }));
   }
 
+  async getOrderSummary() {
+    const activeStatuses = ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'];
+    if (this.demo) {
+      return {
+        activeOrders: this.orders.filter((entry) => activeStatuses.includes(entry.status)).length,
+        completedOrders: this.orders.filter((entry) => entry.status === 'completed').length,
+        totalCostCny: this.orders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
+        importedAccounts: this.orders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
+      };
+    }
+    const result = await this.pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status=ANY($1::text[]))::int AS active_orders,
+        COUNT(*) FILTER (WHERE status='completed')::int AS completed_orders,
+        COALESCE(SUM(actual_paid_amount_cny),0) AS total_cost_cny,
+        COALESCE(SUM(valid_quantity),0)::int AS imported_accounts
+      FROM ${this.schema}.oauth_supply_orders`, [activeStatuses]);
+    return {
+      activeOrders: Number(result.rows[0]?.active_orders || 0),
+      completedOrders: Number(result.rows[0]?.completed_orders || 0),
+      totalCostCny: Number(result.rows[0]?.total_cost_cny || 0),
+      importedAccounts: Number(result.rows[0]?.imported_accounts || 0),
+    };
+  }
+
   async listOrderPage({
     page = 1, pageSize = 20, offset = 0, search = '', sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
@@ -1908,10 +1933,11 @@ export class ReplenishmentRepository {
   }
 
   async dashboard() {
-    const [mappings, rules, orders] = await Promise.all([
+    const [mappings, rules, orders, orderSummary] = await Promise.all([
       this.listMappings(),
       this.listRules(),
       this.listOrders({ limit: 20 }),
+      this.getOrderSummary(),
     ]);
     return {
       mappings,
@@ -1919,10 +1945,7 @@ export class ReplenishmentRepository {
       orders,
       summary: {
         enabledRules: rules.filter((entry) => entry.enabled).length,
-        activeOrders: orders.filter((entry) => ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'].includes(entry.status)).length,
-        completedOrders: orders.filter((entry) => entry.status === 'completed').length,
-        totalCostCny: orders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
-        importedAccounts: orders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
+        ...orderSummary,
         effectiveAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.effectiveAccounts || 0), 0),
         lowQuotaAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.lowQuotaAccounts || 0), 0),
         unavailableAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.unavailableAccounts || 0), 0),
