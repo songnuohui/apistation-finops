@@ -172,7 +172,12 @@ export class Sub2ApiAccountImportGateway {
     return Object.fromEntries(entries);
   }
 
-  async updateAccountConfiguration(accountId, { groupIds, concurrency, priority }) {
+  async updateAccountConfiguration(accountId, {
+    groupIds,
+    concurrency,
+    priority,
+    clearExpiration = true,
+  }) {
     const id = normalizeAccountId(accountId);
     const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}`, {
       method: 'PUT',
@@ -180,8 +185,21 @@ export class Sub2ApiAccountImportGateway {
         group_ids: [...new Set((groupIds || []).map(Number))],
         concurrency: Number(concurrency),
         priority: Number(priority),
+        ...(clearExpiration ? {
+          expires_at: null,
+          auto_pause_on_expired: false,
+        } : {}),
         confirm_mixed_channel_risk: true,
       },
+    });
+    return payload?.account || payload;
+  }
+
+  async setAccountSchedulable(accountId, schedulable) {
+    const id = normalizeAccountId(accountId);
+    const payload = await this.jsonRequest(`/api/v1/admin/accounts/${id}/schedulable`, {
+      method: 'POST',
+      body: { schedulable: Boolean(schedulable) },
     });
     return payload?.account || payload;
   }
@@ -244,8 +262,21 @@ export class Sub2ApiAccountImportGateway {
     return { success: true, events: events.length };
   }
 
-  async configureAndVerify({ accountId, groupIds, concurrency, priority, modelId, prompt }) {
-    await this.updateAccountConfiguration(accountId, { groupIds, concurrency, priority });
+  async configureAndVerify({
+    accountId,
+    groupIds,
+    concurrency,
+    priority,
+    modelId,
+    prompt,
+    clearExpiration = true,
+  }) {
+    await this.updateAccountConfiguration(accountId, {
+      groupIds,
+      concurrency,
+      priority,
+      clearExpiration,
+    });
     const confirmed = await this.getAccount(accountId);
     const confirmedGroups = (confirmed?.groups || confirmed?.group_ids || []).map((entry) => Number(entry?.id ?? entry));
     const expectedGroups = [...new Set((groupIds || []).map(Number))].sort((a, b) => a - b);
@@ -259,7 +290,8 @@ export class Sub2ApiAccountImportGateway {
       });
     }
     await this.testAccount(accountId, { modelId, prompt });
-    return confirmed;
+    await this.setAccountSchedulable(accountId, true);
+    return this.getAccount(accountId);
   }
 
   async importAndVerify({
@@ -288,6 +320,14 @@ export class Sub2ApiAccountImportGateway {
     });
     const accountId = normalizeAccountId(created?.id);
     await onCreated?.(accountId);
-    return this.configureAndVerify({ accountId, groupIds, concurrency, priority, modelId, prompt });
+    return this.configureAndVerify({
+      accountId,
+      groupIds,
+      concurrency,
+      priority,
+      modelId,
+      prompt,
+      clearExpiration: !expiresAt,
+    });
   }
 }

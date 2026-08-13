@@ -102,6 +102,26 @@ function order(row) {
     nextPollAt: row.next_poll_at || null,
     approvedBy: row.approved_by || '',
     approvedAt: row.approved_at || null,
+    trigger: row.trigger || '',
+    mode: row.run_mode || row.mode || '',
+    targetGroupIds: (row.target_group_ids || []).map(Number),
+    itemCount: Number(row.item_count || 0),
+    failedQuantity: Number(
+      row.failed_quantity
+      ?? Math.max(0, Number(row.requested_quantity || 0) - Number(row.valid_quantity || 0)),
+    ),
+    pendingDeliveryQuantity: Math.max(
+      0,
+      Number(row.requested_quantity || 0) - Number(row.delivered_quantity || 0),
+    ),
+    pendingImportQuantity: Math.max(
+      0,
+      Number(row.delivered_quantity || 0) - Number(row.valid_quantity || 0),
+    ),
+    healthyItemCount: Number(row.healthy_item_count || 0),
+    lowQuotaItemCount: Number(row.low_quota_item_count || 0),
+    unavailableItemCount: Number(row.unavailable_item_count || 0),
+    repairingItemCount: Number(row.repairing_item_count || 0),
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
   };
@@ -172,6 +192,46 @@ function recovery(row) {
     recoveryRetryLimit: row.recovery_policy_retry_limit === null || row.recovery_policy_retry_limit === undefined
       ? null : Number(row.recovery_policy_retry_limit),
     recoveryRetryIntervalSeconds: Number(row.recovery_retry_interval_seconds || 60),
+  };
+}
+
+function recoveryFeedEntry(row) {
+  if (!row) return null;
+  return {
+    id: row.feed_id,
+    recoveryId: number(row.recovery_id),
+    kind: row.kind || 'account',
+    orderItemId: Number(row.order_item_id),
+    orderId: Number(row.order_id),
+    externalOrderId: row.external_order_id || '',
+    ruleId: Number(row.rule_id),
+    ruleName: row.rule_name || '',
+    product: row.product || '',
+    platform: row.platform || '',
+    targetPoolKey: row.target_pool_key || '',
+    targetGroupIds: (row.target_group_ids || []).map(Number),
+    accountName: row.account_name || row.external_account_key || '',
+    externalAccountKey: row.external_account_key || '',
+    targetAccountId: number(row.sub2api_account_id),
+    status: row.status || '',
+    deliveryStatus: row.delivery_status || '',
+    credentialVersion: row.credential_version || '',
+    attemptCount: Number(row.attempt_count || 0),
+    nextRetryAt: row.next_retry_at || null,
+    firstSeenAt: row.first_seen_at || null,
+    lastSeenAt: row.last_seen_at || null,
+    claimedAt: row.claimed_at || null,
+    recoveredAt: row.recovered_at || null,
+    completionSource: row.completion_source || '',
+    healthStatus: row.health_status || 'unknown',
+    quotaUsedPercent: number(row.quota_used_percent),
+    quotaWindow: row.quota_window || '',
+    lastHealthAt: row.last_health_at || null,
+    accountCostCny: number(row.account_cost_cny),
+    lastError: row.last_error || '',
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    ready: ['claimable', 'credentials_saved', 'retry_wait', 'manual_required'].includes(row.status),
   };
 }
 
@@ -1038,6 +1098,319 @@ export class ReplenishmentRepository {
       GROUP BY o.id,r.name
       ORDER BY o.id DESC LIMIT $1`, [limit]);
     return result.rows.map((row) => ({ ...order(row), itemCount: Number(row.item_count || 0) }));
+  }
+
+  async listOrderPage({ page = 1, pageSize = 20, offset = 0 } = {}) {
+    if (this.demo) {
+      const rows = [...this.orders]
+        .sort((left, right) => right.id - left.id)
+        .map((entry) => {
+          const selectedItems = this.items.filter((itemEntry) => itemEntry.orderId === entry.id);
+          const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === entry.ruleId);
+          const selectedRun = this.runs.find((runEntry) => runEntry.id === entry.runId);
+          return {
+            ...entry,
+            ruleName: selectedRule?.name || entry.ruleName || '',
+            trigger: selectedRun?.trigger || '',
+            mode: selectedRun?.mode || selectedRule?.mode || '',
+            targetGroupIds: [...(selectedRule?.targetGroupIds || [])],
+            itemCount: selectedItems.length,
+            failedQuantity: Number(selectedRun?.failedQuantity || 0),
+            pendingDeliveryQuantity: Math.max(0, Number(entry.requestedQuantity || 0) - Number(entry.deliveredQuantity || 0)),
+            pendingImportQuantity: Math.max(0, Number(entry.deliveredQuantity || 0) - Number(entry.validQuantity || 0)),
+            healthyItemCount: selectedItems.filter((itemEntry) => ['healthy', 'quota_unknown'].includes(itemEntry.healthStatus)).length,
+            lowQuotaItemCount: selectedItems.filter((itemEntry) => itemEntry.healthStatus === 'low_quota').length,
+            unavailableItemCount: selectedItems.filter((itemEntry) => itemEntry.healthStatus === 'unavailable').length,
+            repairingItemCount: selectedItems.filter((itemEntry) => itemEntry.healthStatus === 'repairing').length,
+          };
+        });
+      const total = rows.length;
+      return {
+        items: rows.slice(offset, offset + pageSize),
+        page,
+        pageSize,
+        total,
+        pages: Math.ceil(total / pageSize),
+      };
+    }
+    const [result, countResult] = await Promise.all([
+      this.pool.query(`
+        WITH order_rows AS (
+          SELECT o.*,r.name AS rule_name,run.trigger,run.mode AS run_mode,
+            run.failed_quantity,m.target_group_ids,
+            COUNT(i.id)::int AS item_count,
+            COUNT(i.id) FILTER (WHERE i.health_status=ANY($1::text[]))::int AS healthy_item_count,
+            COUNT(i.id) FILTER (WHERE i.health_status='low_quota')::int AS low_quota_item_count,
+            COUNT(i.id) FILTER (WHERE i.health_status='unavailable')::int AS unavailable_item_count,
+            COUNT(i.id) FILTER (WHERE i.health_status='repairing')::int AS repairing_item_count
+          FROM ${this.schema}.oauth_supply_orders o
+          JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+          JOIN ${this.schema}.replenishment_runs run ON run.id=o.run_id
+          JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+          LEFT JOIN ${this.schema}.oauth_supply_order_items i ON i.order_id=o.id
+          GROUP BY o.id,r.name,run.trigger,run.mode,run.failed_quantity,m.target_group_ids
+        )
+        SELECT order_rows.*
+        FROM order_rows
+        ORDER BY id DESC
+        LIMIT $2 OFFSET $3`,
+      [['healthy', 'quota_unknown'], pageSize, offset]),
+      this.pool.query(`SELECT COUNT(*)::int AS total FROM ${this.schema}.oauth_supply_orders`),
+    ]);
+    const total = Number(countResult.rows[0]?.total || 0);
+    return {
+      items: result.rows.map(order),
+      page,
+      pageSize,
+      total,
+      pages: Math.ceil(total / pageSize),
+    };
+  }
+
+  async listRecoveryFeed({ scope = 'pending', page = 1, pageSize = 20, offset = 0 } = {}) {
+    if (this.demo) {
+      const recoveryItemIds = new Set(this.recoveries.map((entry) => Number(entry.orderItemId)));
+      const accountEntries = await Promise.all(this.recoveries.map(async (entry) => {
+        const job = await this.getRecovery(entry.id);
+        const selectedItem = this.items.find((itemEntry) => itemEntry.id === job.orderItemId);
+        const selectedOrder = this.orders.find((orderEntry) => orderEntry.id === selectedItem?.orderId);
+        const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === job.ruleId);
+        return {
+          id: String(job.id),
+          recoveryId: job.id,
+          kind: 'account',
+          orderItemId: job.orderItemId,
+          orderId: selectedOrder?.id || selectedItem?.orderId,
+          externalOrderId: selectedOrder?.externalOrderId || '',
+          ruleId: job.ruleId,
+          ruleName: selectedRule?.name || '',
+          product: selectedOrder?.product || '',
+          platform: selectedOrder?.platform || selectedRule?.platform || '',
+          targetPoolKey: selectedOrder?.targetPoolKey || '',
+          targetGroupIds: [...(selectedRule?.targetGroupIds || [])],
+          accountName: selectedItem?.accountName || job.accountName || job.accountKey,
+          externalAccountKey: selectedItem?.externalAccountKey || job.accountKey || '',
+          targetAccountId: job.sub2apiAccountId,
+          status: job.status,
+          deliveryStatus: job.deliveryStatus || '',
+          credentialVersion: job.credentialVersion || '',
+          attemptCount: Number(job.attemptCount || 0),
+          nextRetryAt: job.nextRetryAt || null,
+          firstSeenAt: job.firstSeenAt || null,
+          lastSeenAt: job.lastSeenAt || null,
+          claimedAt: job.claimedAt || null,
+          recoveredAt: job.recoveredAt || null,
+          completionSource: job.completionSource || '',
+          healthStatus: selectedItem?.healthStatus || 'unknown',
+          quotaUsedPercent: selectedItem?.quotaUsedPercent ?? null,
+          quotaWindow: selectedItem?.quotaWindow || '',
+          lastHealthAt: selectedItem?.lastHealthAt || null,
+          accountCostCny: selectedItem?.finalCostCny ?? selectedItem?.individualCostCny ?? null,
+          lastError: job.lastError || '',
+          createdAt: job.createdAt || null,
+          updatedAt: job.updatedAt || null,
+          ready: ['claimable', 'credentials_saved', 'retry_wait', 'manual_required'].includes(job.status),
+        };
+      }));
+      const importEntries = this.items
+        .filter((entry) => ['retry_wait', 'manual_required'].includes(entry.status))
+        .map((entry) => {
+          const selectedOrder = this.orders.find((orderEntry) => orderEntry.id === entry.orderId);
+          const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === selectedOrder?.ruleId);
+          return {
+            id: `import:${entry.id}`,
+            recoveryId: null,
+            kind: 'import',
+            orderItemId: entry.id,
+            orderId: entry.orderId,
+            externalOrderId: selectedOrder?.externalOrderId || '',
+            ruleId: selectedOrder?.ruleId,
+            ruleName: selectedRule?.name || '',
+            product: selectedOrder?.product || '',
+            platform: selectedOrder?.platform || '',
+            targetPoolKey: selectedOrder?.targetPoolKey || '',
+            targetGroupIds: [...(selectedRule?.targetGroupIds || [])],
+            accountName: entry.accountName,
+            externalAccountKey: entry.externalAccountKey || '',
+            targetAccountId: entry.sub2apiAccountId,
+            status: entry.status,
+            deliveryStatus: '',
+            credentialVersion: entry.credentialVersion || '',
+            attemptCount: Number(entry.importAttemptCount || 0),
+            nextRetryAt: entry.nextImportRetryAt || null,
+            firstSeenAt: entry.createdAt || null,
+            lastSeenAt: entry.updatedAt || null,
+            claimedAt: null,
+            recoveredAt: null,
+            completionSource: '',
+            healthStatus: entry.healthStatus || 'unknown',
+            quotaUsedPercent: entry.quotaUsedPercent ?? null,
+            quotaWindow: entry.quotaWindow || '',
+            lastHealthAt: entry.lastHealthAt || null,
+            accountCostCny: entry.finalCostCny ?? entry.individualCostCny ?? null,
+            lastError: entry.errorMessage || '',
+            createdAt: entry.createdAt || null,
+            updatedAt: entry.updatedAt || null,
+            ready: true,
+          };
+        });
+      const completedImports = this.items
+        .filter((entry) => !recoveryItemIds.has(Number(entry.id))
+          && entry.status === 'imported'
+          && ['passed', 'repaired'].includes(entry.verificationStatus)
+          && Number(entry.importAttemptCount || 0) > 0)
+        .map((entry) => {
+          const selectedOrder = this.orders.find((orderEntry) => orderEntry.id === entry.orderId);
+          const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === selectedOrder?.ruleId);
+          return {
+            id: `import-completed:${entry.id}`,
+            recoveryId: null,
+            kind: 'import',
+            orderItemId: entry.id,
+            orderId: entry.orderId,
+            externalOrderId: selectedOrder?.externalOrderId || '',
+            ruleId: selectedOrder?.ruleId,
+            ruleName: selectedRule?.name || '',
+            product: selectedOrder?.product || '',
+            platform: selectedOrder?.platform || '',
+            targetPoolKey: selectedOrder?.targetPoolKey || '',
+            targetGroupIds: [...(selectedRule?.targetGroupIds || [])],
+            accountName: entry.accountName,
+            externalAccountKey: entry.externalAccountKey || '',
+            targetAccountId: entry.sub2apiAccountId,
+            status: 'recovered',
+            deliveryStatus: '',
+            credentialVersion: entry.credentialVersion || '',
+            attemptCount: Number(entry.importAttemptCount || 0),
+            nextRetryAt: null,
+            firstSeenAt: entry.createdAt || null,
+            lastSeenAt: entry.updatedAt || null,
+            claimedAt: null,
+            recoveredAt: entry.updatedAt || null,
+            completionSource: 'system',
+            healthStatus: entry.healthStatus || 'unknown',
+            quotaUsedPercent: entry.quotaUsedPercent ?? null,
+            quotaWindow: entry.quotaWindow || '',
+            lastHealthAt: entry.lastHealthAt || null,
+            accountCostCny: entry.finalCostCny ?? entry.individualCostCny ?? null,
+            lastError: '',
+            createdAt: entry.createdAt || null,
+            updatedAt: entry.updatedAt || null,
+            ready: false,
+          };
+        });
+      const all = [...accountEntries, ...importEntries, ...completedImports]
+        .sort((left, right) => Date.parse(right.updatedAt || 0) - Date.parse(left.updatedAt || 0));
+      const pendingTotal = all.filter((entry) => entry.status !== 'recovered').length;
+      const completedTotal = all.filter((entry) => entry.status === 'recovered').length;
+      const filtered = all.filter((entry) => scope === 'all'
+        || (scope === 'completed' ? entry.status === 'recovered' : entry.status !== 'recovered'));
+      return {
+        items: filtered.slice(offset, offset + pageSize),
+        page,
+        pageSize,
+        total: filtered.length,
+        pages: Math.ceil(filtered.length / pageSize),
+        pendingTotal,
+        completedTotal,
+      };
+    }
+
+    const feedSql = `
+      WITH recovery_feed AS (
+        SELECT
+          rr.id::text AS feed_id,rr.id AS recovery_id,'account'::text AS kind,
+          i.id AS order_item_id,i.order_id,o.external_order_id,o.rule_id,r.name AS rule_name,
+          o.product,o.platform,o.target_pool_key,m.target_group_ids,
+          i.account_name,i.external_account_key,rr.sub2api_account_id,
+          rr.status,rr.delivery_status,rr.credential_version,rr.attempt_count,
+          rr.next_retry_at,rr.first_seen_at,rr.last_seen_at,rr.claimed_at,rr.recovered_at,
+          rr.completion_source,i.health_status,i.quota_used_percent,i.quota_window,
+          i.last_health_at,COALESCE(i.final_cost_cny,i.individual_cost_cny) AS account_cost_cny,
+          rr.last_error,rr.created_at,rr.updated_at
+        FROM ${this.schema}.replenishment_recoveries rr
+        JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+        JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+        JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+        JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+
+        UNION ALL
+
+        SELECT
+          'import:'||i.id::text AS feed_id,NULL::bigint AS recovery_id,'import'::text AS kind,
+          i.id AS order_item_id,i.order_id,o.external_order_id,o.rule_id,r.name AS rule_name,
+          o.product,o.platform,o.target_pool_key,m.target_group_ids,
+          i.account_name,i.external_account_key,i.sub2api_account_id,
+          i.status,''::text AS delivery_status,i.credential_version,i.import_attempt_count AS attempt_count,
+          i.next_import_retry_at AS next_retry_at,i.created_at AS first_seen_at,
+          i.updated_at AS last_seen_at,NULL::timestamptz AS claimed_at,
+          NULL::timestamptz AS recovered_at,
+          ''::text AS completion_source,i.health_status,i.quota_used_percent,i.quota_window,
+          i.last_health_at,COALESCE(i.final_cost_cny,i.individual_cost_cny) AS account_cost_cny,
+          i.error_message AS last_error,i.created_at,i.updated_at
+        FROM ${this.schema}.oauth_supply_order_items i
+        JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+        JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+        JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+        WHERE i.status=ANY(ARRAY['retry_wait','manual_required']::text[])
+
+        UNION ALL
+
+        SELECT
+          'import-completed:'||i.id::text AS feed_id,NULL::bigint AS recovery_id,'import'::text AS kind,
+          i.id AS order_item_id,i.order_id,o.external_order_id,o.rule_id,r.name AS rule_name,
+          o.product,o.platform,o.target_pool_key,m.target_group_ids,
+          i.account_name,i.external_account_key,i.sub2api_account_id,
+          'recovered'::text AS status,''::text AS delivery_status,i.credential_version,
+          i.import_attempt_count AS attempt_count,NULL::timestamptz AS next_retry_at,
+          i.created_at AS first_seen_at,i.updated_at AS last_seen_at,
+          NULL::timestamptz AS claimed_at,i.updated_at AS recovered_at,
+          'system'::text AS completion_source,i.health_status,i.quota_used_percent,i.quota_window,
+          i.last_health_at,COALESCE(i.final_cost_cny,i.individual_cost_cny) AS account_cost_cny,
+          ''::text AS last_error,i.created_at,i.updated_at
+        FROM ${this.schema}.oauth_supply_order_items i
+        JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+        JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
+        JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+        WHERE i.status='imported'
+          AND i.verification_status=ANY(ARRAY['passed','repaired']::text[])
+          AND i.import_attempt_count>0
+          AND NOT EXISTS (
+            SELECT 1 FROM ${this.schema}.replenishment_recoveries rr
+            WHERE rr.order_item_id=i.id
+          )
+      )`;
+    const [itemsResult, totalsResult] = await Promise.all([
+      this.pool.query(`${feedSql}
+        SELECT recovery_feed.*,COUNT(*) OVER() AS total_count
+        FROM recovery_feed
+        WHERE ($1='all'
+          OR ($1='completed' AND status='recovered')
+          OR ($1='pending' AND status<>'recovered'))
+        ORDER BY updated_at DESC,order_item_id DESC,feed_id DESC
+        LIMIT $2 OFFSET $3`, [scope, pageSize, offset]),
+      this.pool.query(`${feedSql}
+        SELECT
+          COUNT(*) FILTER (WHERE status<>'recovered')::int AS pending_total,
+          COUNT(*) FILTER (WHERE status='recovered')::int AS completed_total
+        FROM recovery_feed`),
+    ]);
+    const pendingTotal = Number(totalsResult.rows[0]?.pending_total || 0);
+    const completedTotal = Number(totalsResult.rows[0]?.completed_total || 0);
+    const total = scope === 'pending'
+      ? pendingTotal
+      : scope === 'completed'
+        ? completedTotal
+        : pendingTotal + completedTotal;
+    return {
+      items: itemsResult.rows.map(recoveryFeedEntry),
+      page,
+      pageSize,
+      total,
+      pages: Math.ceil(total / pageSize),
+      pendingTotal,
+      completedTotal,
+    };
   }
 
   async listPollableOrders() {

@@ -86,14 +86,24 @@ function matchingOrderItem(raw, index, items) {
   ].some((value) => value !== null && value !== undefined && identifiers.has(String(value)))) || items[index] || {};
 }
 
-function accountExpiresAt(raw, orderItem, nowMs) {
-  const direct = numeric(raw?.expires_at ?? raw?.expiresAt ?? orderItem?.expires_at ?? orderItem?.expiresAt);
+function epochSeconds(value) {
+  const direct = numeric(value);
   if (direct !== null) return Math.floor(direct > 10_000_000_000 ? direct / 1000 : direct);
-  const remaining = numeric(
-    raw?.remaining_seconds ?? raw?.remainingSeconds
-    ?? orderItem?.remaining_seconds ?? orderItem?.remainingSeconds,
-  );
-  return remaining === null ? null : Math.floor(nowMs / 1000 + Math.max(0, remaining));
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+function accountExpiresAt(raw, orderItem) {
+  for (const value of [
+    raw?.expires_at,
+    raw?.expiresAt,
+    orderItem?.expires_at,
+    orderItem?.expiresAt,
+  ]) {
+    const expiresAt = epochSeconds(value);
+    if (expiresAt !== null) return expiresAt;
+  }
+  return null;
 }
 
 const OPEN_RECOVERY_STATUSES = new Set([
@@ -167,9 +177,9 @@ function replacementStatusUrl(raw) {
   return String(raw?.status_url || raw?.statusUrl || '').trim();
 }
 
-function manuallyClaimedReplacement(raw) {
+function claimedReplacement(raw) {
   return Boolean(raw?.claimed_at || raw?.claimedAt || raw?.taken_at || raw?.takenAt)
-    || /claimed|taken|downloaded|consumed|picked[_ -]?up|人工.*领/.test(replacementStatus(raw));
+    || /claimed|taken|downloaded|consumed|picked[_ -]?up/.test(replacementStatus(raw));
 }
 
 function replacementMatchesItem(raw, item) {
@@ -239,6 +249,106 @@ function inventoryEventSummary(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return snapshot;
   const { accounts: _accounts, ...summary } = snapshot;
   return summary;
+}
+
+function scheduleSnapshot(account, {
+  readError = '',
+  expired = false,
+  repairing = false,
+  status = '',
+  authFailed = false,
+  platformMatched = true,
+  groupMatched = true,
+  nowMs = Date.now(),
+} = {}) {
+  const sourceSchedulable = typeof account?.schedulable === 'boolean' ? account.schedulable : null;
+  const tempUnschedulableUntil = account?.temp_unschedulable_until
+    || account?.tempUnschedulableUntil
+    || null;
+  const tempUnschedulableReason = String(
+    account?.temp_unschedulable_reason
+    || account?.tempUnschedulableReason
+    || '',
+  );
+  const tempUntilMs = tempUnschedulableUntil ? Date.parse(tempUnschedulableUntil) : Number.NaN;
+  const temporarilyUnschedulable = Number.isFinite(tempUntilMs) && tempUntilMs > nowMs;
+  if (readError) return {
+    sourceSchedulable,
+    state: 'read_error',
+    reason: readError,
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (repairing) return {
+    sourceSchedulable,
+    state: 'repairing',
+    reason: '账号正在修复',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (authFailed) return {
+    sourceSchedulable,
+    state: 'authentication_failed',
+    reason: '账号凭据失效或需要重新认证',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (expired) return {
+    sourceSchedulable,
+    state: 'expired',
+    reason: 'Sub2API 账号到期时间已到',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (!platformMatched) return {
+    sourceSchedulable,
+    state: 'platform_mismatch',
+    reason: '账号平台与补号策略不一致',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (!groupMatched) return {
+    sourceSchedulable,
+    state: 'group_mismatch',
+    reason: '账号未加入策略要求的正式分组',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (String(status).toLowerCase() !== 'active') return {
+    sourceSchedulable,
+    state: 'account_status',
+    reason: `账号状态为 ${status || 'unknown'}`,
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (temporarilyUnschedulable) return {
+    sourceSchedulable,
+    state: 'temporarily_disabled',
+    reason: tempUnschedulableReason || 'Sub2API 临时停止调度',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (sourceSchedulable === false) return {
+    sourceSchedulable,
+    state: 'persistently_disabled',
+    reason: 'Sub2API 调度开关已关闭',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  if (sourceSchedulable === null) return {
+    sourceSchedulable,
+    state: 'unknown',
+    reason: 'Sub2API 未返回调度状态',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
+  return {
+    sourceSchedulable,
+    state: 'schedulable',
+    reason: '',
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+  };
 }
 
 function localMinutes(at, timezone) {
@@ -345,69 +455,11 @@ export class ReplenishmentService {
     return payloadOf(response) || {};
   }
 
-  async recoveries() {
+  async recoveries({ scope = 'pending', page = 1, pageSize = 20, offset = 0 } = {}) {
     await this.syncSupplierRecoveries().catch((error) => {
       this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
     });
-    const entries = await this.repository.listRecoveries({ limit: 100 });
-    const importRetries = await this.repository.listImportRetryItems({ limit: 100, dueOnly: false, includeManual: true });
-    const completedImports = await this.repository.listCompletedImportRepairs({ limit: 100 });
-    const recoveryItemIds = new Set(entries.map((entry) => Number(entry.orderItemId)));
-    return {
-      items: [
-        ...importRetries.map((entry) => ({
-          id: `import:${entry.id}`,
-          kind: 'import',
-          orderItemId: entry.id,
-          orderId: entry.orderId,
-          externalOrderId: entry.order?.externalOrderId || '',
-          ruleId: entry.order?.ruleId,
-          accountName: entry.accountName,
-          status: entry.status,
-          ready: entry.status !== 'waiting_supplier_recovery',
-          attemptCount: entry.importAttemptCount,
-          nextRetryAt: entry.nextImportRetryAt,
-          lastError: entry.errorMessage,
-          targetAccountId: entry.sub2apiAccountId,
-        })),
-        ...completedImports.filter((entry) => !recoveryItemIds.has(Number(entry.id))).map((entry) => ({
-          id: `import-completed:${entry.id}`,
-          kind: 'import',
-          orderItemId: entry.id,
-          orderId: entry.orderId,
-          externalOrderId: entry.order?.externalOrderId || '',
-          ruleId: entry.order?.ruleId,
-          accountName: entry.accountName,
-          status: 'recovered',
-          ready: false,
-          attemptCount: entry.importAttemptCount,
-          lastError: '',
-          recoveredAt: entry.updatedAt,
-          completionSource: 'system',
-          targetAccountId: entry.sub2apiAccountId,
-        })),
-        ...entries.map((entry) => ({
-        id: entry.id,
-        kind: 'account',
-        orderItemId: entry.orderItemId,
-        orderId: entry.orderId,
-        externalOrderId: entry.externalOrderId,
-        ruleId: entry.ruleId,
-        accountName: entry.accountName || entry.accountKey,
-        deliveryStatus: entry.deliveryStatus,
-        status: entry.status,
-        ready: ['claimable', 'credentials_saved', 'retry_wait', 'manual_required'].includes(entry.status),
-        credentialVersion: entry.credentialVersion,
-        attemptCount: entry.attemptCount,
-        nextRetryAt: entry.nextRetryAt,
-        lastError: entry.lastError,
-        firstSeenAt: entry.firstSeenAt,
-        recoveredAt: entry.recoveredAt,
-        completionSource: entry.completionSource,
-        targetAccountId: entry.sub2apiAccountId,
-        })),
-      ],
-    };
+    return this.repository.listRecoveryFeed({ scope, page, pageSize, offset });
   }
 
   async retryImportItem(itemId) {
@@ -432,7 +484,7 @@ export class ReplenishmentService {
         name: item.accountName,
         platform: item.rule.platform,
         credentials,
-        expiresAt: item.metadata?.expiresAt || null,
+        expiresAt: null,
         ...configuration,
         onCreated: async (accountId) => this.repository.updateOrderItem(item.id, {
           status: 'importing', sub2apiAccountId: accountId,
@@ -464,6 +516,10 @@ export class ReplenishmentService {
       await this.repository.updateOrderItem(item.id, {
         status: 'imported', verificationStatus: 'passed', sub2apiAccountId: account?.id || item.sub2apiAccountId,
         importAttemptCount: Number(item.importAttemptCount || 0) + 1, nextImportRetryAt: null, errorMessage: '',
+        metadata: {
+          ...(item.metadata || {}),
+          expiresAt: null,
+        },
       });
       const order = await this.repository.getOrder(item.order.id);
       const validQuantity = order.items.filter((entry) => ['passed', 'repaired'].includes(entry.verificationStatus)).length;
@@ -556,15 +612,14 @@ export class ReplenishmentService {
       const claimUrl = replacementClaimUrl(entry);
       const deliveryStatus = replacementStatus(entry);
       const ready = Boolean(entry.ready || deliveryStatus === 'claimable' || claimUrl);
-      const manuallyClaimed = !claimUrl && manuallyClaimedReplacement(entry);
+      const supplierClaimed = !claimUrl && claimedReplacement(entry);
       const recoveryKey = activeCurrent?.recoveryKey
         || `item:${matchingItem.id}:credential:${matchingItem.credentialVersion || 'initial'}`;
       let status = ready ? 'claimable' : 'waiting_supplier';
-      if (manuallyClaimed) status = 'manual_required';
       if (activeCurrent && ['credentials_saved', 'retry_wait'].includes(activeCurrent.status)) status = activeCurrent.status;
-      if (activeCurrent?.status === 'manual_required' && !claimUrl && !manuallyClaimed) status = activeCurrent.status;
-      const manualMessage = manuallyClaimed
-        ? 'OAuth Supply 补发文件已被领取，FinOps 无法再次使用一次性链接；请确认是否已人工导入。'
+      if (activeCurrent?.status === 'manual_required' && !claimUrl && !supplierClaimed) status = activeCurrent.status;
+      const claimedMessage = supplierClaimed && !activeCurrent?.credentialCiphertext
+        ? 'OAuth Supply 显示补发文件已领取，但 FinOps 没有保存到本次凭据；等待供应商重新提供可领取文件。'
         : '';
       let saved = await this.repository.upsertRecovery({
         ...(activeCurrent || {}),
@@ -580,22 +635,17 @@ export class ReplenishmentService {
         claimUrlCiphertext: claimUrl && this.vault.available
           ? this.vault.encrypt({ claimUrl })
           : activeCurrent?.claimUrlCiphertext || '',
-        lastError: manualMessage || (ready ? '' : activeCurrent?.lastError || ''),
+        lastError: claimedMessage || (ready ? '' : activeCurrent?.lastError || ''),
         nextRetryAt: ready ? null : activeCurrent?.nextRetryAt || null,
       });
-      if (manuallyClaimed) {
-        saved = await this.repository.completeRecovery(saved.id, {
-          completionSource: 'manual_claimed',
-          deliveryStatus: deliveryStatus || 'claimed',
-          recoveredAt: entry.claimed_at || entry.claimedAt || entry.taken_at || entry.takenAt || null,
-        });
+      if (supplierClaimed && !activeCurrent?.credentialCiphertext) {
         await this.repository.addEvent({
           ruleId: order?.ruleId,
           runId: order?.runId || null,
           orderId: matchingItem.orderId,
           itemId: matchingItem.id,
-          eventType: 'recovery_manual_completed',
-          message: 'OAuth Supply 补发文件已人工领取，修复任务已归档',
+          eventType: 'recovery_supplier_claim_observed',
+          message: claimedMessage,
           details: { recoveryId: saved.id, supplierRecoveryId: saved.supplierRecoveryId || '' },
         });
       }
@@ -723,9 +773,13 @@ export class ReplenishmentService {
       try {
         await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials, rule?.modelWhitelist);
         job = await this.repository.upsertRecovery({ ...job, status: 'verifying', lastError: '' });
-        await this.sub2ApiGateway.testAccount(targetAccountId, {
-          modelId: job.verificationModel || 'gpt-5.6-luna',
-          prompt: job.verificationPrompt || 'Reply with a short success marker.',
+        await this.sub2ApiGateway.configureAndVerify({
+          accountId: targetAccountId,
+          groupIds: rule.targetGroupIds,
+          concurrency: rule.concurrency,
+          priority: rule.priority,
+          modelId: job.verificationModel || rule.verificationModel || 'gpt-5.6-luna',
+          prompt: job.verificationPrompt || rule.verificationPrompt || 'Reply with a short success marker.',
         });
       } catch (error) {
         if (!isNotFound(error) || !orderItem || !rule) throw error;
@@ -733,7 +787,7 @@ export class ReplenishmentService {
           name: orderItem.accountName || job.accountName || job.accountKey,
           platform: rule.platform,
           credentials,
-          expiresAt: orderItem.metadata?.expiresAt || null,
+          expiresAt: null,
           groupIds: rule.targetGroupIds,
           concurrency: rule.concurrency,
           priority: rule.priority,
@@ -762,6 +816,10 @@ export class ReplenishmentService {
         sub2apiAccountId: targetAccountId,
         credentialVersion,
         credentialCiphertext: encryptedCredentials,
+        metadata: {
+          ...(orderItem?.metadata || {}),
+          expiresAt: null,
+        },
         errorMessage: '',
         lastHealthAt: new Date(this.now()).toISOString(),
       });
@@ -902,7 +960,6 @@ export class ReplenishmentService {
   async inspectRuleInventory(rule) {
     const items = await this.repository.listTrackedItems(rule.id);
     const recoveries = await this.repository.listRecoveries({ limit: 500 });
-    const latestByItem = latestRecoveryByItem(recoveries);
     const openByItem = latestRecoveryByItem(recoveries, (entry) => OPEN_RECOVERY_STATUSES.has(entry.status));
     const accounts = [];
     let effectiveAccounts = 0;
@@ -923,7 +980,11 @@ export class ReplenishmentService {
       } catch (error) {
         readError = String(error?.message || error);
       }
-      const expiresAt = numeric(account?.expires_at ?? account?.expiresAt ?? tracked.metadata?.expiresAt);
+      const expiresAt = epochSeconds(
+        account?.expires_at
+        ?? account?.expiresAt
+        ?? tracked.metadata?.expiresAt,
+      );
       const expired = expiresAt !== null && expiresAt * 1000 <= this.now();
       const authFailed = textIncludesAuthFailure(
         readError,
@@ -933,8 +994,7 @@ export class ReplenishmentService {
         usage?.error_code,
       ) || Boolean(usage?.needs_reauth);
       let recoveryJob = openByItem.get(tracked.id);
-      const latestRecovery = latestByItem.get(tracked.id);
-      if (authFailed && !recoveryJob && latestRecovery?.completionSource !== 'manual_claimed') {
+      if (authFailed && !recoveryJob) {
         recoveryJob = await this.repository.upsertRecovery({
           recoveryKey: `item:${tracked.id}:credential:${tracked.credentialVersion || 'initial'}`,
           orderItemId: tracked.id,
@@ -958,9 +1018,20 @@ export class ReplenishmentService {
       const accountGroups = (account?.group_ids || account?.groups || [])
         .map((entry) => Number(entry?.id ?? entry));
       const groupMatched = rule.targetGroupIds.every((id) => accountGroups.includes(Number(id)));
+      const platformMatched = String(account?.platform || rule.platform) === rule.platform;
+      const schedule = scheduleSnapshot(account, {
+        readError,
+        expired,
+        repairing,
+        status: account?.status || '',
+        authFailed,
+        platformMatched,
+        groupMatched,
+        nowMs: this.now(),
+      });
       const healthyStatus = !readError
         && String(account?.status || '').toLowerCase() === 'active'
-        && String(account?.platform || rule.platform) === rule.platform
+        && platformMatched
         && groupMatched
         // Sub2API exposes the UI's "normal" state as active + schedulable.
         // Treat missing runtime eligibility conservatively so a partial API
@@ -996,7 +1067,11 @@ export class ReplenishmentService {
         quotaUsedPercent: selected.value,
         quotaWindow: selected.window,
         lastHealthAt: new Date(this.now()).toISOString(),
-        errorMessage: authFailed ? 'Sub2API account requires reauthentication' : tracked.errorMessage,
+        errorMessage: authFailed
+          ? 'Sub2API account requires reauthentication'
+          : healthyStatus
+            ? ''
+            : tracked.errorMessage,
       });
       accounts.push({
         orderItemId: tracked.id,
@@ -1005,9 +1080,17 @@ export class ReplenishmentService {
         healthStatus,
         quotaUsedPercent: selected.value,
         quotaWindow: selected.window,
+        sourceStatus: account?.status || '',
         status: account?.status || '',
-        schedulable: account?.schedulable === true,
+        sourceSchedulable: schedule.sourceSchedulable,
+        schedulable: schedule.sourceSchedulable === true,
+        scheduleState: schedule.state,
+        scheduleReason: schedule.reason,
+        tempUnschedulableUntil: schedule.tempUnschedulableUntil,
+        tempUnschedulableReason: schedule.tempUnschedulableReason,
+        expired,
         expiresAt,
+        readError,
         lastError: readError || account?.error_message || account?.errorMessage || '',
       });
     }
@@ -1324,7 +1407,7 @@ export class ReplenishmentService {
             name: current.accountName,
             platform: rule.platform,
             credentials,
-            expiresAt: accountExpiresAt(raw, remoteItem, this.now()),
+            expiresAt: accountExpiresAt(raw, remoteItem),
             ...configuration,
             onCreated: async (accountId) => {
               await this.repository.updateOrderItem(current.id, {
@@ -1340,7 +1423,7 @@ export class ReplenishmentService {
           sub2apiAccountId: account?.id,
           metadata: {
             ...current.metadata,
-            expiresAt: accountExpiresAt(raw, remoteItem, this.now()),
+            expiresAt: accountExpiresAt(raw, remoteItem),
           },
         });
       } catch (error) {
@@ -1432,11 +1515,8 @@ export class ReplenishmentService {
           continue;
         }
         const effectiveFrom = new Date(item.order?.createdAt || this.now());
-        const expiresAtSeconds = numeric(item.metadata?.expiresAt);
         const productDays = numeric(String(item.order?.product || '').match(/(\d+)d/i)?.[1], 30);
-        const effectiveTo = expiresAtSeconds
-          ? new Date(expiresAtSeconds * 1000)
-          : new Date(effectiveFrom.getTime() + productDays * 86_400_000);
+        const effectiveTo = new Date(effectiveFrom.getTime() + productDays * 86_400_000);
         if (effectiveTo <= effectiveFrom) effectiveTo.setTime(effectiveFrom.getTime() + 86_400_000);
         const period = await this.ledgerRepository.createAccountCostPeriod({
           accountId: item.sub2apiAccountId,

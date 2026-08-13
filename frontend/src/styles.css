@@ -392,11 +392,14 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .mapping-actions>span{color:#315c9a;font-size:11px;white-space:nowrap}
 .table-note{color:var(--muted);font-size:11px}
 .order-table-wrap{overflow:auto}
-.replenishment-table{width:100%;min-width:760px;border-collapse:collapse}
+.replenishment-table{width:100%;min-width:980px;border-collapse:collapse}
 .replenishment-table th,.replenishment-table td{padding:11px 12px;border-bottom:1px solid #edf1f6;text-align:left;font-size:12px;white-space:nowrap}
 .replenishment-table th{color:#7b899a;font-size:11px;font-weight:700;background:#fafbfd}
 .replenishment-table td small{display:block;margin-top:4px;color:var(--muted);font-size:10px}
 .replenishment-table tr:last-child td{border-bottom:0}
+.recovery-table{min-width:1420px}
+.recovery-table td{vertical-align:top}
+.recovery-table td:last-child{white-space:normal;min-width:180px}
 .compact-button{padding:6px 9px;font-size:11px}
 .empty-cell{text-align:center!important;color:var(--muted);padding:30px!important}
 .empty-state{padding:24px 0;color:var(--muted);font-size:12px;text-align:center}
