@@ -15,13 +15,25 @@ const page = ref(1);
 const pageSize = ref(20);
 const loading = ref(false);
 const accounts = ref<AnyRecord>({});
-const catalog = ref<AnyRecord>({ suppliers: [], filterSuppliers: [], batches: [], supplierKeys: [] });
+const catalog = ref<AnyRecord>({
+  suppliers: [], filterSuppliers: [], batches: [], supplierKeys: [],
+  platforms: [], accountTypes: [], groups: [],
+});
 const profiles = ref<AnyRecord[]>([]);
 const editor = ref<AnyRecord | null>(null);
 const periodEditor = ref<AnyRecord | null>(null);
 const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
-const emptyFilters = () => ({ search: '', supplier: '', costMode: '' });
+const emptyFilters = () => ({
+  search: '',
+  platform: '',
+  accountType: '',
+  status: '',
+  privacyMode: '',
+  groupId: '',
+  supplier: '',
+  costMode: '',
+});
 const filters = ref(emptyFilters());
 const appliedFilters = ref(emptyFilters());
 const sortBy = ref('createdAt');
@@ -37,8 +49,66 @@ const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total |
 const suppliers = computed(() => [...new Set(
   catalog.value.filterSuppliers || catalog.value.suppliers || [],
 )].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
-const costTypeOptions = [
+const platformLabels: Record<string, string> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  antigravity: 'Antigravity',
+  grok: 'Grok',
+};
+const accountTypeLabels: Record<string, string> = {
+  oauth: 'OAuth',
+  'setup-token': 'Setup Token',
+  apikey: 'API Key',
+  api_key: 'API Key',
+  bedrock: 'AWS Bedrock',
+};
+const platformOptions = computed(() => [
+  { value: '', label: '全部平台' },
+  ...[...new Set([
+    'anthropic', 'openai', 'gemini', 'antigravity', 'grok',
+    ...(catalog.value.platforms || []),
+  ])].filter(Boolean).map((value) => ({
+    value: String(value),
+    label: platformLabels[String(value)] || String(value),
+  })),
+]);
+const accountTypeOptions = computed(() => [
   { value: '', label: '全部类型' },
+  ...[...new Set([
+    'oauth', 'setup-token', 'apikey', 'bedrock',
+    ...(catalog.value.accountTypes || []),
+  ])].filter(Boolean).map((value) => ({
+    value: String(value),
+    label: accountTypeLabels[String(value)] || String(value),
+  })),
+]);
+const statusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'active', label: '正常' },
+  { value: 'inactive', label: '未激活' },
+  { value: 'error', label: '错误' },
+  { value: 'rate_limited', label: '限流中' },
+  { value: 'temp_unschedulable', label: '临时不可调度' },
+  { value: 'unschedulable', label: '不可调度' },
+];
+const privacyOptions = [
+  { value: '', label: '全部Privacy状态' },
+  { value: '__unset__', label: '未设置' },
+  { value: 'training_off', label: 'Privacy' },
+  { value: 'training_set_cf_blocked', label: 'CF' },
+  { value: 'training_set_failed', label: 'Fail' },
+];
+const groupOptions = computed(() => [
+  { value: '', label: '全部分组' },
+  { value: 'ungrouped', label: '未分组' },
+  ...(catalog.value.groups || []).map((group: AnyRecord) => ({
+    value: String(group.id),
+    label: group.platform ? `${group.name} · ${group.platform}` : group.name,
+  })),
+]);
+const costTypeOptions = [
+  { value: '', label: '全部成本类型' },
   { value: 'fixed_purchase', label: '固定采购' },
   { value: 'probe_multiplier', label: '供应商倍率' },
   { value: 'manual_multiplier', label: '手动倍率' },
@@ -166,6 +236,11 @@ async function load() {
       page: page.value,
       page_size: pageSize.value,
       search: appliedFilters.value.search,
+      platform: appliedFilters.value.platform,
+      account_type: appliedFilters.value.accountType,
+      status: appliedFilters.value.status,
+      privacy_mode: appliedFilters.value.privacyMode,
+      group_id: appliedFilters.value.groupId,
       supplier: appliedFilters.value.supplier,
       cost_mode: appliedFilters.value.costMode,
       sort_by: sortBy.value,
@@ -382,6 +457,41 @@ onUnmounted(() => window.clearTimeout(searchTimer));
         <Search :size="17" />
         <input v-model="filters.search" placeholder="搜索账号..." aria-label="搜索账号" @input="scheduleSearch" />
       </div>
+      <FilterSelect
+        v-model="filters.platform"
+        :options="platformOptions"
+        aria-label="平台"
+        search-placeholder="搜索平台..."
+        @change="applyFilters"
+      />
+      <FilterSelect
+        v-model="filters.accountType"
+        :options="accountTypeOptions"
+        aria-label="账号类型"
+        search-placeholder="搜索账号类型..."
+        @change="applyFilters"
+      />
+      <FilterSelect
+        v-model="filters.status"
+        :options="statusOptions"
+        aria-label="账号状态"
+        search-placeholder="搜索账号状态..."
+        @change="applyFilters"
+      />
+      <FilterSelect
+        v-model="filters.privacyMode"
+        :options="privacyOptions"
+        aria-label="Privacy状态"
+        search-placeholder="搜索Privacy状态..."
+        @change="applyFilters"
+      />
+      <FilterSelect
+        v-model="filters.groupId"
+        :options="groupOptions"
+        aria-label="分组"
+        search-placeholder="搜索分组..."
+        @change="applyFilters"
+      />
       <FilterSelect
         v-model="filters.costMode"
         :options="costTypeOptions"

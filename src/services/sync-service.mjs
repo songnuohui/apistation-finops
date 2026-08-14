@@ -43,7 +43,10 @@ export const REQUIRED_SOURCE_COLUMNS = {
     'duration_ms', 'first_token_ms', 'created_at',
   ],
   users: ['id', 'email', 'username', 'status', 'balance', 'total_recharged', 'updated_at', 'deleted_at'],
-  accounts: ['id', 'name', 'platform', 'type', 'status', 'expires_at', 'updated_at', 'deleted_at', 'extra'],
+  accounts: [
+    'id', 'name', 'platform', 'type', 'status', 'expires_at', 'schedulable',
+    'rate_limit_reset_at', 'temp_unschedulable_until', 'updated_at', 'deleted_at', 'extra',
+  ],
   payment_orders: [
     'id', 'user_id', 'pay_amount', 'amount', 'provider_snapshot', 'payment_type', 'order_type',
     'status', 'refund_amount', 'paid_at',
@@ -589,9 +592,12 @@ export class SyncService {
             COALESCE(total_recharged,0) AS total_recharged,deleted_at,updated_at
           FROM ${this.source}.users`),
         this.sourcePool.query(`
-          SELECT id,name,platform,type,status,expires_at,deleted_at,updated_at,
-            extra->'upstream_billing_probe' AS upstream_billing_probe
-          FROM ${this.source}.accounts`),
+          SELECT account.id,account.name,account.platform,account.type,account.status,
+            account.expires_at,account.schedulable,account.rate_limit_reset_at,
+            account.temp_unschedulable_until,account.deleted_at,account.updated_at,
+            COALESCE(account.extra->>'privacy_mode','') AS privacy_mode,
+            account.extra->'upstream_billing_probe' AS upstream_billing_probe
+          FROM ${this.source}.accounts account`),
       ]);
       await inTransaction(this.finopsPool, async (client) => {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('apistation_finops_dimension_writes'))");
@@ -609,13 +615,21 @@ export class SyncService {
           await client.query(`
             INSERT INTO ${this.schema}.dim_accounts(
               source_account_id,name,platform,account_type,status,expires_at,source_deleted_at,
+              privacy_mode,schedulable,rate_limit_reset_at,temp_unschedulable_until,
               source_updated_at,synced_at)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
             ON CONFLICT(source_account_id) DO UPDATE SET
               name=EXCLUDED.name,platform=EXCLUDED.platform,account_type=EXCLUDED.account_type,
               status=EXCLUDED.status,expires_at=EXCLUDED.expires_at,source_deleted_at=EXCLUDED.source_deleted_at,
+              privacy_mode=EXCLUDED.privacy_mode,
+              schedulable=EXCLUDED.schedulable,rate_limit_reset_at=EXCLUDED.rate_limit_reset_at,
+              temp_unschedulable_until=EXCLUDED.temp_unschedulable_until,
               source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
-          [row.id, row.name, row.platform, row.type, row.status, row.expires_at, row.deleted_at, row.updated_at]);
+          [
+            row.id, row.name, row.platform, row.type, row.status, row.expires_at, row.deleted_at,
+            row.privacy_mode, row.schedulable, row.rate_limit_reset_at,
+            row.temp_unschedulable_until, row.updated_at,
+          ]);
           const rateObservation = await this.upsertUpstreamBillingSnapshot(client, row.id, row.upstream_billing_probe);
           await this.upsertAccountDailySnapshot(client, row, rateObservation);
         }

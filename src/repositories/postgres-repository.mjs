@@ -1102,7 +1102,8 @@ export class PostgresRepository {
   async listAccounts({
     start, end, dailyStart = start, dailyEnd = end,
     search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,
-    platform = '', supplier = '', status = '', costMode = '',
+    platform = '', accountType = '', supplier = '', status = '', privacyMode = '',
+    accountIds = null, costMode = '',
     sortBy = 'createdAt', sortOrder = 'desc',
   }) {
     const scopePredicate = {
@@ -1154,7 +1155,18 @@ export class PostgresRepository {
         WHERE i.sub2api_account_id IS NOT NULL
         ORDER BY i.sub2api_account_id,i.updated_at DESC,i.id DESC
       ), base_accounts AS MATERIALIZED (
-        SELECT a.source_account_id AS id,a.name,a.platform,a.account_type,a.status,
+        SELECT a.source_account_id AS id,a.name,a.platform,a.account_type,
+               a.status AS source_status,
+               CASE
+                 WHEN a.status='active' AND a.temp_unschedulable_until>NOW()
+                   THEN 'temp_unschedulable'
+                 WHEN a.status='active' AND a.rate_limit_reset_at>NOW()
+                   THEN 'rate_limited'
+                 WHEN a.status='active' AND NOT a.schedulable
+                   THEN 'unschedulable'
+                 ELSE a.status
+               END AS status,
+               a.privacy_mode,
                COALESCE(
                  a.expires_at,
                  CASE
@@ -1246,6 +1258,15 @@ export class PostgresRepository {
           AND ($5='' OR resolved_supplier=$5)
           AND ($6='' OR status=$6)
           AND ($7='' OR cost_type=$7)
+          AND ($8='' OR account_type=$8)
+          AND (
+            $9='' OR
+            ($9='__unset__' AND COALESCE(privacy_mode,'')='') OR
+            privacy_mode=$9
+          )
+          AND (
+            $10::bigint[] IS NULL OR id=ANY($10::bigint[])
+          )
       ), usage AS MATERIALIZED (
         SELECT d.source_account_id,
                SUM(d.user_charge_cny) AS user_charge_cny,
@@ -1254,7 +1275,7 @@ export class PostgresRepository {
                SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens)::float8 AS tokens
         FROM ${this.schema}.fact_usage_daily d
         JOIN filtered_accounts account ON account.id=d.source_account_id
-        WHERE d.day >= $8::date AND d.day <= $9::date
+        WHERE d.day >= $11::date AND d.day <= $12::date
         GROUP BY d.source_account_id
       ), multiplier_costs AS MATERIALIZED (
         SELECT facts.source_account_id,
@@ -1350,9 +1371,9 @@ export class PostgresRepository {
                AS summary_missing_cost_count
       FROM economics
       ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,id DESC
-      LIMIT $10 OFFSET $11`,
+      LIMIT $13 OFFSET $14`,
     [
-      start, end, search, platform, supplier, status, costMode,
+      start, end, search, platform, supplier, status, costMode, accountType, privacyMode, accountIds,
       dailyStart, dailyEnd, pageSize, offset,
     ]);
     const first = result.rows[0];
@@ -1369,6 +1390,8 @@ export class PostgresRepository {
         platform: row.platform,
         accountType: row.account_type || '',
         status: row.status,
+        sourceStatus: row.source_status || '',
+        privacyMode: row.privacy_mode || '',
         expiresAt: row.expires_at || null,
         createdAt: row.acquired_at || null,
         acquiredAt: row.acquired_at || null,
@@ -1764,7 +1787,7 @@ export class PostgresRepository {
   }
 
   async listPurchaseCatalog() {
-    const [suppliers, filterSuppliers, batches, supplierKeys] = await Promise.all([
+    const [suppliers, filterSuppliers, batches, supplierKeys, accountFilters, groups] = await Promise.all([
       this.pool.query(`
         SELECT DISTINCT ON (LOWER(name)) name
         FROM (
@@ -1820,6 +1843,19 @@ export class PostgresRepository {
         WHERE k.removed_at IS NULL AND k.status='active' AND c.enabled
           AND COALESCE(NULLIF(c.detected_adapter_type,''),c.adapter_type) IN ('sub2api','newapi')
         ORDER BY s.name,c.name,k.name,k.id`),
+      this.pool.query(`
+        SELECT
+          COALESCE(ARRAY_AGG(DISTINCT platform ORDER BY platform)
+            FILTER (WHERE platform<>''),'{}') AS platforms,
+          COALESCE(ARRAY_AGG(DISTINCT account_type ORDER BY account_type)
+            FILTER (WHERE account_type<>''),'{}') AS account_types
+        FROM ${this.schema}.dim_accounts
+        WHERE source_deleted_at IS NULL`),
+      this.pool.query(`
+        SELECT source_group_id AS id,name,platform
+        FROM ${this.schema}.source_group_catalog
+        WHERE status='active'
+        ORDER BY sort_order,source_group_id`),
     ]);
     const keyCatalog = supplierKeys.rows.map((row) => ({
       id:Number(row.id),
@@ -1854,6 +1890,13 @@ export class PostgresRepository {
     return {
       suppliers: suppliers.rows.map((row) => row.name),
       filterSuppliers: filterSuppliers.rows.map((row) => row.name),
+      platforms: accountFilters.rows[0]?.platforms || [],
+      accountTypes: accountFilters.rows[0]?.account_types || [],
+      groups: groups.rows.map((row) => ({
+        id: Number(row.id),
+        name: row.name || '',
+        platform: row.platform || '',
+      })),
       batches: [...uniqueBatches.values()],
       supplierKeys: keyCatalog,
     };

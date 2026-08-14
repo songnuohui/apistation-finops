@@ -682,7 +682,8 @@ export class DemoRepository {
 
   async listAccounts({
     start, end, search = '', scope = 'current', page = 1, pageSize = 20,
-    platform = '', supplier = '', status = '', costMode = '',
+    platform = '', accountType = '', supplier = '', status = '', privacyMode = '',
+    groupId = '', costMode = '',
     sortBy = 'createdAt', sortOrder = 'desc',
   } = {}) {
     const filtered = this.accounts.filter((item) => {
@@ -695,8 +696,17 @@ export class DemoRepository {
         && (!start || acquiredAt >= new Date(start).getTime())
         && (!end || acquiredAt < new Date(end).getTime())
         && (!platform || item.platform === platform)
+        && (!accountType || item.accountType === accountType)
         && (!supplier || item.supplier === supplier)
         && (!status || item.status === status)
+        && (!privacyMode || (
+          privacyMode === '__unset__' ? !item.privacyMode : item.privacyMode === privacyMode
+        ))
+        && (!groupId || (
+          groupId === 'ungrouped'
+            ? !(item.groupIds || []).length
+            : (item.groupIds || []).map(Number).includes(Number(groupId))
+        ))
         && (!costMode || item.costMode === costMode)
         && `${item.name} ${item.platform} ${item.supplier} ${item.purchaseBatch || ''} ${item.id}`
           .toLowerCase().includes(search.toLowerCase());
@@ -906,6 +916,13 @@ export class DemoRepository {
         'OAuth Supply',
         ...this.supplierConnections.map((item) => item.supplierName).filter(Boolean),
       ])].sort((left, right) => left.localeCompare(right, 'zh-CN')),
+      platforms: [...new Set(this.accounts.map((item) => item.platform).filter(Boolean))].sort(),
+      accountTypes: [...new Set(this.accounts.map((item) => item.accountType).filter(Boolean))].sort(),
+      groups: this.monitorGroups.map((group) => ({
+        id: Number(group.sourceGroupId),
+        name: group.name,
+        platform: '',
+      })),
       batches: [...batches.values()].sort((left, right) => (
         left.supplier.localeCompare(right.supplier, 'zh-CN')
         || left.purchaseBatch.localeCompare(right.purchaseBatch, 'zh-CN')

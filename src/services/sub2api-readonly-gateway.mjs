@@ -125,11 +125,17 @@ export class Sub2ApiReadonlyGateway {
     });
   }
 
-  async listAccounts({ page = 1, pageSize = 100, group = '', search = '', status = 'active' } = {}) {
+  async listAccounts({
+    page = 1, pageSize = 100, platform = '', accountType = '',
+    group = '', privacyMode = '', search = '', status = 'active',
+  } = {}) {
     const params = new URLSearchParams({
       page: String(Math.max(1, Number(page) || 1)),
       page_size: String(Math.min(100, Math.max(1, Number(pageSize) || 100))),
+      ...(platform ? { platform: String(platform) } : {}),
+      ...(accountType ? { type: String(accountType) } : {}),
       ...(group ? { group: String(group) } : {}),
+      ...(privacyMode ? { privacy_mode: String(privacyMode) } : {}),
       ...(search ? { search: String(search) } : {}),
       ...(status ? { status: String(status) } : {}),
       lite: 'true',
@@ -138,6 +144,21 @@ export class Sub2ApiReadonlyGateway {
       cacheKey: `accounts:${params}`,
       ttlMs: 10_000,
     });
+  }
+
+  async listAccountIds(filters = {}) {
+    const first = await this.listAccounts({ ...filters, page: 1, pageSize: 100 });
+    const firstItems = first?.items || first?.accounts || [];
+    const total = Number(first?.total ?? firstItems.length);
+    const pageCount = Math.ceil(total / 100);
+    const remaining = pageCount > 1
+      ? await Promise.all(Array.from({ length: pageCount - 1 }, (_, index) => (
+        this.listAccounts({ ...filters, page: index + 2, pageSize: 100 })
+      )))
+      : [];
+    return [...firstItems, ...remaining.flatMap((payload) => payload?.items || payload?.accounts || [])]
+      .map((account) => Number(account?.id))
+      .filter((id) => Number.isSafeInteger(id) && id > 0);
   }
 
   async updateAccountGroups(accountId, groupIds) {
