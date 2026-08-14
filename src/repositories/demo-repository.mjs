@@ -701,12 +701,19 @@ export class DemoRepository {
         && `${item.name} ${item.platform} ${item.supplier} ${item.purchaseBatch || ''} ${item.id}`
           .toLowerCase().includes(search.toLowerCase());
     });
+    const accountCost = (item) => {
+      if (item.costMode === 'free') return 0;
+      if (['probe_multiplier', 'manual_multiplier'].includes(item.costMode)) {
+        return Number(item.multiplierCostCny ?? item.effectiveCostCny ?? 0);
+      }
+      return Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+    };
     const value = (item) => ({
       createdAt: new Date(item.acquiredAt || item.createdAt || 0).getTime(),
       name: item.name || '',
-      acquisitionCostCny: Number(item.acquisitionCostCny ?? item.periodCost ?? 0),
+      acquisitionCostCny: accountCost(item),
       userChargeCny: Number(item.userChargeCny || 0),
-      profitCny: Number(item.userChargeCny || 0) - Number(item.acquisitionCostCny ?? item.periodCost ?? 0),
+      profitCny: Number(item.userChargeCny || 0) - accountCost(item),
       requests: Number(item.requests || 0),
       tokens: Number(item.tokens || 0),
       expiresAt: new Date(item.expiresAt || 0).getTime(),
@@ -721,29 +728,39 @@ export class DemoRepository {
         : Number(leftValue) - Number(rightValue)) * direction;
     });
     const items = filtered.slice((page - 1) * pageSize, page * pageSize).map((item) => {
-      const acquisitionCostCny = Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      const fixedAcquisitionCostCny = Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      const accountCostCny = accountCost(item);
       const userChargeCny = Number(item.userChargeCny || 0);
       return {
         ...item,
-        acquisitionCostCny,
-        bookedCostCny: acquisitionCostCny,
-        effectiveCostCny: acquisitionCostCny,
-        profitCny: userChargeCny - acquisitionCostCny,
-        bookedProfitCny: userChargeCny - acquisitionCostCny,
-        grossProfitCny: userChargeCny - acquisitionCostCny,
+        acquisitionCostCny: accountCostCny,
+        accountCostCny,
+        fixedAcquisitionCostCny,
+        multiplierCostCny: ['probe_multiplier', 'manual_multiplier'].includes(item.costMode)
+          ? accountCostCny : 0,
+        bookedCostCny: accountCostCny,
+        effectiveCostCny: accountCostCny,
+        profitCny: userChargeCny - accountCostCny,
+        bookedProfitCny: userChargeCny - accountCostCny,
+        grossProfitCny: userChargeCny - accountCostCny,
       };
     });
     const summary = filtered.reduce((result, item) => {
-      const cost = Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      const cost = accountCost(item);
       const charge = Number(item.userChargeCny || 0);
       result.acquisitionCostCny += cost;
+      result.accountCostCny += cost;
+      result.fixedAcquisitionCostCny += ['probe_multiplier', 'manual_multiplier', 'free'].includes(item.costMode)
+        ? 0 : Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      result.multiplierCostCny += ['probe_multiplier', 'manual_multiplier'].includes(item.costMode) ? cost : 0;
       result.userChargeCny += charge;
       result.profitCny += charge - cost;
       result.requests += Number(item.requests || 0);
       result.missingCostCount += cost > 0 || item.costMode === 'free' ? 0 : 1;
       return result;
     }, {
-      accountCount: filtered.length, acquisitionCostCny: 0, userChargeCny: 0,
+      accountCount: filtered.length, acquisitionCostCny: 0, accountCostCny: 0,
+      fixedAcquisitionCostCny: 0, multiplierCostCny: 0, userChargeCny: 0,
       profitCny: 0, requests: 0, missingCostCount: 0,
     });
     return { items, total: filtered.length, page, pageSize, summary };

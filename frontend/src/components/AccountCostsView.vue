@@ -67,7 +67,7 @@ function inputDateTime(value: any) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 function statusClass(value: any) {
-  return ['complete', 'free', 'priced'].includes(String(value)) ? 'success' : ['missing', 'failed'].includes(String(value)) ? 'danger' : 'warning';
+  return ['complete', 'configured', 'free', 'priced'].includes(String(value)) ? 'success' : ['missing', 'failed'].includes(String(value)) ? 'danger' : 'warning';
 }
 function modeLabel(value: any) {
   return ({
@@ -97,6 +97,36 @@ function accountStatusClass(account: AnyRecord) {
 }
 function profitClass(value: any) {
   return Number(value || 0) >= 0 ? 'positive' : 'negative';
+}
+function multiplierRange(account: AnyRecord, prefix: 'upstream' | 'selling') {
+  const label = prefix === 'upstream' ? 'Upstream' : 'Selling';
+  const minValue = account[`period${label}MultiplierMin`];
+  const maxValue = account[`period${label}MultiplierMax`];
+  if (minValue == null || maxValue == null) return '';
+  const min = Number(minValue);
+  const max = Number(maxValue);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return '';
+  return Math.abs(min - max) < 0.0000001 ? `${min}x` : `${min}-${max}x`;
+}
+function coverageLabel(account: AnyRecord) {
+  return ({
+    complete: '成本已核算',
+    configured: '倍率已配置',
+    partial: '部分用量未定价',
+    missing: '成本待补',
+    pending: account.costMode === 'unconfigured' ? '未配置成本' : '暂无期间用量',
+  } as Record<string, string>)[String(account.costCoverageStatus || '')] || '待核算';
+}
+function costBasisLabel(account: AnyRecord) {
+  if (account.costMode === 'fixed_purchase') return '完整采购实扣';
+  if (account.costMode === 'free') return '免费资源';
+  const upstream = multiplierRange(account, 'upstream')
+    || (account.supplierKeyInventoryMultiplier != null ? `${account.supplierKeyInventoryMultiplier}x` : '')
+    || (account.upstreamMultiplier != null ? `${account.upstreamMultiplier}x` : '');
+  const selling = multiplierRange(account, 'selling');
+  if (upstream && selling) return `进货 ${upstream} · 销售 ${selling}`;
+  if (upstream) return `进货倍率 ${upstream}`;
+  return coverageLabel(account);
 }
 function makeEditor(account: AnyRecord) {
   return {
@@ -322,10 +352,10 @@ onMounted(() => {
 <template>
   <div class="page-view account-cost-view">
     <div class="metric-grid account-cost-metrics">
-      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>{{ summary.missingCostCount || 0 }} 个账号缺少采购成本</small></div>
-      <div class="metric-card"><span>采购成本</span><strong>{{ money(summary.acquisitionCostCny) }}</strong><small>筛选账号的完整采购实扣</small></div>
-      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次累计请求</small></div>
-      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>累计用户消耗减完整采购成本</small></div>
+      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>{{ summary.missingCostCount || 0 }} 个账号成本未完整核算</small></div>
+      <div class="metric-card"><span>账号成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}</small></div>
+      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次筛选期间请求</small></div>
+      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>筛选期间用户消耗减账号成本</small></div>
     </div>
 
     <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
@@ -341,12 +371,12 @@ onMounted(() => {
     </form>
 
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>账号采购与收益台账</h2><p>时间范围按账号采购或导入时间筛选；采购成本一次确认，补发继续归属原订单，不重复计成本。</p></div><WalletCards :size="20" class="head-icon" /></div>
+      <div class="panel-head"><div><h2>账号采购与收益台账</h2><p>账号按采购或导入时间筛选；用户消耗、倍率成本和收益均按所选时间范围统计。固定采购成本一次确认，补发继续归属原订单。</p></div><WalletCards :size="20" class="head-icon" /></div>
       <div class="table-wrap"><table class="account-table"><thead><tr>
         <th><button class="column-sort" @click="toggleSort('name')">账号 <ChevronDown :size="13" /></button></th>
         <th>类型 / 状态</th>
         <th>供应商 / 订单</th>
-        <th class="number"><button class="column-sort" @click="toggleSort('acquisitionCostCny')">采购成本 <ChevronDown :size="13" /></button></th>
+        <th class="number"><button class="column-sort" @click="toggleSort('acquisitionCostCny')">账号成本 <ChevronDown :size="13" /></button></th>
         <th class="number"><button class="column-sort" @click="toggleSort('userChargeCny')">用户消耗 <ChevronDown :size="13" /></button></th>
         <th class="number"><button class="column-sort" @click="toggleSort('profitCny')">收益 <ChevronDown :size="13" /></button></th>
         <th class="number"><button class="column-sort" @click="toggleSort('requests')">Token / 请求 <ChevronDown :size="13" /></button></th>
@@ -359,8 +389,8 @@ onMounted(() => {
           <td><strong>{{ account.externalAccountKey || account.name }}</strong><small>{{ account.name }}</small><small>Sub2API #{{ account.id }}</small></td>
           <td><span class="status-pill" :class="statusClass(account.costMode)">{{ accountTypeLabel(account) }}</span><small>{{ account.platform }}</small><span class="status-pill account-state" :class="accountStatusClass(account)">{{ accountStatusLabel(account) }}</span></td>
           <td><strong>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}</strong><small>{{ account.externalOrderId ? `OAuth #${account.externalOrderId}` : account.purchaseBatch || '未关联采购批次' }}</small><small v-if="account.repairCompletionSource">修复来源 {{ account.repairCompletionSource === 'system' ? '系统自动' : account.repairCompletionSource }}</small></td>
-          <td class="number"><strong>{{ money(account.acquisitionCostCny) }}</strong><small v-if="account.originalPriceCny != null">原价 {{ money(account.originalPriceCny) }}</small><small v-if="account.releasedCostCny">优惠 / 释放 {{ money(account.releasedCostCny) }}</small><small v-if="account.costCoverageStatus !== 'complete'" class="error-text">采购成本待补</small></td>
-          <td class="number"><strong>{{ money(account.userChargeCny) }}</strong><small>累计实际扣费</small></td>
+          <td class="number"><strong>{{ money(account.accountCostCny ?? account.acquisitionCostCny) }}</strong><small>{{ costBasisLabel(account) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.originalPriceCny != null">原价 {{ money(account.originalPriceCny) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.releasedCostCny">优惠 / 释放 {{ money(account.releasedCostCny) }}</small><small v-if="['missing','partial'].includes(account.costCoverageStatus)" class="error-text">{{ coverageLabel(account) }}<template v-if="account.unpricedUserChargeCny"> {{ money(account.unpricedUserChargeCny) }}</template></small><small v-else-if="account.costCoverageStatus === 'configured'" class="success-text">{{ coverageLabel(account) }}</small></td>
+          <td class="number"><strong>{{ money(account.userChargeCny) }}</strong><small>筛选期间实际扣费</small></td>
           <td class="number" :class="profitClass(account.profitCny)"><strong>{{ money(account.profitCny) }}</strong><small>{{ account.userChargeCny ? `${(Number(account.profitCny || 0) / Number(account.userChargeCny) * 100).toFixed(1)}%` : '--' }}</small></td>
           <td class="number"><strong>{{ compact(account.tokens) }}</strong><small>{{ compact(account.requests) }} 次</small></td>
           <td>{{ dateTime(account.acquiredAt || account.createdAt) }}<small>{{ account.product || modeLabel(account.costMode) }}</small></td>

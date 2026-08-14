@@ -693,3 +693,4 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .account-search{grid-column:auto}
   .account-cost-filterbar .filter-actions{justify-content:flex-end}
 }
+.success-text{color:#078454!important}

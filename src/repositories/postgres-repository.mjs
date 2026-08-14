@@ -1100,7 +1100,8 @@ export class PostgresRepository {
   }
 
   async listAccounts({
-    start, end, search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,
+    start, end, dailyStart = start, dailyEnd = end,
+    search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,
     platform = '', supplier = '', status = '', costMode = '',
     sortBy = 'createdAt', sortOrder = 'desc',
   }) {
@@ -1112,7 +1113,7 @@ export class PostgresRepository {
     const orderColumn = {
       createdAt: 'acquired_at',
       name: 'name',
-      acquisitionCostCny: 'acquisition_cost_cny',
+      acquisitionCostCny: 'account_cost_cny',
       userChargeCny: 'user_charge_cny',
       profitCny: 'profit_cny',
       requests: 'requests',
@@ -1253,38 +1254,115 @@ export class PostgresRepository {
                SUM(d.input_tokens+d.output_tokens+d.cache_creation_tokens+d.cache_read_tokens)::float8 AS tokens
         FROM ${this.schema}.fact_usage_daily d
         JOIN filtered_accounts account ON account.id=d.source_account_id
+        WHERE d.day >= $8::date AND d.day <= $9::date
         GROUP BY d.source_account_id
-      ), economics AS (
+      ), multiplier_costs AS (
+        SELECT facts.source_account_id,
+               COALESCE(SUM(facts.calculated_cost_cny)
+                 FILTER (WHERE facts.cost_status='priced'),0) AS multiplier_cost_cny,
+               COALESCE(SUM(facts.user_charge_cny)
+                 FILTER (WHERE facts.cost_status NOT IN ('priced','free','fixed_cost')),0)
+                 AS unpriced_user_charge_cny,
+               COUNT(*) FILTER (WHERE facts.cost_status='priced')::int AS priced_usage_count,
+               COUNT(*) FILTER (
+                 WHERE facts.cost_status NOT IN ('priced','free','fixed_cost')
+               )::int AS unpriced_usage_count,
+               MAX(facts.cost_mode) FILTER (WHERE facts.cost_status='priced') AS priced_cost_mode,
+               MIN(facts.upstream_multiplier) FILTER (WHERE facts.cost_status='priced')
+                 AS period_upstream_multiplier_min,
+               MAX(facts.upstream_multiplier) FILTER (WHERE facts.cost_status='priced')
+                 AS period_upstream_multiplier_max,
+               MIN(facts.selling_multiplier) FILTER (WHERE facts.cost_status='priced')
+                 AS period_selling_multiplier_min,
+               MAX(facts.selling_multiplier) FILTER (WHERE facts.cost_status='priced')
+                 AS period_selling_multiplier_max,
+               MAX(facts.upstream_multiplier_source)
+                 FILTER (WHERE facts.cost_status='priced') AS multiplier_cost_source
+        FROM ${this.schema}.usage_cost_facts facts
+        JOIN filtered_accounts account ON account.id=facts.source_account_id
+        WHERE facts.occurred_at >= $1 AND facts.occurred_at < $2
+        GROUP BY facts.source_account_id
+      ), account_costs AS (
         SELECT account.*,
                COALESCE(usage.user_charge_cny,0) AS user_charge_cny,
                COALESCE(usage.token_list_value_usd,0) AS token_list_value_usd,
                COALESCE(usage.requests,0)::float8 AS requests,
                COALESCE(usage.tokens,0)::float8 AS tokens,
-               COALESCE(usage.user_charge_cny,0)-account.acquisition_cost_cny AS profit_cny
+               COALESCE(multiplier.multiplier_cost_cny,0) AS multiplier_cost_cny,
+               COALESCE(multiplier.unpriced_user_charge_cny,0) AS unpriced_user_charge_cny,
+               COALESCE(multiplier.priced_usage_count,0) AS priced_usage_count,
+               COALESCE(multiplier.unpriced_usage_count,0) AS unpriced_usage_count,
+               multiplier.priced_cost_mode,
+               multiplier.period_upstream_multiplier_min,
+               multiplier.period_upstream_multiplier_max,
+               multiplier.period_selling_multiplier_min,
+               multiplier.period_selling_multiplier_max,
+               COALESCE(multiplier.multiplier_cost_source,'') AS multiplier_cost_source,
+               CASE
+                 WHEN account.cost_type='free' THEN 0
+                 WHEN account.cost_type='fixed_purchase' THEN account.acquisition_cost_cny
+                 WHEN account.cost_type IN ('probe_multiplier','manual_multiplier')
+                   OR COALESCE(multiplier.priced_usage_count,0)>0
+                   THEN COALESCE(multiplier.multiplier_cost_cny,0)
+                 ELSE 0
+               END AS account_cost_cny,
+               CASE
+                 WHEN account.cost_type NOT IN ('fixed_purchase','free')
+                   AND COALESCE(multiplier.priced_usage_count,0)>0
+                   THEN COALESCE(multiplier.priced_cost_mode,account.cost_type)
+                 ELSE account.cost_type
+               END AS effective_cost_type,
+               CASE
+                 WHEN account.cost_type='free' THEN 'complete'
+                 WHEN account.cost_type='fixed_purchase' AND account.cost_record_count>0 THEN 'complete'
+                 WHEN account.cost_type='fixed_purchase' THEN 'missing'
+                 WHEN account.cost_type IN ('probe_multiplier','manual_multiplier')
+                   OR COALESCE(multiplier.priced_usage_count,0)>0
+                   THEN CASE
+                     WHEN COALESCE(multiplier.unpriced_user_charge_cny,0)>0
+                       AND COALESCE(multiplier.priced_usage_count,0)>0 THEN 'partial'
+                     WHEN COALESCE(multiplier.unpriced_user_charge_cny,0)>0 THEN 'missing'
+                     WHEN COALESCE(multiplier.priced_usage_count,0)>0 THEN 'complete'
+                     WHEN account.upstream_multiplier>0 THEN 'configured'
+                     ELSE 'missing'
+                   END
+                 WHEN COALESCE(usage.requests,0)>0 THEN 'missing'
+                 ELSE 'pending'
+               END AS cost_coverage_status
         FROM filtered_accounts account
         LEFT JOIN usage ON usage.source_account_id=account.id
+        LEFT JOIN multiplier_costs multiplier ON multiplier.source_account_id=account.id
+      ), economics AS (
+        SELECT account_costs.*,
+               user_charge_cny-account_cost_cny AS profit_cny
+        FROM account_costs
       )
       SELECT economics.*,
              COUNT(*) OVER() AS total_count,
-             COALESCE(SUM(acquisition_cost_cny) OVER(),0) AS summary_cost_cny,
+             COALESCE(SUM(account_cost_cny) OVER(),0) AS summary_cost_cny,
+             COALESCE(SUM(acquisition_cost_cny)
+               FILTER (WHERE cost_type='fixed_purchase') OVER(),0) AS summary_fixed_cost_cny,
+             COALESCE(SUM(multiplier_cost_cny) OVER(),0) AS summary_multiplier_cost_cny,
              COALESCE(SUM(user_charge_cny) OVER(),0) AS summary_user_charge_cny,
              COALESCE(SUM(profit_cny) OVER(),0) AS summary_profit_cny,
              COALESCE(SUM(requests) OVER(),0) AS summary_requests,
-             COUNT(*) FILTER (WHERE cost_record_count=0 AND cost_type<>'free') OVER()
+             COUNT(*) FILTER (WHERE cost_coverage_status IN ('missing','partial')) OVER()
                AS summary_missing_cost_count
       FROM economics
       ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,id DESC
-      LIMIT $8 OFFSET $9`,
-    [start, end, search, platform, supplier, status, costMode, pageSize, offset]);
+      LIMIT $10 OFFSET $11`,
+    [
+      start, end, search, platform, supplier, status, costMode,
+      dailyStart, dailyEnd, pageSize, offset,
+    ]);
     const first = result.rows[0];
     const items = result.rows.map((row) => {
-      const acquisitionCostCny = number(row.acquisition_cost_cny);
+      const fixedAcquisitionCostCny = number(row.acquisition_cost_cny);
+      const multiplierCostCny = number(row.multiplier_cost_cny);
+      const accountCostCny = number(row.account_cost_cny);
       const userChargeCny = number(row.user_charge_cny);
       const profitCny = number(row.profit_cny);
       const hasCostRecord = number(row.cost_record_count) > 0;
-      const costCoverageStatus = row.cost_type === 'free' || hasCostRecord
-        ? 'complete'
-        : number(row.requests) > 0 ? 'missing' : 'pending';
       return {
         id: number(row.id),
         name: row.name,
@@ -1301,14 +1379,17 @@ export class PostgresRepository {
         costProfileId: row.cost_profile_id ? number(row.cost_profile_id) : null,
         supplier: row.resolved_supplier || '',
         purchaseBatch: row.resolved_purchase_batch || '',
-        acquisitionCostCny,
-        periodCost: acquisitionCostCny,
-        periodCostCny: acquisitionCostCny,
-        purchaseAllocatedCostCny: acquisitionCostCny,
-        effectiveCostCny: acquisitionCostCny,
-        fullyLoadedCost: acquisitionCostCny,
-        fullyLoadedCostCny: acquisitionCostCny,
-        bookedCostCny: acquisitionCostCny,
+        acquisitionCostCny: accountCostCny,
+        accountCostCny,
+        fixedAcquisitionCostCny,
+        multiplierCostCny,
+        periodCost: accountCostCny,
+        periodCostCny: accountCostCny,
+        purchaseAllocatedCostCny: fixedAcquisitionCostCny,
+        effectiveCostCny: accountCostCny,
+        fullyLoadedCost: accountCostCny,
+        fullyLoadedCostCny: accountCostCny,
+        bookedCostCny: accountCostCny,
         userChargeCny,
         revenue: userChargeCny,
         revenueCny: userChargeCny,
@@ -1321,13 +1402,28 @@ export class PostgresRepository {
         tokenListValueUsd: number(row.token_list_value_usd),
         requests: number(row.requests),
         tokens: number(row.tokens),
-        costCoverageStatus,
-        hasCostRecord,
+        costCoverageStatus: row.cost_coverage_status || 'pending',
+        hasCostRecord: row.cost_type === 'free'
+          || hasCostRecord
+          || number(row.priced_usage_count) > 0
+          || (
+            ['probe_multiplier', 'manual_multiplier'].includes(row.cost_type)
+            && number(row.upstream_multiplier) > 0
+          ),
         costConfigurationConflict: false,
         lifecycle: row.source_deleted_at ? 'deleted' : row.status === 'active' ? 'current' : 'inactive',
+        effectiveCostMode: row.effective_cost_type || row.cost_type,
         basisMode: row.basis_mode || 'revenue_backsolve',
         upstreamMultiplier: nullableNumber(row.upstream_multiplier),
         cnyPerReferenceUnit: nullableNumber(row.cny_per_reference_unit),
+        unpricedUserChargeCny: number(row.unpriced_user_charge_cny),
+        pricedUsageCount: number(row.priced_usage_count),
+        unpricedUsageCount: number(row.unpriced_usage_count),
+        periodUpstreamMultiplierMin: nullableNumber(row.period_upstream_multiplier_min),
+        periodUpstreamMultiplierMax: nullableNumber(row.period_upstream_multiplier_max),
+        periodSellingMultiplierMin: nullableNumber(row.period_selling_multiplier_min),
+        periodSellingMultiplierMax: nullableNumber(row.period_selling_multiplier_max),
+        multiplierCostSource: row.multiplier_cost_source || '',
         supplierKeyId: row.supplier_key_id ? number(row.supplier_key_id) : null,
         supplierKeyLinkedAt: row.supplier_key_linked_at || null,
         supplierKeyName: row.supplier_key_name || '',
@@ -1366,7 +1462,7 @@ export class PostgresRepository {
         originalPriceCny: nullableNumber(row.original_price_cny),
         supplierChargedCny: nullableNumber(row.supplier_charged_cny),
         releasedCostCny: row.original_price_cny === null
-          ? null : Math.max(0, number(row.original_price_cny) - acquisitionCostCny),
+          ? null : Math.max(0, number(row.original_price_cny) - fixedAcquisitionCostCny),
       };
     });
     return {
@@ -1377,6 +1473,9 @@ export class PostgresRepository {
       summary: {
         accountCount: first ? number(first.total_count) : 0,
         acquisitionCostCny: first ? number(first.summary_cost_cny) : 0,
+        accountCostCny: first ? number(first.summary_cost_cny) : 0,
+        fixedAcquisitionCostCny: first ? number(first.summary_fixed_cost_cny) : 0,
+        multiplierCostCny: first ? number(first.summary_multiplier_cost_cny) : 0,
         userChargeCny: first ? number(first.summary_user_charge_cny) : 0,
         profitCny: first ? number(first.summary_profit_cny) : 0,
         requests: first ? number(first.summary_requests) : 0,
