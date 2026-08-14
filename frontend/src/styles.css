@@ -641,41 +641,28 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .account-cost-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
 .account-cost-filterbar{
   display:grid;
-  grid-template-columns:minmax(320px,1.8fr) 160px 190px auto;
-  gap:9px;
-  align-items:end;
-  padding:14px 16px;
+  grid-template-columns:minmax(280px,1fr) 180px 210px auto;
+  gap:12px;
+  align-items:center;
+  padding:12px 14px;
 }
-.account-cost-filterbar label{display:grid;gap:5px;min-width:0;color:#77869a;font-size:10px}
-.account-cost-filterbar input,.account-cost-filterbar select{
-  width:100%;
-  height:36px;
-  min-width:0;
-  padding:0 10px;
-  border:1px solid #d7e2ed;
-  border-radius:6px;
-  background:#fff;
-  color:#31445d;
-  font-size:11px;
-  outline:0;
-}
-.account-cost-filterbar input:focus,.account-cost-filterbar select:focus{
-  border-color:#8db4e8;
-  box-shadow:0 0 0 2px rgba(49,119,219,.1);
-}
-.account-search>div{
+.account-search{
   display:flex;
   align-items:center;
-  gap:7px;
-  height:36px;
-  padding:0 10px;
+  gap:9px;
+  height:42px;
+  padding:0 13px;
   border:1px solid #d7e2ed;
-  border-radius:6px;
+  border-radius:8px;
   background:#fff;
   color:#8292a6;
+  transition:border-color .16s ease,box-shadow .16s ease;
 }
-.account-search>div:focus-within{border-color:#8db4e8;box-shadow:0 0 0 2px rgba(49,119,219,.1)}
-.account-search input{height:34px;padding:0;border:0;box-shadow:none!important}
+.account-search:focus-within{border-color:#4c9cde;box-shadow:0 0 0 3px rgba(35,145,201,.12)}
+.account-search input{width:100%;height:40px;min-width:0;padding:0;border:0;background:transparent;color:#31445d;font-size:12px;outline:0;box-shadow:none!important}
+.account-search input::placeholder{color:#9aa6b5}
+.account-cost-filterbar .filter-actions{height:42px}
+.account-cost-filterbar .filter-actions .icon-button{width:42px;height:42px;border-radius:8px}
 .account-table{min-width:1740px!important}
 .account-table td{vertical-align:top}
 .account-table td strong{color:#243b57;font-size:12px}
@@ -684,13 +671,11 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .account-table td.positive strong,.account-table td.negative strong{color:inherit}
 
 @media(max-width:1150px){
-  .account-cost-filterbar{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .account-search{grid-column:span 3}
+  .account-cost-filterbar{grid-template-columns:minmax(240px,1fr) repeat(2,minmax(160px,220px)) auto}
 }
 @media(max-width:760px){
   .account-cost-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
   .account-cost-filterbar{grid-template-columns:1fr}
-  .account-search{grid-column:auto}
   .account-cost-filterbar .filter-actions{justify-content:flex-end}
 }
 .success-text{color:#078454!important}

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   Check, ChevronDown, Edit3, History, Link2, Plus,
   RefreshCw, RotateCcw, Search, WalletCards, X,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
+import FilterSelect from './FilterSelect.vue';
 
 type AnyRecord = Record<string, any>;
 const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
@@ -28,6 +29,7 @@ const sortOrder = ref<'asc' | 'desc'>('desc');
 let loadRequestId = 0;
 let editorOptionsPromise: Promise<void> | null = null;
 let editorOptionsLoaded = false;
+let searchTimer: number | undefined;
 
 const rows = computed(() => accounts.value.items || []);
 const summary = computed(() => accounts.value.summary || {});
@@ -35,6 +37,18 @@ const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total |
 const suppliers = computed(() => [...new Set(
   catalog.value.filterSuppliers || catalog.value.suppliers || [],
 )].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
+const costTypeOptions = [
+  { value: '', label: '全部类型' },
+  { value: 'fixed_purchase', label: '固定采购' },
+  { value: 'probe_multiplier', label: '供应商倍率' },
+  { value: 'manual_multiplier', label: '手动倍率' },
+  { value: 'free', label: '免费资源' },
+  { value: 'unconfigured', label: '未配置' },
+];
+const supplierOptions = computed(() => [
+  { value: '', label: '全部供应商' },
+  ...suppliers.value.map((supplier) => ({ value: String(supplier), label: String(supplier) })),
+]);
 const selectedSupplierKeys = computed(() => (catalog.value.supplierKeys || []).filter((item: AnyRecord) => (
   !item.accountId || Number(item.accountId) === Number(editor.value?.id)
 )));
@@ -167,16 +181,23 @@ async function load() {
 }
 
 async function applyFilters() {
+  window.clearTimeout(searchTimer);
   appliedFilters.value = { ...filters.value };
   page.value = 1;
   await load();
 }
 
 async function clearFilters() {
+  window.clearTimeout(searchTimer);
   filters.value = emptyFilters();
   appliedFilters.value = emptyFilters();
   page.value = 1;
   await load();
+}
+
+function scheduleSearch() {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => { void applyFilters(); }, 300);
 }
 
 async function toggleSort(key: string) {
@@ -344,6 +365,7 @@ onMounted(() => {
   void load();
   void loadEditorOptions();
 });
+onUnmounted(() => window.clearTimeout(searchTimer));
 </script>
 
 <template>
@@ -356,11 +378,26 @@ onMounted(() => {
     </div>
 
     <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
-      <label class="account-search"><span>账号搜索</span><div><Search :size="15" /><input v-model.trim="filters.search" placeholder="搜索账号..." /></div></label>
-      <label><span>成本类型</span><select v-model="filters.costMode"><option value="">全部类型</option><option value="fixed_purchase">固定采购</option><option value="probe_multiplier">供应商倍率</option><option value="manual_multiplier">手动倍率</option><option value="free">免费资源</option><option value="unconfigured">未配置</option></select></label>
-      <label><span>供应商</span><select v-model="filters.supplier"><option value="">全部供应商</option><option v-for="item in suppliers" :key="item" :value="item">{{ item }}</option></select></label>
+      <div class="account-search">
+        <Search :size="17" />
+        <input v-model="filters.search" placeholder="搜索账号..." aria-label="搜索账号" @input="scheduleSearch" />
+      </div>
+      <FilterSelect
+        v-model="filters.costMode"
+        :options="costTypeOptions"
+        aria-label="成本类型"
+        search-placeholder="搜索成本类型..."
+        @change="applyFilters"
+      />
+      <FilterSelect
+        v-model="filters.supplier"
+        :options="supplierOptions"
+        aria-label="供应商"
+        search-placeholder="搜索供应商..."
+        @change="applyFilters"
+      />
       <div class="filter-actions">
-        <button class="icon-button filter-submit" type="submit" title="查询" :disabled="loading"><RefreshCw v-if="loading" :size="15" class="spin" /><Search v-else :size="15" /></button>
+        <button class="icon-button filter-submit" type="button" title="刷新" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spin: loading }" /></button>
         <button class="icon-button" type="button" title="清空筛选" :disabled="loading" @click="clearFilters"><RotateCcw :size="15" /></button>
       </div>
     </form>
