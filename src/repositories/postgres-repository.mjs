@@ -1246,7 +1246,7 @@ export class PostgresRepository {
           AND ($5='' OR resolved_supplier=$5)
           AND ($6='' OR status=$6)
           AND ($7='' OR cost_type=$7)
-      ), usage AS (
+      ), usage AS MATERIALIZED (
         SELECT d.source_account_id,
                SUM(d.user_charge_cny) AS user_charge_cny,
                SUM(d.standard_cost_usd_reference) AS token_list_value_usd,
@@ -1256,7 +1256,7 @@ export class PostgresRepository {
         JOIN filtered_accounts account ON account.id=d.source_account_id
         WHERE d.day >= $8::date AND d.day <= $9::date
         GROUP BY d.source_account_id
-      ), multiplier_costs AS (
+      ), multiplier_costs AS MATERIALIZED (
         SELECT facts.source_account_id,
                COALESCE(SUM(facts.calculated_cost_cny)
                  FILTER (WHERE facts.cost_status='priced'),0) AS multiplier_cost_cny,
