@@ -637,3 +637,59 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .replenishment-filterbar,.recovery-filterbar{grid-template-columns:1fr}
   .filter-actions{justify-content:flex-end}
 }
+
+.account-cost-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+.account-cost-filterbar{
+  display:grid;
+  grid-template-columns:minmax(260px,1.7fr) 130px 150px 170px 130px auto;
+  gap:9px;
+  align-items:end;
+  padding:14px 16px;
+}
+.account-cost-filterbar label{display:grid;gap:5px;min-width:0;color:#77869a;font-size:10px}
+.account-cost-filterbar input,.account-cost-filterbar select{
+  width:100%;
+  height:36px;
+  min-width:0;
+  padding:0 10px;
+  border:1px solid #d7e2ed;
+  border-radius:6px;
+  background:#fff;
+  color:#31445d;
+  font-size:11px;
+  outline:0;
+}
+.account-cost-filterbar input:focus,.account-cost-filterbar select:focus{
+  border-color:#8db4e8;
+  box-shadow:0 0 0 2px rgba(49,119,219,.1);
+}
+.account-search>div{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  height:36px;
+  padding:0 10px;
+  border:1px solid #d7e2ed;
+  border-radius:6px;
+  background:#fff;
+  color:#8292a6;
+}
+.account-search>div:focus-within{border-color:#8db4e8;box-shadow:0 0 0 2px rgba(49,119,219,.1)}
+.account-search input{height:34px;padding:0;border:0;box-shadow:none!important}
+.account-table{min-width:1740px!important}
+.account-table td{vertical-align:top}
+.account-table td strong{color:#243b57;font-size:12px}
+.account-table .account-state{display:flex;width:max-content;margin-top:6px}
+.account-table td.negative{color:#c13e50}
+.account-table td.positive strong,.account-table td.negative strong{color:inherit}
+
+@media(max-width:1150px){
+  .account-cost-filterbar{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .account-search{grid-column:span 2}
+}
+@media(max-width:760px){
+  .account-cost-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .account-cost-filterbar{grid-template-columns:1fr}
+  .account-search{grid-column:auto}
+  .account-cost-filterbar .filter-actions{justify-content:flex-end}
+}

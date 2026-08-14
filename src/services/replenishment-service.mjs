@@ -126,21 +126,29 @@ function textIncludesAuthFailure(...values) {
 
 function allocateOrderCosts(items, totalCny) {
   const resolved = items.map((entry) => entry.individualCostCny);
-  const missing = resolved.flatMap((value, index) => value === null ? [index] : []);
-  if (!missing.length || totalCny === null) return resolved;
+  if (totalCny === null || !items.length) return resolved;
   const totalFen = Math.round(Number(totalCny) * 100);
-  const knownFen = resolved.reduce(
-    (sum, value) => sum + (value === null ? 0 : Math.round(Number(value) * 100)),
-    0,
-  );
-  const remainingFen = Math.max(0, totalFen - knownFen);
-  const baseFen = Math.floor(remainingFen / missing.length);
-  let remainder = remainingFen % missing.length;
-  for (const index of missing) {
-    resolved[index] = (baseFen + (remainder > 0 ? 1 : 0)) / 100;
-    if (remainder > 0) remainder -= 1;
+  const weights = items.map((entry) => {
+    const chargedFen = Math.round(Number(entry.individualCostCny) * 100);
+    if (Number.isFinite(chargedFen) && chargedFen > 0) return chargedFen;
+    const originalFen = Math.round(Number(entry.originalPriceCny) * 100);
+    return Number.isFinite(originalFen) && originalFen > 0 ? originalFen : 1;
+  });
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+  const allocations = weights.map((weight, index) => {
+    const exact = totalFen * weight / totalWeight;
+    return { index, fen: Math.floor(exact), fraction: exact - Math.floor(exact) };
+  });
+  let remainder = totalFen - allocations.reduce((sum, entry) => sum + entry.fen, 0);
+  for (const entry of [...allocations].sort((left, right) => (
+    right.fraction - left.fraction || left.index - right.index
+  ))) {
+    if (remainder <= 0) break;
+    entry.fen += 1;
+    remainder -= 1;
   }
-  return resolved;
+  return allocations.sort((left, right) => left.index - right.index)
+    .map((entry) => entry.fen / 100);
 }
 
 function replacementFilesPayload(payload) {
@@ -1474,10 +1482,17 @@ export class ReplenishmentService {
     const actualPaidAmountCny = centsToCny(
       remote.charged_fen ?? remote.chargedFen ?? payload.charged_fen ?? payload.chargedFen,
     ) ?? order.quotedAmountCny;
+    const releasedAmountCny = centsToCny(
+      remote.released_fen ?? remote.releasedFen
+      ?? remote.refunded_fen ?? remote.refundedFen
+      ?? payload.released_fen ?? payload.releasedFen
+      ?? payload.refunded_fen ?? payload.refundedFen,
+    );
     await this.repository.updateOrder(order.id, {
       status: 'importing',
       deliveredQuantity: accounts.length,
       actualPaidAmountCny,
+      releasedAmountCny,
       payloadCiphertext: this.vault.available ? this.vault.encrypt({ payload }) : '',
       nextPollAt: null,
       lastError: '',
@@ -1497,11 +1512,22 @@ export class ReplenishmentService {
       individualCostCny: centsToCny(
         remoteItem?.charged_fen ?? remoteItem?.chargedFen ?? raw?.charged_fen ?? raw?.chargedFen,
       ),
+      originalPriceCny: centsToCny(
+        remoteItem?.base_price_fen ?? remoteItem?.basePriceFen
+        ?? raw?.base_price_fen ?? raw?.basePriceFen,
+      ),
       credentialCiphertext: this.vault.available ? this.vault.encrypt({ credentials: accountCredential(raw), raw }) : '',
       metadata: {
         email: raw?.email || remoteItem?.email || '',
         remainingSeconds: raw?.remaining_seconds ?? raw?.remainingSeconds
           ?? remoteItem?.remaining_seconds ?? remoteItem?.remainingSeconds ?? null,
+        originalPriceCny: centsToCny(
+          remoteItem?.base_price_fen ?? remoteItem?.basePriceFen
+          ?? raw?.base_price_fen ?? raw?.basePriceFen,
+        ),
+        supplierChargedCny: centsToCny(
+          remoteItem?.charged_fen ?? remoteItem?.chargedFen ?? raw?.charged_fen ?? raw?.chargedFen,
+        ),
       },
       };
     });
@@ -1649,9 +1675,12 @@ export class ReplenishmentService {
           continue;
         }
         const effectiveFrom = new Date(item.order?.createdAt || this.now());
+        const remainingSeconds = numeric(item.metadata?.remainingSeconds);
         const productDays = numeric(String(item.order?.product || '').match(/(\d+)d/i)?.[1], 30);
-        const effectiveTo = new Date(effectiveFrom.getTime() + productDays * 86_400_000);
-        if (effectiveTo <= effectiveFrom) effectiveTo.setTime(effectiveFrom.getTime() + 86_400_000);
+        const coverageMs = remainingSeconds !== null && remainingSeconds > 0
+          ? remainingSeconds * 1000
+          : productDays * 86_400_000;
+        const effectiveTo = new Date(effectiveFrom.getTime() + Math.max(1000, coverageMs));
         const period = await this.ledgerRepository.createAccountCostPeriod({
           accountId: item.sub2apiAccountId,
           costProfileId: null,

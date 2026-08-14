@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Check, Clock3, Edit3, History, Link2, Plus, RefreshCw, WalletCards, X } from 'lucide-vue-next';
+import {
+  Check, ChevronDown, Edit3, History, Link2, Plus,
+  RefreshCw, RotateCcw, Search, WalletCards, X,
+} from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
 
 type AnyRecord = Record<string, any>;
 const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
 const emit = defineEmits<{ toast: [message: string] }>();
 
-const search = ref('');
 const page = ref(1);
-const pageSize = ref(30);
+const pageSize = ref(20);
 const loading = ref(false);
 const accounts = ref<AnyRecord>({});
 const catalog = ref<AnyRecord>({ suppliers: [], batches: [], supplierKeys: [] });
@@ -18,13 +20,22 @@ const editor = ref<AnyRecord | null>(null);
 const periodEditor = ref<AnyRecord | null>(null);
 const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
-let searchTimer: number | undefined;
+const emptyFilters = () => ({ search: '', platform: '', supplier: '', status: '', costMode: '' });
+const filters = ref(emptyFilters());
+const appliedFilters = ref(emptyFilters());
+const sortBy = ref('createdAt');
+const sortOrder = ref<'asc' | 'desc'>('desc');
 let loadRequestId = 0;
 let editorOptionsPromise: Promise<void> | null = null;
 let editorOptionsLoaded = false;
 
 const rows = computed(() => accounts.value.items || []);
+const summary = computed(() => accounts.value.summary || {});
 const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total || 0) / pageSize.value)));
+const suppliers = computed(() => [...new Set([
+  ...(catalog.value.suppliers || []),
+  ...rows.value.map((item: AnyRecord) => item.supplier).filter(Boolean),
+])].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
 const selectedSupplierKeys = computed(() => (catalog.value.supplierKeys || []).filter((item: AnyRecord) => (
   !item.accountId || Number(item.accountId) === Number(editor.value?.id)
 )));
@@ -42,6 +53,9 @@ function isOAuthSupplyAccount(account: AnyRecord) {
 function notify(message: string) { emit('toast', message); }
 function money(value: any) {
   return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
+}
+function compact(value: any) {
+  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(Number(value || 0));
 }
 function dateTime(value: any) {
   return value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
@@ -64,6 +78,26 @@ function modeLabel(value: any) {
     unconfigured: '未配置',
   } as Record<string, string>)[String(value || '')] || String(value || '未配置');
 }
+function accountTypeLabel(account: AnyRecord) {
+  if (account.accountType === 'oauth') return 'OAuth 授权';
+  if (account.accountType === 'api') return 'API';
+  return account.accountType || account.platform || '--';
+}
+function accountStatusLabel(account: AnyRecord) {
+  if (account.sourceDeletedAt) return '已删除';
+  if (account.expiresAt && new Date(account.expiresAt).getTime() <= Date.now()) return '已过期';
+  if (['failed', 'error', 'unavailable'].includes(String(account.healthStatus))) return '异常';
+  if (account.status === 'active') return '可调度';
+  if (account.status === 'disabled') return '已停用';
+  return account.status || '未知';
+}
+function accountStatusClass(account: AnyRecord) {
+  const label = accountStatusLabel(account);
+  return label === '可调度' ? 'success' : ['异常', '已过期', '已删除'].includes(label) ? 'danger' : 'warning';
+}
+function profitClass(value: any) {
+  return Number(value || 0) >= 0 ? 'positive' : 'negative';
+}
 function makeEditor(account: AnyRecord) {
   return {
     ...account,
@@ -85,7 +119,16 @@ async function load() {
   loading.value = true;
   try {
     const params = query({
-      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize.value, search: search.value,
+      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
+      page: page.value,
+      page_size: pageSize.value,
+      search: appliedFilters.value.search,
+      platform: appliedFilters.value.platform,
+      supplier: appliedFilters.value.supplier,
+      status: appliedFilters.value.status,
+      cost_mode: appliedFilters.value.costMode,
+      sort_by: sortBy.value,
+      sort_order: sortOrder.value,
     });
     const accountResult = await get(`/accounts?${params}`);
     if (requestId === loadRequestId) accounts.value = accountResult;
@@ -94,6 +137,29 @@ async function load() {
   } finally {
     if (requestId === loadRequestId) loading.value = false;
   }
+}
+
+async function applyFilters() {
+  appliedFilters.value = { ...filters.value };
+  page.value = 1;
+  await load();
+}
+
+async function clearFilters() {
+  filters.value = emptyFilters();
+  appliedFilters.value = emptyFilters();
+  page.value = 1;
+  await load();
+}
+
+async function toggleSort(key: string) {
+  if (sortBy.value === key) sortOrder.value = sortOrder.value === 'desc' ? 'asc' : 'desc';
+  else {
+    sortBy.value = key;
+    sortOrder.value = 'desc';
+  }
+  page.value = 1;
+  await load();
 }
 
 function openEditor(account: AnyRecord) {
@@ -214,7 +280,7 @@ async function savePeriod() {
       await send('/account-cost-periods', 'POST', payload);
     }
     periodEditor.value = null;
-    notify(current.id ? '固定成本期间已更新' : '固定成本期间已登记');
+    notify(current.id ? '采购成本已更新' : '采购成本已登记');
     await load();
   } catch (error: any) {
     notify(error.message);
@@ -239,11 +305,11 @@ async function openHistory(account: AnyRecord) {
   }
 }
 
-watch(search, () => {
-  window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => { page.value = 1; load(); }, 250);
-});
 watch(() => props.refreshToken, () => {
+  page.value = 1;
+  load();
+});
+watch(() => [props.range, props.rangeStart, props.rangeEnd], () => {
   page.value = 1;
   load();
 });
@@ -255,24 +321,53 @@ onMounted(() => {
 
 <template>
   <div class="page-view account-cost-view">
-    <div class="toolbar-row">
-      <label class="search-box"><WalletCards :size="17" /><input v-model="search" placeholder="搜索账号、平台或供应商" /></label>
-      <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
-      <span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span>
+    <div class="metric-grid account-cost-metrics">
+      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>{{ summary.missingCostCount || 0 }} 个账号缺少采购成本</small></div>
+      <div class="metric-card"><span>采购成本</span><strong>{{ money(summary.acquisitionCostCny) }}</strong><small>筛选账号的完整采购实扣</small></div>
+      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次累计请求</small></div>
+      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>累计用户消耗减完整采购成本</small></div>
     </div>
+
+    <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
+      <label class="account-search"><span>账号 / 订单 / Sub2API</span><div><Search :size="15" /><input v-model.trim="filters.search" placeholder="账号名称、邮箱、订单号或账号编号" /></div></label>
+      <label><span>平台</span><select v-model="filters.platform"><option value="">全部平台</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
+      <label><span>成本类型</span><select v-model="filters.costMode"><option value="">全部类型</option><option value="fixed_purchase">固定采购</option><option value="probe_multiplier">供应商倍率</option><option value="manual_multiplier">手动倍率</option><option value="free">免费资源</option><option value="unconfigured">未配置</option></select></label>
+      <label><span>供应商</span><select v-model="filters.supplier"><option value="">全部供应商</option><option v-for="item in suppliers" :key="item" :value="item">{{ item }}</option></select></label>
+      <label><span>账号状态</span><select v-model="filters.status"><option value="">全部状态</option><option value="active">可调度</option><option value="disabled">已停用</option><option value="error">异常</option></select></label>
+      <div class="filter-actions">
+        <button class="icon-button filter-submit" type="submit" title="查询" :disabled="loading"><RefreshCw v-if="loading" :size="15" class="spin" /><Search v-else :size="15" /></button>
+        <button class="icon-button" type="button" title="清空筛选" :disabled="loading" @click="clearFilters"><RotateCcw :size="15" /></button>
+      </div>
+    </form>
+
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>账号成本台账</h2><p>OAuth Supply 账号按采购订单自动登记供应商、批次和账号成本；其他账号继续使用固定成本或供应商倍率规则。</p></div><WalletCards :size="20" class="head-icon" /></div>
-      <div class="table-wrap"><table class="account-table"><thead><tr><th>账号</th><th>平台 / 供应商</th><th>成本模式</th><th class="number">销售额</th><th class="number">总成本</th><th class="number">毛利</th><th>覆盖状态</th><th>操作</th></tr></thead><tbody>
-        <tr v-if="loading && !rows.length"><td colspan="8" class="table-empty">正在读取账号成本</td></tr>
+      <div class="panel-head"><div><h2>账号采购与收益台账</h2><p>时间范围按账号采购或导入时间筛选；采购成本一次确认，补发继续归属原订单，不重复计成本。</p></div><WalletCards :size="20" class="head-icon" /></div>
+      <div class="table-wrap"><table class="account-table"><thead><tr>
+        <th><button class="column-sort" @click="toggleSort('name')">账号 <ChevronDown :size="13" /></button></th>
+        <th>类型 / 状态</th>
+        <th>供应商 / 订单</th>
+        <th class="number"><button class="column-sort" @click="toggleSort('acquisitionCostCny')">采购成本 <ChevronDown :size="13" /></button></th>
+        <th class="number"><button class="column-sort" @click="toggleSort('userChargeCny')">用户消耗 <ChevronDown :size="13" /></button></th>
+        <th class="number"><button class="column-sort" @click="toggleSort('profitCny')">收益 <ChevronDown :size="13" /></button></th>
+        <th class="number"><button class="column-sort" @click="toggleSort('requests')">Token / 请求 <ChevronDown :size="13" /></button></th>
+        <th><button class="column-sort" @click="toggleSort('createdAt')">采购时间 <ChevronDown :size="13" /></button></th>
+        <th><button class="column-sort" @click="toggleSort('expiresAt')">有效期 <ChevronDown :size="13" /></button></th>
+        <th>操作</th>
+      </tr></thead><tbody>
+        <tr v-if="loading && !rows.length"><td colspan="10" class="table-empty">正在读取账号采购与收益数据</td></tr>
         <tr v-for="account in rows" :key="account.id">
-          <td><strong>{{ account.name }}</strong><small>ID {{ account.id }} · {{ account.platform }}</small></td>
-          <td>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}<small>{{ account.purchaseBatch || account.supplierKeyName || '未关联采购批次' }}</small></td>
-          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ isOAuthSupplyAccount(account) ? '自动采购成本' : modeLabel(account.costMode) }}</span><small>{{ isOAuthSupplyAccount(account) ? `账号成本 ${money(account.currentTotalCostCny ?? account.currentOriginalAmount)}` : account.supplierKeyInventoryMultiplier != null ? `密钥 ${account.supplierKeyInventoryMultiplier}x` : account.upstreamMultiplier != null ? `上游 ${account.upstreamMultiplier}x` : account.supplierKeyName || '' }}</small></td>
-          <td class="number">{{ money(account.userChargeCny) }}</td><td class="number">{{ money(account.bookedCostCny || account.effectiveCostCny) }}</td><td class="number positive">{{ money(account.bookedProfitCny || account.grossProfitCny) }}</td>
-          <td><span class="status-pill" :class="statusClass(account.costCoverageStatus)">{{ account.costCoverageStatus === 'complete' ? '已覆盖' : account.costCoverageStatus === 'missing' ? '待补成本' : account.costCoverageStatus || '待检查' }}</span></td>
-          <td><div class="row-actions"><template v-if="!isOAuthSupplyAccount(account)"><button class="small-button" @click="openEditor(account)"><Edit3 :size="14" />成本规则</button><button class="icon-button mini-action" title="登记固定成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button></template><span v-else class="auto-ledger-label"><Link2 :size="14" />订单自动登记</span><button class="icon-button mini-action" title="查看历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
+          <td><strong>{{ account.externalAccountKey || account.name }}</strong><small>{{ account.name }}</small><small>Sub2API #{{ account.id }}</small></td>
+          <td><span class="status-pill" :class="statusClass(account.costMode)">{{ accountTypeLabel(account) }}</span><small>{{ account.platform }}</small><span class="status-pill account-state" :class="accountStatusClass(account)">{{ accountStatusLabel(account) }}</span></td>
+          <td><strong>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}</strong><small>{{ account.externalOrderId ? `OAuth #${account.externalOrderId}` : account.purchaseBatch || '未关联采购批次' }}</small><small v-if="account.repairCompletionSource">修复来源 {{ account.repairCompletionSource === 'system' ? '系统自动' : account.repairCompletionSource }}</small></td>
+          <td class="number"><strong>{{ money(account.acquisitionCostCny) }}</strong><small v-if="account.originalPriceCny != null">原价 {{ money(account.originalPriceCny) }}</small><small v-if="account.releasedCostCny">优惠 / 释放 {{ money(account.releasedCostCny) }}</small><small v-if="account.costCoverageStatus !== 'complete'" class="error-text">采购成本待补</small></td>
+          <td class="number"><strong>{{ money(account.userChargeCny) }}</strong><small>累计实际扣费</small></td>
+          <td class="number" :class="profitClass(account.profitCny)"><strong>{{ money(account.profitCny) }}</strong><small>{{ account.userChargeCny ? `${(Number(account.profitCny || 0) / Number(account.userChargeCny) * 100).toFixed(1)}%` : '--' }}</small></td>
+          <td class="number"><strong>{{ compact(account.tokens) }}</strong><small>{{ compact(account.requests) }} 次</small></td>
+          <td>{{ dateTime(account.acquiredAt || account.createdAt) }}<small>{{ account.product || modeLabel(account.costMode) }}</small></td>
+          <td>{{ dateTime(account.expiresAt) }}<small v-if="account.lastHealthAt">检查 {{ dateTime(account.lastHealthAt) }}</small><small v-else>未上报到期时间</small></td>
+          <td><div class="row-actions"><template v-if="!isOAuthSupplyAccount(account)"><button class="icon-button mini-action" title="配置成本规则" @click="openEditor(account)"><Edit3 :size="15" /></button><button class="icon-button mini-action" title="登记采购成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button></template><span v-else class="auto-ledger-label" title="成本由采购订单自动登记"><Link2 :size="14" />自动</span><button class="icon-button mini-action" title="查看成本历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
         </tr>
-        <tr v-if="!loading && !rows.length"><td colspan="8" class="table-empty">没有找到账号</td></tr>
+        <tr v-if="!loading && !rows.length"><td colspan="10" class="table-empty">当前时间和筛选条件下没有账号</td></tr>
       </tbody></table></div>
       <div v-if="pages > 1" class="pager"><button class="small-button" :disabled="page <= 1" @click="page--; load()">上一页</button><span>第 {{ page }} / {{ pages }} 页，共 {{ accounts.total }} 个账号</span><button class="small-button" :disabled="page >= pages" @click="page++; load()">下一页</button></div>
     </section>
@@ -293,7 +388,7 @@ onMounted(() => {
       <footer><button class="secondary-button" @click="editor = null">取消</button><button class="primary-button" :disabled="saving" @click="saveEditor"><Check :size="16" />保存成本规则</button></footer>
     </section></div>
 
-    <div v-if="periodEditor" class="modal-layer nested-modal" @click.self="periodEditor = null"><section class="modal form-modal period-editor-modal"><header><div><h2>{{ periodEditor.id ? '编辑固定成本期间' : '登记固定成本期间' }}</h2><p>{{ periodEditor.account.name }} · 固定采购成本按生效时间分摊</p></div><button class="icon-button" @click="periodEditor = null"><X :size="19" /></button></header>
+    <div v-if="periodEditor" class="modal-layer nested-modal" @click.self="periodEditor = null"><section class="modal form-modal period-editor-modal"><header><div><h2>{{ periodEditor.id ? '编辑采购成本' : '登记采购成本' }}</h2><p>{{ periodEditor.account.name }} · 采购金额在生效开始时间一次确认</p></div><button class="icon-button" @click="periodEditor = null"><X :size="19" /></button></header>
       <div class="form-grid">
         <label>成本模板<select v-model="periodEditor.costProfileId"><option value="">使用账号当前配置</option><option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{ profile.name }} · {{ modeLabel(profile.costMode) }}</option></select></label>
         <label>本金（CNY）<input v-model="periodEditor.baseAmount" type="number" min="0" step="0.01" /></label>
@@ -305,8 +400,8 @@ onMounted(() => {
         <label>采购批次<select v-model="periodEditor.purchaseBatch"><option value="">不选择</option><option v-for="batch in supplierBatches" :key="`${batch.supplier}-${batch.purchaseBatch}`" :value="batch.purchaseBatch">{{ batch.supplier }} · {{ batch.purchaseBatch }}</option></select></label>
         <label class="full-field">备注<textarea v-model="periodEditor.notes" rows="3"></textarea></label>
       </div>
-      <div class="form-note">总成本 = 本金 + 手续费 + 税费。修改已经开始的期间会留下审计记录。</div>
-      <footer><button class="secondary-button" @click="periodEditor = null">取消</button><button class="primary-button" :disabled="saving" @click="savePeriod"><Check :size="16" />保存固定成本</button></footer>
+      <div class="form-note">总成本 = 本金 + 手续费 + 税费。生效开始是采购成本确认时间，生效结束只表示账号服务覆盖期，不再用于线性摊销。</div>
+      <footer><button class="secondary-button" @click="periodEditor = null">取消</button><button class="primary-button" :disabled="saving" @click="savePeriod"><Check :size="16" />保存采购成本</button></footer>
     </section></div>
 
     <div v-if="history" class="modal-layer nested-modal" @click.self="history = null"><section class="modal history-modal"><header><div><h2>账号成本历史</h2><p>{{ history.account.name }} · 规则和固定成本期间</p></div><button class="icon-button" @click="history = null"><X :size="19" /></button></header>

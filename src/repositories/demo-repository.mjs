@@ -680,15 +680,73 @@ export class DemoRepository {
     return { userIds: input.userIds, updated: input.userIds.length, excludeFromBalanceStats: Boolean(input.excludeFromBalanceStats) };
   }
 
-  async listAccounts({ search = '', scope = 'current', page = 1, pageSize = 20 } = {}) {
+  async listAccounts({
+    start, end, search = '', scope = 'current', page = 1, pageSize = 20,
+    platform = '', supplier = '', status = '', costMode = '',
+    sortBy = 'createdAt', sortOrder = 'desc',
+  } = {}) {
     const filtered = this.accounts.filter((item) => {
       const deleted = Boolean(item.sourceDeletedAt);
       const matchesScope = scope === 'all'
         || (scope === 'deleted' && deleted)
-        || (scope === 'current' && !deleted && item.status === 'active');
-      return matchesScope && `${item.name} ${item.platform} ${item.supplier}`.toLowerCase().includes(search.toLowerCase());
+        || (scope === 'current' && !deleted);
+      const acquiredAt = new Date(item.acquiredAt || item.createdAt || Date.now()).getTime();
+      return matchesScope
+        && (!start || acquiredAt >= new Date(start).getTime())
+        && (!end || acquiredAt < new Date(end).getTime())
+        && (!platform || item.platform === platform)
+        && (!supplier || item.supplier === supplier)
+        && (!status || item.status === status)
+        && (!costMode || item.costMode === costMode)
+        && `${item.name} ${item.platform} ${item.supplier} ${item.purchaseBatch || ''} ${item.id}`
+          .toLowerCase().includes(search.toLowerCase());
     });
-    return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
+    const value = (item) => ({
+      createdAt: new Date(item.acquiredAt || item.createdAt || 0).getTime(),
+      name: item.name || '',
+      acquisitionCostCny: Number(item.acquisitionCostCny ?? item.periodCost ?? 0),
+      userChargeCny: Number(item.userChargeCny || 0),
+      profitCny: Number(item.userChargeCny || 0) - Number(item.acquisitionCostCny ?? item.periodCost ?? 0),
+      requests: Number(item.requests || 0),
+      tokens: Number(item.tokens || 0),
+      expiresAt: new Date(item.expiresAt || 0).getTime(),
+      status: item.status || '',
+    })[sortBy];
+    const direction = sortOrder === 'asc' ? 1 : -1;
+    filtered.sort((left, right) => {
+      const leftValue = value(left);
+      const rightValue = value(right);
+      return (typeof leftValue === 'string'
+        ? leftValue.localeCompare(rightValue, 'zh-CN')
+        : Number(leftValue) - Number(rightValue)) * direction;
+    });
+    const items = filtered.slice((page - 1) * pageSize, page * pageSize).map((item) => {
+      const acquisitionCostCny = Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      const userChargeCny = Number(item.userChargeCny || 0);
+      return {
+        ...item,
+        acquisitionCostCny,
+        bookedCostCny: acquisitionCostCny,
+        effectiveCostCny: acquisitionCostCny,
+        profitCny: userChargeCny - acquisitionCostCny,
+        bookedProfitCny: userChargeCny - acquisitionCostCny,
+        grossProfitCny: userChargeCny - acquisitionCostCny,
+      };
+    });
+    const summary = filtered.reduce((result, item) => {
+      const cost = Number(item.acquisitionCostCny ?? item.periodCost ?? 0);
+      const charge = Number(item.userChargeCny || 0);
+      result.acquisitionCostCny += cost;
+      result.userChargeCny += charge;
+      result.profitCny += charge - cost;
+      result.requests += Number(item.requests || 0);
+      result.missingCostCount += cost > 0 || item.costMode === 'free' ? 0 : 1;
+      return result;
+    }, {
+      accountCount: filtered.length, acquisitionCostCny: 0, userChargeCny: 0,
+      profitCny: 0, requests: 0, missingCostCount: 0,
+    });
+    return { items, total: filtered.length, page, pageSize, summary };
   }
 
   async listAccountCostPeriods({ accountId, page = 1, pageSize = 10 } = {}) {

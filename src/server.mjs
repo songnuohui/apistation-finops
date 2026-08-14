@@ -392,6 +392,14 @@ async function api(request,res,url){
   }
   if(request.method==='GET'&&url.pathname==='/api/accounts')return json(res,200,await cached('accounts',config.listCacheTtlSeconds,()=>repository.listAccounts({
     ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
+    ...listSort(url.searchParams,[
+      'createdAt','name','acquisitionCostCny','userChargeCny','profitCny',
+      'requests','tokens','expiresAt','status',
+    ],'createdAt'),
+    platform:filterTerm(url.searchParams,'platform',40),
+    supplier:filterTerm(url.searchParams,'supplier',120),
+    status:filterTerm(url.searchParams,'status',40),
+    costMode:filterTerm(url.searchParams,'cost_mode',40),
   })));
   if(request.method==='GET'&&url.pathname==='/api/purchase-catalog')return json(res,200,await cached('purchase-catalog',config.listCacheTtlSeconds,()=>repository.listPurchaseCatalog()));
   if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
