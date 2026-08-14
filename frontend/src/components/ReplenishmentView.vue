@@ -19,7 +19,7 @@
       <div class="metric-card danger"><span>不可用账号</span><strong>{{ dashboard.summary?.unavailableAccounts || 0 }}</strong><small>停用、过期或异常</small></div>
       <div class="metric-card"><span>修复中</span><strong>{{ dashboard.summary?.repairingAccounts || 0 }}</strong><small>等待认领或重试</small></div>
       <div class="metric-card"><span>进行中订单</span><strong>{{ dashboard.summary?.activeOrders || 0 }}</strong><small>审批、下单或导入中</small></div>
-      <div class="metric-card good"><span>累计采购成本</span><strong>{{ money(dashboard.summary?.totalCostCny) }}</strong><small>按实际支付金额</small></div>
+      <div class="metric-card good"><span>期间采购成本</span><strong>{{ money(dashboard.summary?.totalCostCny) }}</strong><small>当前筛选范围实际支付金额</small></div>
       <div class="metric-card"><span>OAuth 可用余额</span><strong>{{ moneyFen(dashboard.oauthSupply?.balance?.available_fen) }}</strong><small>总余额 {{ moneyFen(dashboard.oauthSupply?.balance?.balance_fen) }}</small></div>
     </section>
 
@@ -530,7 +530,7 @@ async function load() {
   error.value = '';
   try {
     const [nextDashboard, nextCatalog, nextMappings, nextRules, nextRecoveryPolicies] = await Promise.all([
-      get('/replenishment/dashboard'),
+      get(`/replenishment/dashboard?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`),
       get('/replenishment/catalog').catch((err: any) => ({
         groups: [], platforms: [], error: err?.message || 'Sub2API 分组目录暂时不可用',
       })),

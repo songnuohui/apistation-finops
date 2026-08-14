@@ -688,7 +688,7 @@ async function api(request,res,url){
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/dashboard'){
     return json(res,200,{
-      ...(await replenishmentRepository.dashboard()),
+      ...(await replenishmentRepository.dashboard(range())),
       oauthSupply: {
         products: await replenishmentService.products().catch((error) => ({ error: error.message })),
         balance: await replenishmentService.balance().catch((error) => ({ error: error.message })),

@@ -1137,23 +1137,35 @@ export class ReplenishmentRepository {
     return result.rows.map((row) => ({ ...order(row), itemCount: Number(row.item_count || 0) }));
   }
 
-  async getOrderSummary() {
+  async getOrderSummary({ start = null, end = null } = {}) {
     const activeStatuses = ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'];
+    const rangeStart = start ? new Date(start) : new Date(0);
+    const rangeEnd = end ? new Date(end) : new Date('9999-12-31T23:59:59.999Z');
     if (this.demo) {
+      const scopedOrders = this.orders.filter((entry) => {
+        const createdAt = new Date(entry.createdAt).getTime();
+        return createdAt >= rangeStart.getTime() && createdAt < rangeEnd.getTime();
+      });
       return {
         activeOrders: this.orders.filter((entry) => activeStatuses.includes(entry.status)).length,
-        completedOrders: this.orders.filter((entry) => entry.status === 'completed').length,
-        totalCostCny: this.orders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
-        importedAccounts: this.orders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
+        completedOrders: scopedOrders.filter((entry) => entry.status === 'completed').length,
+        totalCostCny: scopedOrders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
+        importedAccounts: scopedOrders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
       };
     }
     const result = await this.pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE status=ANY($1::text[]))::int AS active_orders,
-        COUNT(*) FILTER (WHERE status='completed')::int AS completed_orders,
-        COALESCE(SUM(actual_paid_amount_cny),0) AS total_cost_cny,
-        COALESCE(SUM(valid_quantity),0)::int AS imported_accounts
-      FROM ${this.schema}.oauth_supply_orders`, [activeStatuses]);
+        COUNT(*) FILTER (
+          WHERE created_at>=$2 AND created_at<$3 AND status='completed'
+        )::int AS completed_orders,
+        COALESCE(SUM(actual_paid_amount_cny) FILTER (
+          WHERE created_at>=$2 AND created_at<$3
+        ),0) AS total_cost_cny,
+        COALESCE(SUM(valid_quantity) FILTER (
+          WHERE created_at>=$2 AND created_at<$3
+        ),0)::int AS imported_accounts
+      FROM ${this.schema}.oauth_supply_orders`, [activeStatuses, rangeStart, rangeEnd]);
     return {
       activeOrders: Number(result.rows[0]?.active_orders || 0),
       completedOrders: Number(result.rows[0]?.completed_orders || 0),
@@ -2050,12 +2062,12 @@ export class ReplenishmentRepository {
     return result.rows.map(event);
   }
 
-  async dashboard() {
+  async dashboard({ start = null, end = null } = {}) {
     const [mappings, rules, orders, orderSummary] = await Promise.all([
       this.listMappings(),
       this.listRules(),
       this.listOrders({ limit: 20 }),
-      this.getOrderSummary(),
+      this.getOrderSummary({ start, end }),
     ]);
     return {
       mappings,
