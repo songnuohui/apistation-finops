@@ -367,9 +367,14 @@ import {
   ArrowDown, ArrowUp, ChevronRight, History, Pause, Play, Plus, RefreshCw, RotateCcw, Search,
   Settings2, ShoppingCart, Trash2, Wrench, X, Zap,
 } from 'lucide-vue-next';
-import { get, send } from '../api';
+import { get, query, rangeQuery, send } from '../api';
 
-const props = defineProps<{ refreshToken: number }>();
+const props = defineProps<{
+  refreshToken: number;
+  range?: string;
+  rangeStart?: string;
+  rangeEnd?: string;
+}>();
 const emit = defineEmits<{ (event: 'toast', message: string): void }>();
 const loading = ref(false);
 const saving = ref(false);
@@ -548,7 +553,8 @@ async function load() {
 }
 
 async function loadOrders() {
-  const params = new URLSearchParams({
+  const params = query({
+    ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
     page: String(orderPage.value),
     page_size: String(orderData.value.pageSize || 20),
     sort_by: orderSortBy.value,
@@ -566,7 +572,8 @@ async function loadOrders() {
 }
 
 async function loadRecoveries() {
-  const params = new URLSearchParams({
+  const params = query({
+    ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
     scope: recoveryTab.value,
     page: String(recoveryPage.value),
     page_size: String(recoveryData.value.pageSize || 20),
@@ -647,8 +654,12 @@ async function moveRecoveryPage(delta: number) {
 async function loadEvents() {
   eventsLoading.value = true;
   try {
-    const filter = eventRuleId.value ? `&ruleId=${encodeURIComponent(eventRuleId.value)}` : '';
-    executionEvents.value = await get(`/replenishment/events?limit=100${filter}`);
+    const params = query({
+      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
+      limit: 100,
+      ruleId: eventRuleId.value,
+    });
+    executionEvents.value = await get(`/replenishment/events?${params}`);
   } catch (err: any) {
     error.value = err.message || '执行日志读取失败';
   } finally {
@@ -863,5 +874,9 @@ async function completeRecoveryManually(recovery: any) {
 }
 
 onMounted(load);
-watch(() => props.refreshToken, load);
+watch(() => props.refreshToken, () => {
+  orderPage.value = 1;
+  recoveryPage.value = 1;
+  load();
+});
 </script>

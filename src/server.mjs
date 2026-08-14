@@ -730,6 +730,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/replenishment/events'){
     const ruleId=url.searchParams.get('ruleId');
     return json(res,200,await replenishmentRepository.listEvents({
+      ...range(),
       ruleId:ruleId?Number(ruleId):null,
       limit:Math.min(200,Math.max(1,Number(url.searchParams.get('limit')||100))),
     }));
@@ -769,6 +770,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/replenishment/orders'){
     return json(res,200,await replenishmentRepository.listOrderPage({
       ...page(),
+      ...range(),
       search:searchTerm(url.searchParams),
       filters:{
         orderId:filterTerm(url.searchParams,'order_id',40),
@@ -798,6 +800,7 @@ async function api(request,res,url){
     if(!['pending','completed','all'].includes(scope))return json(res,400,{error:'invalid recovery scope'});
     return json(res,200,await replenishmentService.recoveries({
       ...page(),
+      ...range(),
       scope,
       search:searchTerm(url.searchParams),
       filters:{
@@ -950,14 +953,14 @@ async function readiness(){
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
-     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth', '032_oauth_supply_replenishment', '033_replenishment_inventory_recovery', '034_replenishment_lifecycle', '035_replenishment_execution_logs', '036_supplier_refresh_token_auth', '037_replenishment_scheduling_recovery_policies', '038_replenishment_model_whitelist', '039_replenishment_recovery_completion', '040_replenishment_recovery_semantics', '041_replenishment_expiry_metadata_cleanup', '042_replenishment_expiry_metadata_guard', '043_replenishment_manual_compensation', '044_replenishment_remove_order_cooldown', '045_replenishment_manual_completion_guard']],
+     [['002_cny_accounting', '003_reconciliation_snapshots', '004_cost_accounting_v2', '005_cost_snapshot_ledger', '006_group_monitoring', '007_source_group_catalog', '008_monitor_settings', '009_monitor_ping_latency', '010_multiplier_effective_history', '011_backfill_current_day_multiplier_rules', '012_cost_rule_archiving', '013_audited_cost_repricing', '014_operational_visibility', '015_canonical_usage_models', '016_supplier_monitoring', '017_supplier_key_cost_rules', '018_backfill_supplier_key_cost_links', '019_supplier_interval_seconds', '020_supplier_quality_monitoring', '021_qq_alert_notifications', '022_usage_cost_snapshot_performance', '023_incremental_cost_repricing', '024_account_profit_guard', '025_profit_guard_empty_group_default', '026_profit_guard_threshold_modes', '027_sub2api_service_auth', '028_sub2api_service_auth_api_key', '029_supplier_profit_guard_defaults', '030_profit_guard_auto_assignment', '031_oauth_supply_auth', '032_oauth_supply_replenishment', '033_replenishment_inventory_recovery', '034_replenishment_lifecycle', '035_replenishment_execution_logs', '036_supplier_refresh_token_auth', '037_replenishment_scheduling_recovery_policies', '038_replenishment_model_whitelist', '039_replenishment_recovery_completion', '040_replenishment_recovery_semantics', '041_replenishment_expiry_metadata_cleanup', '042_replenishment_expiry_metadata_guard', '043_replenishment_manual_compensation', '044_replenishment_remove_order_cooldown', '045_replenishment_manual_completion_guard', '046_replenishment_list_performance']],
   );
-  if(migration.rowCount < 44)throw new Error('required FinOps migrations through 045_replenishment_manual_completion_guard are not applied');
+  if(migration.rowCount < 45)throw new Error('required FinOps migrations through 046_replenishment_list_performance are not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard','046_replenishment_list_performance'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),

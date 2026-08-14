@@ -463,13 +463,11 @@ export class ReplenishmentService {
 
   async recoveries({
     scope = 'pending', page = 1, pageSize = 20, offset = 0,
-    search = '', filters = {}, sortBy = 'created_at', sortOrder = 'desc',
+    search = '', filters = {}, start = null, end = null,
+    sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
-    await this.syncSupplierRecoveries().catch((error) => {
-      this.logger.warn('[replenishment] recovery sync failed', error?.message || error);
-    });
     return this.repository.listRecoveryFeed({
-      scope, page, pageSize, offset, search, filters, sortBy, sortOrder,
+      scope, page, pageSize, offset, search, filters, start, end, sortBy, sortOrder,
     });
   }
 

@@ -433,7 +433,14 @@ function syncBodyScrollLock() {
         <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <SupplierManagementView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken + supplierKeyRefreshToken + qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <OAuthSupplyView v-else-if="page === 'oauth-supply'" :refresh-token="oauthSupplyRefreshToken" @toast="showToast" />
-        <ReplenishmentView v-else-if="page === 'replenishment'" :refresh-token="replenishmentRefreshToken" @toast="showToast" />
+        <ReplenishmentView
+          v-else-if="page === 'replenishment'"
+          :refresh-token="replenishmentRefreshToken"
+          :range="range"
+          :range-start="customStart"
+          :range-end="customEnd"
+          @toast="showToast"
+        />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">

@@ -1164,9 +1164,11 @@ export class ReplenishmentRepository {
 
   async listOrderPage({
     page = 1, pageSize = 20, offset = 0, search = '', filters = {},
-    sortBy = 'created_at', sortOrder = 'desc',
+    start = null, end = null, sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
     if (this.demo) {
+      const rangeStart = start ? new Date(start).getTime() : Number.NEGATIVE_INFINITY;
+      const rangeEnd = end ? new Date(end).getTime() : Number.POSITIVE_INFINITY;
       const rows = this.orders.map((entry) => {
           const selectedItems = this.items.filter((itemEntry) => itemEntry.orderId === entry.id);
           const selectedRule = this.rules.find((ruleEntry) => ruleEntry.id === entry.ruleId);
@@ -1199,6 +1201,8 @@ export class ReplenishmentRepository {
           const includes = (value, filter) => !filter
             || String(value ?? '').toLocaleLowerCase().includes(String(filter).toLocaleLowerCase());
           return matchesSearch
+            && new Date(entry.createdAt).getTime() >= rangeStart
+            && new Date(entry.createdAt).getTime() < rangeEnd
             && includes(entry.id, filters.orderId)
             && includes(entry.externalOrderId, filters.externalOrderId)
             && (!filters.accountName || selectedItems.some((itemEntry) => includes(
@@ -1255,96 +1259,100 @@ export class ReplenishmentRepository {
     };
     const sortColumn = orderSortColumns[sortBy] || orderSortColumns.created_at;
     const direction = sortOrder === 'asc' ? 'ASC' : 'DESC';
-    const [result, countResult] = await Promise.all([
-      this.pool.query(`
-        WITH order_rows AS (
-          SELECT o.*,r.name AS rule_name,run.trigger,run.mode AS run_mode,
-            run.failed_quantity,m.target_group_ids,
-            COUNT(i.id)::int AS item_count,
-            COUNT(i.id) FILTER (WHERE i.health_status=ANY($1::text[]))::int AS healthy_item_count,
-            COUNT(i.id) FILTER (WHERE i.health_status='low_quota')::int AS low_quota_item_count,
-            COUNT(i.id) FILTER (WHERE i.health_status='unavailable')::int AS unavailable_item_count,
-            COUNT(i.id) FILTER (WHERE i.health_status='repairing')::int AS repairing_item_count
-          FROM ${this.schema}.oauth_supply_orders o
-          JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
-          JOIN ${this.schema}.replenishment_runs run ON run.id=o.run_id
-          JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
-          LEFT JOIN ${this.schema}.oauth_supply_order_items i ON i.order_id=o.id
-          WHERE ($2='' OR o.id::text ILIKE '%'||$2||'%'
-            OR COALESCE(o.external_order_id,'') ILIKE '%'||$2||'%'
-            OR r.name ILIKE '%'||$2||'%'
-            OR o.product ILIKE '%'||$2||'%'
-            OR EXISTS (
-              SELECT 1
-              FROM ${this.schema}.oauth_supply_order_items search_item
-              WHERE search_item.order_id=o.id
-                AND (search_item.account_name ILIKE '%'||$2||'%'
-                  OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$2||'%'
-                  OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$2||'%')
-            ))
-            AND ($3='' OR o.id::text ILIKE '%'||$3||'%')
-            AND ($4='' OR COALESCE(o.external_order_id,'') ILIKE '%'||$4||'%')
-            AND ($5='' OR EXISTS (
-              SELECT 1 FROM ${this.schema}.oauth_supply_order_items account_item
-              WHERE account_item.order_id=o.id
-                AND (account_item.account_name ILIKE '%'||$5||'%'
-                  OR COALESCE(account_item.external_account_key,'') ILIKE '%'||$5||'%')
-            ))
-            AND ($6='' OR EXISTS (
-              SELECT 1 FROM ${this.schema}.oauth_supply_order_items sub2api_item
-              WHERE sub2api_item.order_id=o.id
-                AND COALESCE(sub2api_item.sub2api_account_id::text,'') ILIKE '%'||$6||'%'
-            ))
-            AND ($7='' OR r.name ILIKE '%'||$7||'%' OR o.product ILIKE '%'||$7||'%')
-            AND ($8='' OR o.status ILIKE '%'||$8||'%')
-          GROUP BY o.id,r.name,run.trigger,run.mode,run.failed_quantity,m.target_group_ids
-        )
-        SELECT order_rows.*
-        FROM order_rows
-        ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
-        LIMIT $9 OFFSET $10`,
-      [
-        ['healthy', 'quota_unknown'], query,
-        selectedFilters.orderId, selectedFilters.externalOrderId, selectedFilters.accountName,
-        selectedFilters.sub2apiAccountId, selectedFilters.ruleProduct, selectedFilters.status,
-        pageSize, offset,
-      ]),
-      this.pool.query(`
-        SELECT COUNT(*)::int AS total
+    const values = [];
+    const parameter = (value) => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    const rangeStart = start ? new Date(start) : new Date(0);
+    const rangeEnd = end ? new Date(end) : new Date('9999-12-31T23:59:59.999Z');
+    const conditions = [
+      `o.created_at>=${parameter(rangeStart)}`,
+      `o.created_at<${parameter(rangeEnd)}`,
+    ];
+    if (query) {
+      const placeholder = parameter(query);
+      conditions.push(`(o.id::text ILIKE '%'||${placeholder}||'%'
+        OR COALESCE(o.external_order_id,'') ILIKE '%'||${placeholder}||'%'
+        OR r.name ILIKE '%'||${placeholder}||'%'
+        OR o.product ILIKE '%'||${placeholder}||'%'
+        OR EXISTS (
+          SELECT 1 FROM ${this.schema}.oauth_supply_order_items search_item
+          WHERE search_item.order_id=o.id
+            AND (search_item.account_name ILIKE '%'||${placeholder}||'%'
+              OR COALESCE(search_item.external_account_key,'') ILIKE '%'||${placeholder}||'%'
+              OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||${placeholder}||'%')
+        ))`);
+    }
+    if (selectedFilters.orderId) {
+      const placeholder = parameter(selectedFilters.orderId);
+      conditions.push(/^\d+$/.test(selectedFilters.orderId)
+        ? `o.id=${placeholder}::bigint`
+        : `o.id::text ILIKE '%'||${placeholder}||'%'`);
+    }
+    if (selectedFilters.externalOrderId) {
+      const placeholder = parameter(selectedFilters.externalOrderId);
+      conditions.push(`COALESCE(o.external_order_id,'') ILIKE '%'||${placeholder}||'%'`);
+    }
+    if (selectedFilters.accountName) {
+      const placeholder = parameter(selectedFilters.accountName);
+      conditions.push(`EXISTS (
+        SELECT 1 FROM ${this.schema}.oauth_supply_order_items account_item
+        WHERE account_item.order_id=o.id
+          AND (account_item.account_name ILIKE '%'||${placeholder}||'%'
+            OR COALESCE(account_item.external_account_key,'') ILIKE '%'||${placeholder}||'%')
+      )`);
+    }
+    if (selectedFilters.sub2apiAccountId) {
+      const placeholder = parameter(selectedFilters.sub2apiAccountId);
+      conditions.push(`EXISTS (
+        SELECT 1 FROM ${this.schema}.oauth_supply_order_items sub2api_item
+        WHERE sub2api_item.order_id=o.id
+          AND COALESCE(sub2api_item.sub2api_account_id::text,'') ILIKE '%'||${placeholder}||'%'
+      )`);
+    }
+    if (selectedFilters.ruleProduct) {
+      const placeholder = parameter(selectedFilters.ruleProduct);
+      conditions.push(`(r.name ILIKE '%'||${placeholder}||'%' OR o.product ILIKE '%'||${placeholder}||'%')`);
+    }
+    if (selectedFilters.status) {
+      conditions.push(`o.status=${parameter(selectedFilters.status)}`);
+    }
+    const limitPlaceholder = parameter(pageSize);
+    const offsetPlaceholder = parameter(offset);
+    const result = await this.pool.query(`
+      WITH filtered_orders AS MATERIALIZED (
+        SELECT o.*,r.name AS rule_name,run.trigger,run.mode AS run_mode,
+          run.failed_quantity,m.target_group_ids
         FROM ${this.schema}.oauth_supply_orders o
         JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
-        WHERE ($1='' OR o.id::text ILIKE '%'||$1||'%'
-          OR COALESCE(o.external_order_id,'') ILIKE '%'||$1||'%'
-          OR r.name ILIKE '%'||$1||'%'
-          OR o.product ILIKE '%'||$1||'%'
-          OR EXISTS (
-            SELECT 1
-            FROM ${this.schema}.oauth_supply_order_items search_item
-            WHERE search_item.order_id=o.id
-              AND (search_item.account_name ILIKE '%'||$1||'%'
-                OR COALESCE(search_item.external_account_key,'') ILIKE '%'||$1||'%'
-                OR COALESCE(search_item.sub2api_account_id::text,'') ILIKE '%'||$1||'%')
-          ))
-          AND ($2='' OR o.id::text ILIKE '%'||$2||'%')
-          AND ($3='' OR COALESCE(o.external_order_id,'') ILIKE '%'||$3||'%')
-          AND ($4='' OR EXISTS (
-            SELECT 1 FROM ${this.schema}.oauth_supply_order_items account_item
-            WHERE account_item.order_id=o.id
-              AND (account_item.account_name ILIKE '%'||$4||'%'
-                OR COALESCE(account_item.external_account_key,'') ILIKE '%'||$4||'%')
-          ))
-          AND ($5='' OR EXISTS (
-            SELECT 1 FROM ${this.schema}.oauth_supply_order_items sub2api_item
-            WHERE sub2api_item.order_id=o.id
-              AND COALESCE(sub2api_item.sub2api_account_id::text,'') ILIKE '%'||$5||'%'
-          ))
-          AND ($6='' OR r.name ILIKE '%'||$6||'%' OR o.product ILIKE '%'||$6||'%')
-          AND ($7='' OR o.status ILIKE '%'||$7||'%')`, [
-        query, selectedFilters.orderId, selectedFilters.externalOrderId, selectedFilters.accountName,
-        selectedFilters.sub2apiAccountId, selectedFilters.ruleProduct, selectedFilters.status,
-      ]),
-    ]);
-    const total = Number(countResult.rows[0]?.total || 0);
+        JOIN ${this.schema}.replenishment_runs run ON run.id=o.run_id
+        JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+        WHERE ${conditions.join('\n          AND ')}
+      ),
+      paged_orders AS (
+        SELECT filtered_orders.*,(COUNT(*) OVER())::int AS total_count
+        FROM filtered_orders
+        ORDER BY ${sortColumn} ${direction} NULLS LAST,id DESC
+        LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}
+      )
+      SELECT paged_orders.*,
+        item_stats.item_count,item_stats.healthy_item_count,item_stats.low_quota_item_count,
+        item_stats.unavailable_item_count,item_stats.repairing_item_count
+      FROM paged_orders
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(item.id)::int AS item_count,
+          COUNT(item.id) FILTER (WHERE item.health_status=ANY(ARRAY['healthy','quota_unknown']::text[]))::int AS healthy_item_count,
+          COUNT(item.id) FILTER (WHERE item.health_status='low_quota')::int AS low_quota_item_count,
+          COUNT(item.id) FILTER (WHERE item.health_status='unavailable')::int AS unavailable_item_count,
+          COUNT(item.id) FILTER (WHERE item.health_status='repairing')::int AS repairing_item_count
+        FROM ${this.schema}.oauth_supply_order_items item
+        WHERE item.order_id=paged_orders.id
+      ) item_stats ON TRUE
+      ORDER BY paged_orders.${sortColumn} ${direction} NULLS LAST,paged_orders.id DESC`,
+    values);
+    const total = Number(result.rows[0]?.total_count || 0);
     return {
       items: result.rows.map(order),
       page,
@@ -1356,9 +1364,12 @@ export class ReplenishmentRepository {
 
   async listRecoveryFeed({
     scope = 'pending', page = 1, pageSize = 20, offset = 0,
-    search = '', filters = {}, sortBy = 'created_at', sortOrder = 'desc',
+    search = '', filters = {}, start = null, end = null,
+    sortBy = 'created_at', sortOrder = 'desc',
   } = {}) {
     if (this.demo) {
+      const rangeStart = start ? new Date(start).getTime() : Number.NEGATIVE_INFINITY;
+      const rangeEnd = end ? new Date(end).getTime() : Number.POSITIVE_INFINITY;
       const recoveryItemIds = new Set(this.recoveries.map((entry) => Number(entry.orderItemId)));
       const accountEntries = await Promise.all(this.recoveries.map(async (entry) => {
         const job = await this.getRecovery(entry.id);
@@ -1499,6 +1510,8 @@ export class ReplenishmentRepository {
             entry.targetAccountId, entry.product, entry.ruleName, entry.status,
           ].some((value) => String(value ?? '').toLocaleLowerCase().includes(query));
           return matchesSearch
+            && new Date(entry.createdAt).getTime() >= rangeStart
+            && new Date(entry.createdAt).getTime() < rangeEnd
             && includes(`${entry.accountName} ${entry.externalAccountKey}`, filters.accountName)
             && includes(entry.orderId, filters.orderId)
             && includes(entry.externalOrderId, filters.externalOrderId)
@@ -1534,6 +1547,8 @@ export class ReplenishmentRepository {
       };
     }
 
+    const rangeStart = start ? new Date(start) : new Date(0);
+    const rangeEnd = end ? new Date(end) : new Date('9999-12-31T23:59:59.999Z');
     const feedSql = `
       WITH recovery_feed AS (
         SELECT
@@ -1551,6 +1566,7 @@ export class ReplenishmentRepository {
         JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
         JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
         JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
+        WHERE rr.created_at>=$1 AND rr.created_at<$2
 
         UNION ALL
 
@@ -1570,7 +1586,8 @@ export class ReplenishmentRepository {
         JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
         JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
         JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
-        WHERE i.status=ANY(ARRAY['retry_wait','manual_required']::text[])
+        WHERE i.created_at>=$1 AND i.created_at<$2
+          AND i.status=ANY(ARRAY['retry_wait','manual_required']::text[])
 
         UNION ALL
 
@@ -1591,7 +1608,8 @@ export class ReplenishmentRepository {
         JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
         JOIN ${this.schema}.replenishment_rules r ON r.id=o.rule_id
         JOIN ${this.schema}.oauth_supply_product_mappings m ON m.id=r.product_mapping_id
-        WHERE i.status='imported'
+        WHERE i.created_at>=$1 AND i.created_at<$2
+          AND i.status='imported'
           AND i.verification_status=ANY(ARRAY['passed','repaired']::text[])
           AND i.import_attempt_count>0
           AND NOT EXISTS (
@@ -1646,20 +1664,21 @@ export class ReplenishmentRepository {
       this.pool.query(`${feedSql}
         SELECT recovery_feed.*,COUNT(*) OVER() AS total_count
         FROM recovery_feed
-        WHERE ($1='all'
-          OR ($1='completed' AND status='recovered')
-          OR ($1='pending' AND status<>'recovered'))
-          AND ${searchCondition('$2')}
-          ${filterCondition(3)}
+        WHERE ($3='all'
+          OR ($3='completed' AND status='recovered')
+          OR ($3='pending' AND status<>'recovered'))
+          AND ${searchCondition('$4')}
+          ${filterCondition(5)}
         ORDER BY ${sortColumn} ${direction} NULLS LAST,order_item_id DESC,feed_id DESC
-        LIMIT $8 OFFSET $9`, [scope, query, ...filterValues, pageSize, offset]),
+        LIMIT $10 OFFSET $11`,
+      [rangeStart, rangeEnd, scope, query, ...filterValues, pageSize, offset]),
       this.pool.query(`${feedSql}
         SELECT
           COUNT(*) FILTER (WHERE status<>'recovered')::int AS pending_total,
           COUNT(*) FILTER (WHERE status='recovered')::int AS completed_total
         FROM recovery_feed
-        WHERE ${searchCondition('$1')}
-          ${filterCondition(2)}`, [query, ...filterValues]),
+        WHERE ${searchCondition('$3')}
+          ${filterCondition(4)}`, [rangeStart, rangeEnd, query, ...filterValues]),
     ]);
     const pendingTotal = Number(totalsResult.rows[0]?.pending_total || 0);
     const completedTotal = Number(totalsResult.rows[0]?.completed_total || 0);
@@ -1996,12 +2015,18 @@ export class ReplenishmentRepository {
     return event(result.rows[0]);
   }
 
-  async listEvents({ ruleId = null, limit = 100 } = {}) {
+  async listEvents({ ruleId = null, limit = 100, start = null, end = null } = {}) {
     const selectedRuleId = ruleId === null || ruleId === undefined || ruleId === '' ? null : Number(ruleId);
     const selectedLimit = Math.min(200, Math.max(1, Number(limit) || 100));
+    const rangeStart = start ? new Date(start) : new Date(0);
+    const rangeEnd = end ? new Date(end) : new Date('9999-12-31T23:59:59.999Z');
     if (this.demo) {
       return [...this.events]
         .filter((entry) => selectedRuleId === null || Number(entry.ruleId) === selectedRuleId)
+        .filter((entry) => {
+          const createdAt = new Date(entry.createdAt).getTime();
+          return createdAt >= rangeStart.getTime() && createdAt < rangeEnd.getTime();
+        })
         .sort((left, right) => right.id - left.id)
         .slice(0, selectedLimit)
         .map((entry) => ({
@@ -2018,8 +2043,10 @@ export class ReplenishmentRepository {
       LEFT JOIN ${this.schema}.replenishment_rules replenishment_rule
         ON replenishment_rule.id=COALESCE(e.rule_id,run.rule_id,replenishment_order.rule_id)
       WHERE ($1::bigint IS NULL OR COALESCE(e.rule_id,run.rule_id,replenishment_order.rule_id)=$1)
+        AND e.created_at>=$2
+        AND e.created_at<$3
       ORDER BY e.created_at DESC,e.id DESC
-      LIMIT $2`, [selectedRuleId, selectedLimit]);
+      LIMIT $4`, [selectedRuleId, rangeStart, rangeEnd, selectedLimit]);
     return result.rows.map(event);
   }
 
