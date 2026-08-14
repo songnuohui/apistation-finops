@@ -641,7 +641,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 .account-cost-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
 .account-cost-filterbar{
   display:grid;
-  grid-template-columns:minmax(260px,1.7fr) 130px 150px 170px 130px auto;
+  grid-template-columns:minmax(320px,1.8fr) 160px 190px auto;
   gap:9px;
   align-items:end;
   padding:14px 16px;
@@ -685,7 +685,7 @@ html,body,#app{max-width:100%;overflow-x:hidden}
 
 @media(max-width:1150px){
   .account-cost-filterbar{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .account-search{grid-column:span 2}
+  .account-search{grid-column:span 3}
 }
 @media(max-width:760px){
   .account-cost-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}

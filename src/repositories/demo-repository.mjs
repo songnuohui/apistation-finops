@@ -902,6 +902,10 @@ export class DemoRepository {
     });
     return {
       suppliers: [...supplierByKey.values()].sort((left, right) => left.localeCompare(right, 'zh-CN')),
+      filterSuppliers: [...new Set([
+        'OAuth Supply',
+        ...this.supplierConnections.map((item) => item.supplierName).filter(Boolean),
+      ])].sort((left, right) => left.localeCompare(right, 'zh-CN')),
       batches: [...batches.values()].sort((left, right) => (
         left.supplier.localeCompare(right.supplier, 'zh-CN')
         || left.purchaseBatch.localeCompare(right.purchaseBatch, 'zh-CN')

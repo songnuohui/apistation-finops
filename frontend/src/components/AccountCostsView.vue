@@ -14,13 +14,13 @@ const page = ref(1);
 const pageSize = ref(20);
 const loading = ref(false);
 const accounts = ref<AnyRecord>({});
-const catalog = ref<AnyRecord>({ suppliers: [], batches: [], supplierKeys: [] });
+const catalog = ref<AnyRecord>({ suppliers: [], filterSuppliers: [], batches: [], supplierKeys: [] });
 const profiles = ref<AnyRecord[]>([]);
 const editor = ref<AnyRecord | null>(null);
 const periodEditor = ref<AnyRecord | null>(null);
 const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
-const emptyFilters = () => ({ search: '', platform: '', supplier: '', status: '', costMode: '' });
+const emptyFilters = () => ({ search: '', supplier: '', costMode: '' });
 const filters = ref(emptyFilters());
 const appliedFilters = ref(emptyFilters());
 const sortBy = ref('createdAt');
@@ -32,10 +32,9 @@ let editorOptionsLoaded = false;
 const rows = computed(() => accounts.value.items || []);
 const summary = computed(() => accounts.value.summary || {});
 const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total || 0) / pageSize.value)));
-const suppliers = computed(() => [...new Set([
-  ...(catalog.value.suppliers || []),
-  ...rows.value.map((item: AnyRecord) => item.supplier).filter(Boolean),
-])].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
+const suppliers = computed(() => [...new Set(
+  catalog.value.filterSuppliers || catalog.value.suppliers || [],
+)].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
 const selectedSupplierKeys = computed(() => (catalog.value.supplierKeys || []).filter((item: AnyRecord) => (
   !item.accountId || Number(item.accountId) === Number(editor.value?.id)
 )));
@@ -153,9 +152,7 @@ async function load() {
       page: page.value,
       page_size: pageSize.value,
       search: appliedFilters.value.search,
-      platform: appliedFilters.value.platform,
       supplier: appliedFilters.value.supplier,
-      status: appliedFilters.value.status,
       cost_mode: appliedFilters.value.costMode,
       sort_by: sortBy.value,
       sort_order: sortOrder.value,
@@ -359,11 +356,9 @@ onMounted(() => {
     </div>
 
     <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
-      <label class="account-search"><span>账号 / 订单 / Sub2API</span><div><Search :size="15" /><input v-model.trim="filters.search" placeholder="账号名称、邮箱、订单号或账号编号" /></div></label>
-      <label><span>平台</span><select v-model="filters.platform"><option value="">全部平台</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
+      <label class="account-search"><span>账号搜索</span><div><Search :size="15" /><input v-model.trim="filters.search" placeholder="搜索账号..." /></div></label>
       <label><span>成本类型</span><select v-model="filters.costMode"><option value="">全部类型</option><option value="fixed_purchase">固定采购</option><option value="probe_multiplier">供应商倍率</option><option value="manual_multiplier">手动倍率</option><option value="free">免费资源</option><option value="unconfigured">未配置</option></select></label>
       <label><span>供应商</span><select v-model="filters.supplier"><option value="">全部供应商</option><option v-for="item in suppliers" :key="item" :value="item">{{ item }}</option></select></label>
-      <label><span>账号状态</span><select v-model="filters.status"><option value="">全部状态</option><option value="active">可调度</option><option value="disabled">已停用</option><option value="error">异常</option></select></label>
       <div class="filter-actions">
         <button class="icon-button filter-submit" type="submit" title="查询" :disabled="loading"><RefreshCw v-if="loading" :size="15" class="spin" /><Search v-else :size="15" /></button>
         <button class="icon-button" type="button" title="清空筛选" :disabled="loading" @click="clearFilters"><RotateCcw :size="15" /></button>

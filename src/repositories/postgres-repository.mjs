@@ -1764,7 +1764,7 @@ export class PostgresRepository {
   }
 
   async listPurchaseCatalog() {
-    const [suppliers, batches, supplierKeys] = await Promise.all([
+    const [suppliers, filterSuppliers, batches, supplierKeys] = await Promise.all([
       this.pool.query(`
         SELECT DISTINCT ON (LOWER(name)) name
         FROM (
@@ -1773,6 +1773,22 @@ export class PostgresRepository {
           SELECT NULLIF(BTRIM(supplier),'') AS name FROM ${this.schema}.dim_accounts
           UNION ALL
           SELECT NULLIF(BTRIM(supplier),'') AS name FROM ${this.schema}.account_cost_periods
+        ) source
+        WHERE name IS NOT NULL AND name <> ''
+        ORDER BY LOWER(name),name`),
+      this.pool.query(`
+        SELECT DISTINCT ON (LOWER(name)) name
+        FROM (
+          SELECT s.name
+          FROM ${this.schema}.suppliers s
+          WHERE s.status='active'
+            AND EXISTS (
+              SELECT 1
+              FROM ${this.schema}.supplier_connections c
+              WHERE c.supplier_id=s.id
+            )
+          UNION ALL
+          SELECT 'OAuth Supply'
         ) source
         WHERE name IS NOT NULL AND name <> ''
         ORDER BY LOWER(name),name`),
@@ -1837,6 +1853,7 @@ export class PostgresRepository {
     }
     return {
       suppliers: suppliers.rows.map((row) => row.name),
+      filterSuppliers: filterSuppliers.rows.map((row) => row.name),
       batches: [...uniqueBatches.values()],
       supplierKeys: keyCatalog,
     };
