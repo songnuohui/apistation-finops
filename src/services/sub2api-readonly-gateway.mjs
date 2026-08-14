@@ -146,7 +146,7 @@ export class Sub2ApiReadonlyGateway {
     });
   }
 
-  async listAccountIds(filters = {}) {
+  async listAllAccounts(filters = {}) {
     const first = await this.listAccounts({ ...filters, page: 1, pageSize: 100 });
     const firstItems = first?.items || first?.accounts || [];
     const total = Number(first?.total ?? firstItems.length);
@@ -156,7 +156,11 @@ export class Sub2ApiReadonlyGateway {
         this.listAccounts({ ...filters, page: index + 2, pageSize: 100 })
       )))
       : [];
-    return [...firstItems, ...remaining.flatMap((payload) => payload?.items || payload?.accounts || [])]
+    return [...firstItems, ...remaining.flatMap((payload) => payload?.items || payload?.accounts || [])];
+  }
+
+  async listAccountIds(filters = {}) {
+    return (await this.listAllAccounts(filters))
       .map((account) => Number(account?.id))
       .filter((id) => Number.isSafeInteger(id) && id > 0);
   }

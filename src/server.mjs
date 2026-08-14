@@ -87,6 +87,7 @@ const pendingLogins=new PendingLoginStore();
 supplierMonitorService?.setProfitGuardService(accountProfitGuardService);
 sub2ApiReadonlyGateway.setAccessTokenProvider(sub2ApiServiceAuthService);
 syncService?.setSub2ApiAccessTokenProvider(sub2ApiServiceAuthService);
+syncService?.setAccountDimensionReader(() => sub2ApiReadonlyGateway.listAllAccounts({ status: '' }));
 syncService?.setChannelMonitorReader(({accessToken,authHeaders})=>listSub2ApiChannelMonitors({accessToken,authHeaders},config));
 syncService?.setSourceGroupCatalogReader(({accessToken,authHeaders})=>listSub2ApiAdminGroups({accessToken,authHeaders},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));

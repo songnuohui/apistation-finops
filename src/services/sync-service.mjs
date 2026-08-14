@@ -194,6 +194,7 @@ export class SyncService {
     this.sourceGroupCatalogWriter = null;
     this.runtimeStatusReader = null;
     this.runtimeConcurrencyReader = null;
+    this.accountDimensionReader = null;
     this.readCacheInvalidator = null;
     this.sub2ApiAccessToken = '';
     this.sub2ApiAccessTokenProvider = null;
@@ -213,6 +214,10 @@ export class SyncService {
 
   setRuntimeStatusReader(reader) {
     this.runtimeStatusReader = typeof reader === 'function' ? reader : null;
+  }
+
+  setAccountDimensionReader(reader) {
+    this.accountDimensionReader = typeof reader === 'function' ? reader : null;
   }
 
   setRuntimeConcurrencyReader(reader) {
@@ -592,13 +597,18 @@ export class SyncService {
             COALESCE(total_recharged,0) AS total_recharged,deleted_at,updated_at
           FROM ${this.source}.users`),
         this.sourcePool.query(`
-          SELECT account.id,account.name,account.platform,account.type,account.status,
-            account.expires_at,account.schedulable,account.rate_limit_reset_at,
-            account.temp_unschedulable_until,account.deleted_at,account.updated_at,
-            COALESCE(account.extra->>'privacy_mode','') AS privacy_mode,
-            account.extra->'upstream_billing_probe' AS upstream_billing_probe
+          SELECT id,name,platform,type,status,expires_at,deleted_at,updated_at,
+            extra->'upstream_billing_probe' AS upstream_billing_probe
           FROM ${this.source}.accounts account`),
       ]);
+      const sourceAccountRows = this.accountDimensionReader
+        ? await this.accountDimensionReader()
+        : [];
+      const sourceAccountById = new Map(
+        (Array.isArray(sourceAccountRows) ? sourceAccountRows : [])
+          .map((row) => [Number(row?.id), row])
+          .filter(([id]) => Number.isSafeInteger(id) && id > 0),
+      );
       await inTransaction(this.finopsPool, async (client) => {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('apistation_finops_dimension_writes'))");
         for (const row of users.rows) await client.query(`
@@ -612,6 +622,10 @@ export class SyncService {
             source_deleted_at=EXCLUDED.source_deleted_at,source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
         [row.id, row.email, row.username, row.status, row.balance, row.total_recharged, row.deleted_at, row.updated_at]);
         for (const row of accounts.rows) {
+          const sourceAccount = sourceAccountById.get(Number(row.id)) || {};
+          const sourceExtra = sourceAccount.extra && typeof sourceAccount.extra === 'object'
+            ? sourceAccount.extra
+            : {};
           await client.query(`
             INSERT INTO ${this.schema}.dim_accounts(
               source_account_id,name,platform,account_type,status,expires_at,source_deleted_at,
@@ -627,11 +641,20 @@ export class SyncService {
               source_updated_at=EXCLUDED.source_updated_at,synced_at=NOW()`,
           [
             row.id, row.name, row.platform, row.type, row.status, row.expires_at, row.deleted_at,
-            row.privacy_mode, row.schedulable, row.rate_limit_reset_at,
-            row.temp_unschedulable_until, row.updated_at,
+            String(sourceExtra.privacy_mode || sourceAccount.privacy_mode || ''),
+            sourceAccount.schedulable ?? true, sourceAccount.rate_limit_reset_at,
+            sourceAccount.temp_unschedulable_until, row.updated_at,
           ]);
-          const rateObservation = await this.upsertUpstreamBillingSnapshot(client, row.id, row.upstream_billing_probe);
-          await this.upsertAccountDailySnapshot(client, row, rateObservation);
+          const rateObservation = await this.upsertUpstreamBillingSnapshot(
+            client,
+            row.id,
+            row.upstream_billing_probe,
+          );
+          await this.upsertAccountDailySnapshot(
+            client,
+            { ...row, schedulable: sourceAccount.schedulable ?? true },
+            rateObservation,
+          );
         }
       });
     } catch (error) {
