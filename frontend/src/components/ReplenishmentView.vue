@@ -24,10 +24,10 @@
     </section>
 
     <nav class="replenishment-tabs" aria-label="自动补号工作区">
-      <button :class="{ active: activeSection === 'setup' }" @click="activeSection = 'setup'"><Settings2 :size="16" /><span>策略与映射</span><small>{{ rules.length }}</small></button>
-      <button :class="{ active: activeSection === 'logs' }" @click="activeSection = 'logs'"><History :size="16" /><span>执行日志</span><small>{{ executionEvents.length }}</small></button>
-      <button :class="{ active: activeSection === 'orders' }" @click="activeSection = 'orders'"><ShoppingCart :size="16" /><span>补号订单</span><small>{{ orderData.total || 0 }}</small></button>
-      <button :class="{ active: activeSection === 'repairs' }" @click="activeSection = 'repairs'"><Wrench :size="16" /><span>账号修复</span><small>{{ recoveryData.pendingTotal || 0 }}</small></button>
+      <button :class="{ active: activeSection === 'setup' }" @click="changeSection('setup')"><Settings2 :size="16" /><span>策略与映射</span><small>{{ rules.length }}</small></button>
+      <button :class="{ active: activeSection === 'logs' }" @click="changeSection('logs')"><History :size="16" /><span>执行日志</span><small>{{ eventsLoaded ? executionEvents.length : '…' }}</small></button>
+      <button :class="{ active: activeSection === 'orders' }" @click="changeSection('orders')"><ShoppingCart :size="16" /><span>补号订单</span><small>{{ ordersLoaded ? orderData.total : (dashboard.summary?.totalOrders || 0) }}</small></button>
+      <button :class="{ active: activeSection === 'repairs' }" @click="changeSection('repairs')"><Wrench :size="16" /><span>账号修复</span><small>{{ recoveriesLoaded ? recoveryData.pendingTotal : (dashboard.summary?.repairingAccounts || 0) }}</small></button>
     </nav>
 
     <div v-if="activeSection === 'setup'" class="replenishment-layout">
@@ -160,11 +160,11 @@
         <label><span>策略 / 商品</span><input v-model.trim="orderFilters.ruleProduct" placeholder="策略或商品" /></label>
         <label><span>状态</span><select v-model="orderFilters.status"><option value="">全部状态</option><option v-for="option in orderStatusOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <div class="filter-actions">
-          <button class="icon-button filter-submit" type="submit" title="查询"><Search :size="15" /></button>
-          <button class="icon-button" type="button" title="清空筛选" @click="clearOrderFilters"><RotateCcw :size="15" /></button>
+          <button class="icon-button filter-submit" type="submit" title="查询" :disabled="ordersLoading"><RefreshCw v-if="ordersLoading" :size="15" class="spinning" /><Search v-else :size="15" /></button>
+          <button class="icon-button" type="button" title="清空筛选" :disabled="ordersLoading" @click="clearOrderFilters"><RotateCcw :size="15" /></button>
         </div>
       </form>
-      <div class="order-table-wrap">
+      <div class="order-table-wrap" :aria-busy="ordersLoading">
         <table class="data-table replenishment-table">
           <thead><tr>
             <th><button class="column-sort" @click="toggleOrderSort('id')">订单 <ArrowUp v-if="orderSortBy === 'id' && orderSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="orderSortBy === 'id'" :size="13" /></button></th>
@@ -187,11 +187,12 @@
               <td><small>创建 {{ dateTime(order.createdAt) }}</small><small>更新 {{ dateTime(order.updatedAt) }}</small></td>
               <td><button v-if="order.status === 'approval_required'" class="secondary-button compact-button" @click="approve(order)">批准下单</button><button v-else class="icon-button" title="查看订单" @click="viewOrder(order)"><ChevronRight :size="15" /></button></td>
             </tr>
-            <tr v-if="!orders.length"><td colspan="8" class="empty-cell">暂无补号订单</td></tr>
+            <tr v-if="ordersLoading && !orders.length"><td colspan="8" class="empty-cell">正在查询订单…</td></tr>
+            <tr v-else-if="!orders.length"><td colspan="8" class="empty-cell">暂无补号订单</td></tr>
           </tbody>
         </table>
       </div>
-      <div v-if="orderData.pages > 1" class="pager"><button class="small-button" :disabled="orderPage <= 1" @click="moveOrderPage(-1)">上一页</button><span>第 {{ orderPage }} / {{ orderData.pages }} 页，共 {{ orderData.total }} 条</span><button class="small-button" :disabled="orderPage >= orderData.pages" @click="moveOrderPage(1)">下一页</button></div>
+      <div v-if="orderData.pages > 1" class="pager"><button class="small-button" :disabled="ordersLoading || orderPage <= 1" @click="moveOrderPage(-1)">上一页</button><span>第 {{ orderPage }} / {{ orderData.pages }} 页，共 {{ orderData.total }} 条</span><button class="small-button" :disabled="ordersLoading || orderPage >= orderData.pages" @click="moveOrderPage(1)">下一页</button></div>
     </section>
 
     <section v-if="activeSection === 'repairs'" class="panel recovery-panel">
@@ -207,11 +208,11 @@
         <label><span>Sub2API</span><input v-model.trim="recoveryFilters.sub2apiAccountId" placeholder="账号编号" /></label>
         <label><span>状态</span><select v-model="recoveryFilters.status"><option value="">全部状态</option><option v-for="option in recoveryStatusOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
         <div class="filter-actions">
-          <button class="icon-button filter-submit" type="submit" title="查询"><Search :size="15" /></button>
-          <button class="icon-button" type="button" title="清空筛选" @click="clearRecoveryFilters"><RotateCcw :size="15" /></button>
+          <button class="icon-button filter-submit" type="submit" title="查询" :disabled="recoveriesLoading"><RefreshCw v-if="recoveriesLoading" :size="15" class="spinning" /><Search v-else :size="15" /></button>
+          <button class="icon-button" type="button" title="清空筛选" :disabled="recoveriesLoading" @click="clearRecoveryFilters"><RotateCcw :size="15" /></button>
         </div>
       </form>
-      <div class="order-table-wrap">
+      <div class="order-table-wrap" :aria-busy="recoveriesLoading">
         <table class="data-table replenishment-table recovery-table">
           <thead><tr>
             <th><button class="column-sort" @click="toggleRecoverySort('account_name')">类型 / 账号 <ArrowUp v-if="recoverySortBy === 'account_name' && recoverySortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="recoverySortBy === 'account_name'" :size="13" /></button></th>
@@ -242,11 +243,12 @@
                 </div>
               </td>
             </tr>
-            <tr v-if="!recoveries.length"><td colspan="9" class="empty-cell">{{ recoveryTab === 'pending' ? '当前没有待修复任务' : '暂无已修复记录' }}</td></tr>
+            <tr v-if="recoveriesLoading && !recoveries.length"><td colspan="9" class="empty-cell">正在查询修复任务…</td></tr>
+            <tr v-else-if="!recoveries.length"><td colspan="9" class="empty-cell">{{ recoveryTab === 'pending' ? '当前没有待修复任务' : '暂无已修复记录' }}</td></tr>
           </tbody>
         </table>
       </div>
-      <div v-if="recoveryData.pages > 1" class="pager"><button class="small-button" :disabled="recoveryPage <= 1" @click="moveRecoveryPage(-1)">上一页</button><span>第 {{ recoveryPage }} / {{ recoveryData.pages }} 页，共 {{ recoveryData.total }} 条</span><button class="small-button" :disabled="recoveryPage >= recoveryData.pages" @click="moveRecoveryPage(1)">下一页</button></div>
+      <div v-if="recoveryData.pages > 1" class="pager"><button class="small-button" :disabled="recoveriesLoading || recoveryPage <= 1" @click="moveRecoveryPage(-1)">上一页</button><span>第 {{ recoveryPage }} / {{ recoveryData.pages }} 页，共 {{ recoveryData.total }} 条</span><button class="small-button" :disabled="recoveriesLoading || recoveryPage >= recoveryData.pages" @click="moveRecoveryPage(1)">下一页</button></div>
     </section>
 
     <section v-if="editor" class="modal-layer" @click.self="editor = null">
@@ -382,6 +384,11 @@ const actioningId = ref('');
 const error = ref('');
 const editorError = ref('');
 const eventsLoading = ref(false);
+const ordersLoading = ref(false);
+const recoveriesLoading = ref(false);
+const eventsLoaded = ref(false);
+const ordersLoaded = ref(false);
+const recoveriesLoaded = ref(false);
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
 const catalog = ref<any>({ groups: [], platforms: [] });
 const modelSearch = ref('');
@@ -562,51 +569,74 @@ async function load() {
         recoveryPolicies.value = nextRecoveryPolicies;
       })
       .catch(recordFailure('修复策略加载失败')),
-    loadOrders().catch(recordFailure('补号订单加载失败')),
-    loadRecoveries().catch(recordFailure('账号修复列表加载失败')),
-    loadEvents(),
   ];
+  if (ordersLoaded.value || activeSection.value === 'orders') {
+    tasks.push(loadOrders().catch(recordFailure('补号订单加载失败')));
+  }
+  if (recoveriesLoaded.value || activeSection.value === 'repairs') {
+    tasks.push(loadRecoveries().catch(recordFailure('账号修复列表加载失败')));
+  }
+  if (eventsLoaded.value || activeSection.value === 'logs') tasks.push(loadEvents());
   await Promise.allSettled(tasks);
   if (failures.length) error.value = failures[0];
   loading.value = false;
 }
 
 async function loadOrders() {
-  const params = query({
-    ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
-    page: String(orderPage.value),
-    page_size: String(orderData.value.pageSize || 20),
-    sort_by: orderSortBy.value,
-    sort_order: orderSortOrder.value,
-    order_id: appliedOrderFilters.value.orderId,
-    external_order_id: appliedOrderFilters.value.externalOrderId,
-    account_name: appliedOrderFilters.value.accountName,
-    sub2api_account_id: appliedOrderFilters.value.sub2apiAccountId,
-    rule_product: appliedOrderFilters.value.ruleProduct,
-    status: appliedOrderFilters.value.status,
-  });
-  const data = await get(`/replenishment/orders?${params}`);
-  orderData.value = data;
-  orders.value = data.items || [];
+  ordersLoading.value = true;
+  try {
+    const params = query({
+      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
+      page: String(orderPage.value),
+      page_size: String(orderData.value.pageSize || 20),
+      sort_by: orderSortBy.value,
+      sort_order: orderSortOrder.value,
+      order_id: appliedOrderFilters.value.orderId,
+      external_order_id: appliedOrderFilters.value.externalOrderId,
+      account_name: appliedOrderFilters.value.accountName,
+      sub2api_account_id: appliedOrderFilters.value.sub2apiAccountId,
+      rule_product: appliedOrderFilters.value.ruleProduct,
+      status: appliedOrderFilters.value.status,
+    });
+    const data = await get(`/replenishment/orders?${params}`);
+    orderData.value = data;
+    orders.value = data.items || [];
+    ordersLoaded.value = true;
+  } finally {
+    ordersLoading.value = false;
+  }
 }
 
 async function loadRecoveries() {
-  const params = query({
-    ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
-    scope: recoveryTab.value,
-    page: String(recoveryPage.value),
-    page_size: String(recoveryData.value.pageSize || 20),
-    sort_by: recoverySortBy.value,
-    sort_order: recoverySortOrder.value,
-    account_name: appliedRecoveryFilters.value.accountName,
-    order_id: appliedRecoveryFilters.value.orderId,
-    external_order_id: appliedRecoveryFilters.value.externalOrderId,
-    sub2api_account_id: appliedRecoveryFilters.value.sub2apiAccountId,
-    status: appliedRecoveryFilters.value.status,
-  });
-  const data = await get(`/replenishment/recoveries?${params}`);
-  recoveryData.value = data;
-  recoveries.value = data.items || [];
+  recoveriesLoading.value = true;
+  try {
+    const params = query({
+      ...rangeQuery(props.range, props.rangeStart, props.rangeEnd),
+      scope: recoveryTab.value,
+      page: String(recoveryPage.value),
+      page_size: String(recoveryData.value.pageSize || 20),
+      sort_by: recoverySortBy.value,
+      sort_order: recoverySortOrder.value,
+      account_name: appliedRecoveryFilters.value.accountName,
+      order_id: appliedRecoveryFilters.value.orderId,
+      external_order_id: appliedRecoveryFilters.value.externalOrderId,
+      sub2api_account_id: appliedRecoveryFilters.value.sub2apiAccountId,
+      status: appliedRecoveryFilters.value.status,
+    });
+    const data = await get(`/replenishment/recoveries?${params}`);
+    recoveryData.value = data;
+    recoveries.value = data.items || [];
+    recoveriesLoaded.value = true;
+  } finally {
+    recoveriesLoading.value = false;
+  }
+}
+
+async function changeSection(section: 'setup' | 'logs' | 'orders' | 'repairs') {
+  activeSection.value = section;
+  if (section === 'orders' && !ordersLoaded.value) await loadOrders();
+  else if (section === 'repairs' && !recoveriesLoaded.value) await loadRecoveries();
+  else if (section === 'logs' && !eventsLoaded.value) await loadEvents();
 }
 
 async function applyOrderFilters() {
@@ -679,6 +709,7 @@ async function loadEvents() {
       ruleId: eventRuleId.value,
     });
     executionEvents.value = await get(`/replenishment/events?${params}`);
+    eventsLoaded.value = true;
   } catch (err: any) {
     error.value = err.message || '执行日志读取失败';
   } finally {

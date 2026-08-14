@@ -287,6 +287,20 @@ function recoveryPolicy(row) {
   };
 }
 
+function compactInventorySnapshot(snapshot = {}) {
+  return {
+    capturedAt: snapshot.capturedAt || null,
+    pendingAccounts: Number(snapshot.pendingAccounts || 0),
+    trackedAccounts: Number(snapshot.trackedAccounts || 0),
+    lowQuotaAccounts: Number(snapshot.lowQuotaAccounts || 0),
+    effectiveAccounts: Number(snapshot.effectiveAccounts || 0),
+    repairingAccounts: Number(snapshot.repairingAccounts || 0),
+    unavailableAccounts: Number(snapshot.unavailableAccounts || 0),
+    unknownQuotaAccounts: Number(snapshot.unknownQuotaAccounts || 0),
+    graceRepairingAccounts: Number(snapshot.graceRepairingAccounts || 0),
+  };
+}
+
 function event(row) {
   if (!row) return null;
   return {
@@ -1153,6 +1167,7 @@ export class ReplenishmentRepository {
         && entry.sub2apiAccountId !== undefined
       ));
       return {
+        totalOrders: scopedOrders.length,
         activeOrders: scopedOrders.filter((entry) => activeStatuses.includes(entry.status)).length,
         completedOrders: scopedOrders.filter((entry) => entry.status === 'completed').length,
         totalCostCny: scopedOrders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
@@ -1171,6 +1186,7 @@ export class ReplenishmentRepository {
       ),
       order_summary AS (
         SELECT
+          COUNT(*)::int AS total_orders,
           COUNT(*) FILTER (WHERE status=ANY($1::text[]))::int AS active_orders,
           COUNT(*) FILTER (WHERE status='completed')::int AS completed_orders,
           COALESCE(SUM(actual_paid_amount_cny),0) AS total_cost_cny,
@@ -1195,6 +1211,7 @@ export class ReplenishmentRepository {
       FROM order_summary
       CROSS JOIN item_summary`, [activeStatuses, rangeStart, rangeEnd]);
     return {
+      totalOrders: Number(result.rows[0]?.total_orders || 0),
       activeOrders: Number(result.rows[0]?.active_orders || 0),
       completedOrders: Number(result.rows[0]?.completed_orders || 0),
       totalCostCny: Number(result.rows[0]?.total_cost_cny || 0),
@@ -1274,7 +1291,11 @@ export class ReplenishmentRepository {
       const sortedRows = sortDemoRows(rows, demoSortKeys[sortBy] || 'createdAt', sortOrder);
       const total = sortedRows.length;
       return {
-        items: sortedRows.slice(offset, offset + pageSize),
+        items: sortedRows.slice(offset, offset + pageSize).map((entry) => {
+          const next = { ...entry };
+          delete next.payloadCiphertext;
+          return next;
+        }),
         page,
         pageSize,
         total,
@@ -1398,7 +1419,11 @@ export class ReplenishmentRepository {
     values);
     const total = Number(result.rows[0]?.total_count || 0);
     return {
-      items: result.rows.map(order),
+      items: result.rows.map((row) => {
+        const next = order(row);
+        delete next.payloadCiphertext;
+        return next;
+      }),
       page,
       pageSize,
       total,
@@ -2095,16 +2120,17 @@ export class ReplenishmentRepository {
   }
 
   async dashboard({ start = null, end = null } = {}) {
-    const [mappings, rules, orders, orderSummary] = await Promise.all([
+    const [mappings, rules, orderSummary] = await Promise.all([
       this.listMappings(),
       this.listRules(),
-      this.listOrders({ limit: 20 }),
       this.getOrderSummary({ start, end }),
     ]);
     return {
       mappings,
-      rules,
-      orders,
+      rules: rules.map((entry) => ({
+        ...entry,
+        lastInventorySnapshot: compactInventorySnapshot(entry.lastInventorySnapshot),
+      })),
       summary: {
         enabledRules: rules.filter((entry) => entry.enabled).length,
         ...orderSummary,

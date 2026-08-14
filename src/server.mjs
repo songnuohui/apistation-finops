@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { assertDistinctDatabases, createFinopsPool, createSourcePool } from './db.mjs';
@@ -104,6 +105,8 @@ supplierMonitorService?.setCostRefreshHandler(async()=>{
 });
 
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
+const compressibleStaticExtensions=new Set(['.html','.css','.js','.svg','.json']);
+const staticContentCache=new Map();
 function setHeaders(res,{embeddable=false}={}){
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Referrer-Policy','same-origin');
@@ -115,7 +118,23 @@ function setHeaders(res,{embeddable=false}={}){
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
   }
 }
-function json(res,status,data){setHeaders(res);res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
+function compressedResponse(res,content,{compress=true}={}){
+  const body=Buffer.isBuffer(content)?content:Buffer.from(content);
+  const acceptsGzip=/\bgzip\b/i.test(String(res.finopsAcceptEncoding||''));
+  if(!compress||body.length<1_024||!acceptsGzip)return {body,headers:compress?{'Vary':'Accept-Encoding'}:{}};
+  return {body:zlib.gzipSync(body),headers:{'Content-Encoding':'gzip','Vary':'Accept-Encoding'}};
+}
+function json(res,status,data){
+  setHeaders(res);
+  const encoded=compressedResponse(res,JSON.stringify(data));
+  res.writeHead(status,{
+    'Content-Type':'application/json; charset=utf-8',
+    'Cache-Control':'no-store',
+    'Content-Length':encoded.body.length,
+    ...encoded.headers,
+  });
+  res.end(encoded.body);
+}
 async function body(request){
   let size=0;const chunks=[];
   for await(const chunk of request){size+=chunk.length;if(size>1_048_576)throw Object.assign(new Error('request body too large'),{statusCode:413});chunks.push(chunk);}
@@ -975,7 +994,24 @@ async function publicMonitorApi(res){
 
 async function staticFile(res,url,{embeddable=false}={}){
   const candidate=resolveStaticPath(webRoot,url.pathname);
-  try{const content=await fs.readFile(candidate);setHeaders(res,{embeddable});const extension=path.extname(candidate).toLowerCase();const revalidate=['.html','.css','.js'].includes(extension);res.writeHead(200,{'Content-Type':types[extension]||'application/octet-stream','Cache-Control':revalidate?'no-cache':'public, max-age=86400'});res.end(content);}catch(error){if(error.code==='ENOENT')return json(res,404,{error:'not found'});throw error;}
+  try{
+    let content=staticContentCache.get(candidate);
+    if(!content){
+      content=await fs.readFile(candidate);
+      staticContentCache.set(candidate,content);
+    }
+    setHeaders(res,{embeddable});
+    const extension=path.extname(candidate).toLowerCase();
+    const immutable=/^\/assets\/.+-[A-Za-z0-9_-]{8,}\.(?:css|js)$/.test(url.pathname);
+    const encoded=compressedResponse(res,content,{compress:compressibleStaticExtensions.has(extension)});
+    res.writeHead(200,{
+      'Content-Type':types[extension]||'application/octet-stream',
+      'Cache-Control':immutable?'public, max-age=31536000, immutable':extension==='.html'?'no-cache':'public, max-age=86400',
+      'Content-Length':encoded.body.length,
+      ...encoded.headers,
+    });
+    res.end(encoded.body);
+  }catch(error){if(error.code==='ENOENT')return json(res,404,{error:'not found'});throw error;}
 }
 
 async function readiness(){
@@ -1001,6 +1037,7 @@ async function readiness(){
 
 const server=http.createServer(async(request,res)=>{
   const started=Date.now();
+  res.finopsAcceptEncoding=request.headers['accept-encoding']||'';
   try{
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
     if(url.pathname==='/health')return json(res,200,{status:'ok',mode:config.demoMode?'demo':'database',uptimeSeconds:Math.round(process.uptime()),cache:responseCache.status()});

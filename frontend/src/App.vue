@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   Activity, AlertTriangle, BarChart3, CalendarDays, ChevronDown, CircleDollarSign, DatabaseZap, Download,
@@ -7,13 +7,14 @@ import {
   ShieldCheck, Users, WalletCards, X, KeyRound, PlugZap,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from './api';
-import SupplierManagementView from './components/SupplierManagementView.vue';
-import AccountCostsView from './components/AccountCostsView.vue';
-import UsageView from './components/UsageView.vue';
-import UserFinanceView from './components/UserFinanceView.vue';
-import OverviewView from './components/OverviewView.vue';
-import OAuthSupplyView from './components/OAuthSupplyView.vue';
-import ReplenishmentView from './components/ReplenishmentView.vue';
+
+const OverviewView = defineAsyncComponent(() => import('./components/OverviewView.vue'));
+const UserFinanceView = defineAsyncComponent(() => import('./components/UserFinanceView.vue'));
+const UsageView = defineAsyncComponent(() => import('./components/UsageView.vue'));
+const AccountCostsView = defineAsyncComponent(() => import('./components/AccountCostsView.vue'));
+const SupplierManagementView = defineAsyncComponent(() => import('./components/SupplierManagementView.vue'));
+const OAuthSupplyView = defineAsyncComponent(() => import('./components/OAuthSupplyView.vue'));
+const ReplenishmentView = defineAsyncComponent(() => import('./components/ReplenishmentView.vue'));
 
 type AnyRecord = Record<string, any>;
 
@@ -257,7 +258,7 @@ async function logout() {
   window.location.assign('/login');
 }
 
-watch(page, () => { search.value = ''; loadPage(); });
+watch(page, () => { search.value = ''; });
 watch([range, customStart, customEnd], () => { if (range.value !== 'custom' || (customStart.value && customEnd.value)) loadPage(); });
 watch(search, () => {
   const timer = window.setTimeout(() => {
@@ -270,7 +271,6 @@ watch([detail, accountEditor, supplierEditor], syncBodyScrollLock);
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown);
   await loadSession();
-  await loadPage();
 });
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
