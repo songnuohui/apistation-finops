@@ -37,6 +37,8 @@ const batchSaving = ref(false);
 const accountGroups = ref<AnyRecord | null>(null);
 const accountGroupsLoading = ref(false);
 let timer: number | undefined;
+let loadRequestToken = 0;
+let groupRequestToken = 0;
 
 const rows = computed(() => data.value.items || []);
 const groupRows = computed(() => groupData.value.items || []);
@@ -198,6 +200,7 @@ function policySeed(account: AnyRecord | null) {
 
 async function load() {
   if (viewMode.value !== 'keys') return loadGroups();
+  const requestToken = ++loadRequestToken;
   loading.value = true;
   try {
     const result = await get(`/supplier-keys?${query({
@@ -205,13 +208,17 @@ async function load() {
       sort_by: sortBy.value, sort_order: sortOrder.value,
       page: page.value, page_size: pageSize.value,
     })}`);
+    if (requestToken !== loadRequestToken) return;
     data.value = result;
     if (page.value > Math.max(1, Math.ceil(Number(result.total || 0) / pageSize.value))) {
       page.value = 1;
       await load();
     }
-  } catch (error: any) { notify(error.message); }
-  finally { loading.value = false; }
+  } catch (error: any) {
+    if (requestToken === loadRequestToken) notify(error.message);
+  } finally {
+    if (requestToken === loadRequestToken) loading.value = false;
+  }
 }
 function sortColumn(column: string) {
   if (sortBy.value === column) sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc';
@@ -251,14 +258,19 @@ async function loadGroupCatalog() {
 }
 
 async function loadGroups() {
+  const requestToken = ++groupRequestToken;
   groupsLoading.value = true;
   try {
-    groupData.value = await get(`/supplier-groups?${query({
+    const result = await get(`/supplier-groups?${query({
       search: search.value, supplier: supplier.value, platform: platform.value,
       page: groupPage.value, page_size: groupPageSize.value,
     })}`);
-  } catch (error: any) { notify(error.message); }
-  finally { groupsLoading.value = false; }
+    if (requestToken === groupRequestToken) groupData.value = result;
+  } catch (error: any) {
+    if (requestToken === groupRequestToken) notify(error.message);
+  } finally {
+    if (requestToken === groupRequestToken) groupsLoading.value = false;
+  }
 }
 
 async function openGroupDetails(row: AnyRecord) {
@@ -434,7 +446,10 @@ watch(viewMode, () => {
   groupDetail.value = null;
   load();
 });
-onMounted(() => Promise.all([load(), loadGroupCatalog()]));
+onMounted(() => {
+  void load();
+  void loadGroupCatalog();
+});
 </script>
 
 <template>

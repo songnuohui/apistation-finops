@@ -3596,10 +3596,124 @@ export class PostgresRepository {
     return this.getSupplierQualityTargetContext(resultTargetId);
   }
 
-  async loadSupplierQualityScores({ start, end } = {}) {
+  async loadSupplierQualityObservationMetrics(windowStart, windowEnd) {
+    const levelSql = `CASE
+      WHEN GROUPING(model)=1 THEN 'connection'
+      WHEN GROUPING(supplier_key_id)=1 THEN 'model'
+      ELSE 'unit'
+    END`;
+    const groupSql = `GROUP BY GROUPING SETS (
+      (connection_id),
+      (connection_id,model),
+      (connection_id,model,supplier_key_id)
+    )`;
+    const [countsResult, latencyResult, probesResult] = await Promise.all([
+      this.pool.query(`
+        SELECT ${levelSql} AS level,connection_id,
+               CASE WHEN GROUPING(model)=1 THEN '' ELSE model END AS model,
+               CASE WHEN GROUPING(supplier_key_id)=1 THEN NULL ELSE supplier_key_id END AS key_id,
+               COUNT(*)::bigint AS sample_count,
+               COUNT(*) FILTER (WHERE availability_sample)::bigint AS availability_samples,
+               COUNT(*) FILTER (WHERE availability_sample AND status='ok')::bigint AS success_samples,
+               COUNT(*) FILTER (WHERE status='failed')::bigint AS failure_count,
+               MAX(observed_at) AS last_observed_at,
+               MAX(observed_at) FILTER (WHERE availability_sample AND status='ok') AS last_success_at,
+               COUNT(*) FILTER (WHERE source_kind='passive_usage')::bigint AS passive_usage_samples,
+               COUNT(*) FILTER (WHERE source_kind='passive_monitor')::bigint AS passive_monitor_samples,
+               COUNT(*) FILTER (WHERE source_kind='active_probe')::bigint AS active_probe_samples,
+               MAX(rate_multiplier) FILTER (WHERE status='ok' AND rate_multiplier>0) AS latest_rate_multiplier,
+               MAX(rate_multiplier) FILTER (
+                 WHERE status='ok' AND source_kind='passive_usage' AND rate_multiplier>0
+               ) AS latest_passive_rate_multiplier
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE observed_at>=$1 AND observed_at<$2
+        ${groupSql}`, [windowStart, windowEnd]),
+      this.pool.query(`
+        SELECT ${levelSql} AS level,connection_id,
+               CASE WHEN GROUPING(model)=1 THEN '' ELSE model END AS model,
+               CASE WHEN GROUPING(supplier_key_id)=1 THEN NULL ELSE supplier_key_id END AS key_id,
+               COUNT(*)::bigint AS ttft_samples,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ttft_ms) AS ttft_p50_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY ttft_ms) AS ttft_p95_ms
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE observed_at>=$1 AND observed_at<$2 AND ttft_ms IS NOT NULL
+        ${groupSql}`, [windowStart, windowEnd]),
+      this.pool.query(`
+        SELECT connection_id,model,supplier_key_id,status,observed_at,id
+        FROM ${this.schema}.supplier_quality_observations
+        WHERE observed_at>=$1 AND observed_at<$2 AND source_kind='active_probe'
+        ORDER BY observed_at DESC,id DESC`, [windowStart, windowEnd]),
+    ]);
+    const metricKey = (level, connectionId, model = '', keyId = null) => (
+      `${level}\u0000${Number(connectionId)}\u0000${String(model || '').trim()}\u0000${keyId === null || keyId === undefined ? '' : Number(keyId)}`
+    );
+    const metrics = countsResult.rows.map((row) => ({
+      level: row.level,
+      connectionId: Number(row.connection_id),
+      model: row.model || '',
+      keyId: row.key_id === null ? null : Number(row.key_id),
+      sampleCount: Number(row.sample_count || 0),
+      availabilitySamples: Number(row.availability_samples || 0),
+      successSamples: Number(row.success_samples || 0),
+      failureCount: Number(row.failure_count || 0),
+      ttftSamples: 0,
+      ttftP50Ms: null,
+      ttftP95Ms: null,
+      lastObservedAt: row.last_observed_at || null,
+      lastSuccessAt: row.last_success_at || null,
+      consecutiveFailures: 0,
+      passiveUsageSamples: Number(row.passive_usage_samples || 0),
+      passiveMonitorSamples: Number(row.passive_monitor_samples || 0),
+      activeProbeSamples: Number(row.active_probe_samples || 0),
+      latestRateMultiplier: nullableNumber(row.latest_rate_multiplier),
+      latestPassiveRateMultiplier: nullableNumber(row.latest_passive_rate_multiplier),
+    }));
+    const metricsByKey = new Map(metrics.map((item) => [
+      metricKey(item.level, item.connectionId, item.model, item.keyId),
+      item,
+    ]));
+    for (const row of latencyResult.rows) {
+      const metric = metricsByKey.get(metricKey(
+        row.level,
+        row.connection_id,
+        row.model,
+        row.key_id === null ? null : row.key_id,
+      ));
+      if (!metric) continue;
+      metric.ttftSamples = Number(row.ttft_samples || 0);
+      metric.ttftP50Ms = nullableNumber(row.ttft_p50_ms);
+      metric.ttftP95Ms = nullableNumber(row.ttft_p95_ms);
+    }
+    const probeStatuses = new Map();
+    for (const row of probesResult.rows) {
+      const keys = [
+        metricKey('connection', row.connection_id),
+        metricKey('model', row.connection_id, row.model),
+        metricKey('unit', row.connection_id, row.model, row.supplier_key_id === null ? null : row.supplier_key_id),
+      ];
+      for (const key of keys) {
+        const statuses = probeStatuses.get(key) || [];
+        statuses.push(row.status);
+        probeStatuses.set(key, statuses);
+      }
+    }
+    for (const [key, statuses] of probeStatuses) {
+      const metric = metricsByKey.get(key);
+      if (!metric) continue;
+      let failures = 0;
+      for (const status of statuses) {
+        if (status !== 'failed') break;
+        failures += 1;
+      }
+      metric.consecutiveFailures = failures;
+    }
+    return metrics;
+  }
+
+  async loadSupplierQualityScores({ start, end, dailyStart = start, dailyEnd = end } = {}) {
     const windowStart = start || new Date(Date.now() - 7 * 86_400_000);
     const windowEnd = end || new Date();
-    const [connectionsResult, observationsResult, keysResult, targetsResult, usageResult] = await Promise.all([
+    const [connectionsResult, observationMetrics, keysResult, targetsResult, usageResult] = await Promise.all([
       this.pool.query(`
         WITH keys AS (
           SELECT connection_id,
@@ -3635,13 +3749,7 @@ export class PostgresRepository {
         LEFT JOIN alerts ON alerts.connection_id=c.id
         LEFT JOIN targets ON targets.connection_id=c.id
         ORDER BY s.name,c.name`),
-      this.pool.query(`
-        SELECT id,connection_id,source_kind,target_id,supplier_key_id,model,group_name,status,
-               availability_sample,http_status,ttft_ms,duration_ms,ping_latency_ms,rate_multiplier,
-               observed_at,metadata
-         FROM ${this.schema}.supplier_quality_observations
-         WHERE observed_at>=$1 AND observed_at<$2
-         ORDER BY observed_at DESC,id DESC`, [windowStart, windowEnd]),
+      this.loadSupplierQualityObservationMetrics(windowStart, windowEnd),
       this.pool.query(`
         SELECT id,connection_id,name,masked_key,group_name,status,removed_at,rate_multiplier,
                last_check_status,last_check_at
@@ -3653,21 +3761,18 @@ export class PostgresRepository {
         JOIN ${this.schema}.supplier_keys k ON k.id=t.supplier_key_id
         WHERE k.removed_at IS NULL AND k.status='active'`),
       this.pool.query(`
-        SELECT k.connection_id,k.id AS supplier_key_id,f.model,SUM(f.user_charge_cny) AS amount
-         FROM ${this.schema}.fact_usage_events f
-         JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=f.source_account_id
+        SELECT k.connection_id,k.id AS supplier_key_id,d.model,SUM(d.user_charge_cny) AS amount
+         FROM ${this.schema}.fact_usage_daily d
+         JOIN ${this.schema}.supplier_account_links l ON l.source_account_id=d.source_account_id
          JOIN ${this.schema}.supplier_keys k ON k.id=l.supplier_key_id
-         WHERE f.occurred_at>=$1 AND f.occurred_at<$2 AND NULLIF(BTRIM(f.model),'') IS NOT NULL
+         WHERE d.day>=$1::date AND d.day<=$2::date AND NULLIF(BTRIM(d.model),'') IS NOT NULL
            AND k.removed_at IS NULL AND k.status='active'
-         GROUP BY k.connection_id,k.id,f.model`, [windowStart, windowEnd]),
+         GROUP BY k.connection_id,k.id,d.model`, [dailyStart, dailyEnd]),
     ]);
     const connectionRows = new Map(connectionsResult.rows.map((row) => [Number(row.id), row]));
     const scores = buildSupplierQualityScores({
       connections: connectionsResult.rows.map((row) => supplierConnection(row)),
-      observations: observationsResult.rows.map((row) => ({
-        ...this.qualityObservation(row),
-        connectionId: Number(row.connection_id),
-      })),
+      observationMetrics,
       keys: keysResult.rows.map((row) => ({
         id: Number(row.id),
         connectionId: Number(row.connection_id),

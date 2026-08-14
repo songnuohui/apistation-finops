@@ -19,6 +19,7 @@ const direction = ref<'asc' | 'desc'>('desc');
 const page = ref(1);
 const pageSize = 20;
 const selectedDetail = ref<AnyRecord | null>(null);
+let loadRequestToken = 0;
 const explanations: Record<string, string> = {
   supplier: '供应商连接是评分汇总入口；评分最小单元实际为连接、密钥和模型。',
   adapter: '供应商系统类型和监控模式。被动监控不额外请求模型，主动探测会按目标发起受控请求。',
@@ -93,10 +94,16 @@ function toggleSort(key: string) {
   page.value = 1;
 }
 async function load() {
+  const requestToken = ++loadRequestToken;
   loading.value = true;
-  try { source.value = (await get(`/supplier-quality-overview?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`)).items || []; }
-  catch (error: any) { notify(error.message); }
-  finally { loading.value = false; }
+  try {
+    const result = await get(`/supplier-quality-overview?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`);
+    if (requestToken === loadRequestToken) source.value = result.items || [];
+  } catch (error: any) {
+    if (requestToken === loadRequestToken) notify(error.message);
+  } finally {
+    if (requestToken === loadRequestToken) loading.value = false;
+  }
 }
 function openConnectionDetail(id: number) { router.push({ path: '/suppliers', query: { tab: 'connections', connection: String(id) } }); }
 watch([search, mode, status, scoreScope], () => { page.value = 1; });

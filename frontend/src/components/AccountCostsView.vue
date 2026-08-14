@@ -19,6 +19,9 @@ const periodEditor = ref<AnyRecord | null>(null);
 const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
 let searchTimer: number | undefined;
+let loadRequestId = 0;
+let editorOptionsPromise: Promise<void> | null = null;
+let editorOptionsLoaded = false;
 
 const rows = computed(() => accounts.value.items || []);
 const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total || 0) / pageSize.value)));
@@ -78,28 +81,24 @@ function makeEditor(account: AnyRecord) {
 }
 
 async function load() {
+  const requestId = ++loadRequestId;
   loading.value = true;
   try {
     const params = query({
       ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize.value, search: search.value,
     });
-    const [accountResult, catalogResult, profileResult] = await Promise.all([
-      get(`/accounts?${params}`),
-      get('/purchase-catalog'),
-      get('/cost-profiles'),
-    ]);
-    accounts.value = accountResult;
-    catalog.value = catalogResult;
-    profiles.value = profileResult.items || [];
+    const accountResult = await get(`/accounts?${params}`);
+    if (requestId === loadRequestId) accounts.value = accountResult;
   } catch (error: any) {
-    notify(error.message);
+    if (requestId === loadRequestId) notify(error.message);
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestId) loading.value = false;
   }
 }
 
 function openEditor(account: AnyRecord) {
   editor.value = makeEditor(account);
+  void loadEditorOptions();
 }
 
 function openPeriodEditor(account: AnyRecord, period: AnyRecord | null = null) {
@@ -119,6 +118,22 @@ function openPeriodEditor(account: AnyRecord, period: AnyRecord | null = null) {
     purchaseBatch: period?.purchaseBatch || account.currentCostPurchaseBatch || account.purchaseBatch || '',
     notes: period?.notes || account.currentCostNotes || '',
   };
+  void loadEditorOptions();
+}
+
+function loadEditorOptions() {
+  if (editorOptionsLoaded) return Promise.resolve();
+  if (editorOptionsPromise) return editorOptionsPromise;
+  editorOptionsPromise = Promise.allSettled([
+    get('/purchase-catalog').then((result) => { catalog.value = result; }),
+    get('/cost-profiles').then((result) => { profiles.value = result.items || []; }),
+  ]).then((results) => {
+    editorOptionsLoaded = results.every((result) => result.status === 'fulfilled');
+    for (const result of results) {
+      if (result.status === 'rejected') notify(result.reason?.message || String(result.reason));
+    }
+  }).finally(() => { editorOptionsPromise = null; });
+  return editorOptionsPromise;
 }
 
 function tags(value: string) {
@@ -228,9 +243,14 @@ watch(search, () => {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => { page.value = 1; load(); }, 250);
 });
-watch(() => props.refreshToken, load);
-watch(() => props.range, () => { page.value = 1; load(); });
-onMounted(load);
+watch(() => props.refreshToken, () => {
+  page.value = 1;
+  load();
+});
+onMounted(() => {
+  void load();
+  void loadEditorOptions();
+});
 </script>
 
 <template>

@@ -85,7 +85,10 @@ const percent = (value: any) => value === null || value === undefined ? '--' : `
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 const escape = (value: any) => String(value ?? '');
 const statusClass = (value: any) => ['ok', 'healthy', 'active', 'complete', 'priced'].includes(String(value)) ? 'success' : ['error', 'failed', 'missing'].includes(String(value)) ? 'danger' : 'warning';
-const showRangeControl = computed(() => page.value !== 'suppliers' || supplierTab.value === 'quality');
+const showRangeControl = computed(() => (
+  page.value !== 'oauth-supply'
+  && (page.value !== 'suppliers' || supplierTab.value === 'quality')
+));
 
 function showToast(message: string) {
   toast.value = message;
@@ -341,7 +344,7 @@ function syncBodyScrollLock() {
               <button class="custom-range-trigger" type="button" :class="{ active: range === 'custom' }" title="自定义时间" @click="range = 'custom'"><CalendarDays :size="14" />自定义</button>
             </div>
           </div>
-          <div v-if="range === 'custom'" class="custom-range-fields">
+          <div v-if="showRangeControl && range === 'custom'" class="custom-range-fields">
             <label><span>开始</span><input v-model="customStart" type="date" /></label>
             <span class="custom-range-separator">至</span>
             <label><span>结束</span><input v-model="customEnd" type="date" /></label>

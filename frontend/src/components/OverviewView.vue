@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Activity, AlertTriangle, BarChart3, ChevronDown, RefreshCw, X } from 'lucide-vue-next';
-import { Chart, registerables } from 'chart.js';
 import { get, query, rangeQuery } from '../api';
 
-Chart.register(...registerables);
 type AnyRecord = Record<string, any>;
 type DetailType = 'recharge' | 'gift' | 'consumption' | 'tokens' | 'balance' | null;
 const props = defineProps<{ refreshToken?: number; range?: string; rangeStart?: string; rangeEnd?: string }>();
@@ -21,8 +19,10 @@ const detailPage = ref(1);
 const detailSort = ref('userChargeCny');
 const detailDirection = ref<'asc' | 'desc'>('desc');
 const chartCanvas = ref<HTMLCanvasElement | null>(null);
-let chart: Chart | null = null;
+let chart: import('chart.js').Chart | null = null;
+let chartConstructor: typeof import('chart.js').Chart | null = null;
 let runtimeTimer: number | undefined;
+let loadRequestId = 0;
 
 const summary = computed(() => dashboard.value.summary || {});
 const operations = computed(() => summary.value.operations || {});
@@ -54,30 +54,39 @@ async function loadRuntime() {
   catch (error: any) { notify(error.message); }
 }
 async function load() {
+  const requestId = ++loadRequestId;
   loading.value = true;
-  try {
-    const params = query(rangeQuery(props.range, props.rangeStart, props.rangeEnd));
-    const [dashboardData, trendData, modelData] = await Promise.all([
-      get(`/overview-dashboard?${params}`),
-      get(`/trend?${params}`),
-      get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`),
-    ]);
-    dashboard.value = dashboardData;
-    trend.value = trendData;
-    models.value = modelData;
-    await nextTick();
-    drawChart();
-  } catch (error: any) {
-    notify(error.message);
-  } finally {
-    loading.value = false;
-  }
+  const params = query(rangeQuery(props.range, props.rangeStart, props.rangeEnd));
+  const assign = async (request: Promise<any>, apply: (value: any) => Promise<void> | void) => {
+    try {
+      const value = await request;
+      if (requestId === loadRequestId) await apply(value);
+    } catch (error: any) {
+      if (requestId === loadRequestId) notify(error.message);
+    }
+  };
+  await Promise.allSettled([
+    assign(get(`/overview-dashboard?${params}`), (value) => { dashboard.value = value; }),
+    assign(get(`/trend?${params}`), async (value) => {
+      trend.value = value;
+      await nextTick();
+      await drawChart();
+    }),
+    assign(get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`), (value) => { models.value = value; }),
+  ]);
+  if (requestId === loadRequestId) loading.value = false;
 }
-function drawChart() {
+async function drawChart() {
   if (!chartCanvas.value) return;
+  if (!chartConstructor) {
+    const chartModule = await import('chart.js');
+    chartModule.Chart.register(...chartModule.registerables);
+    chartConstructor = chartModule.Chart;
+  }
+  if (!chartCanvas.value || !chartConstructor) return;
   chart?.destroy();
   const items = trend.value.items || [];
-  chart = new Chart(chartCanvas.value, {
+  chart = new chartConstructor(chartCanvas.value, {
     type: 'line',
     data: {
       labels: items.map((item: AnyRecord) => dateLabel(item.day || item.date)),
@@ -133,15 +142,21 @@ function toggleDetailSort(field: string) {
 function closeDetail() { detailType.value = null; detail.value = null; }
 function metricValue(type: DetailType) { openDetail(type); }
 
-watch(() => props.refreshToken, load);
-watch(() => props.range, () => { closeDetail(); load(); });
+watch(() => props.refreshToken, () => {
+  closeDetail();
+  load();
+});
 watch(detailTab, () => { if (detailType.value === 'consumption') { detailPage.value = 1; loadDetail(); } });
-onMounted(async () => {
-  await load();
-  await loadRuntime();
+onMounted(() => {
+  void load();
+  void loadRuntime();
   runtimeTimer = window.setInterval(loadRuntime, 3_000);
 });
-onUnmounted(() => { chart?.destroy(); if (runtimeTimer) window.clearInterval(runtimeTimer); });
+onUnmounted(() => {
+  loadRequestId += 1;
+  chart?.destroy();
+  if (runtimeTimer) window.clearInterval(runtimeTimer);
+});
 </script>
 
 <template>

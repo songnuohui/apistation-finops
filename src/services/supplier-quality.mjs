@@ -96,6 +96,20 @@ function sourceConfidence(observations) {
   return bounded(weighted / 20 * 100 * 0.75 + sourceKinds.size / 3 * 100 * 0.25);
 }
 
+function metricsSourceConfidence(metrics) {
+  if (Array.isArray(metrics.observations) && metrics.observations.length) {
+    return sourceConfidence(metrics.observations);
+  }
+  const counts = [
+    ['passive_usage', Number(metrics.passiveUsageSamples || 0)],
+    ['passive_monitor', Number(metrics.passiveMonitorSamples || 0)],
+    ['active_probe', Number(metrics.activeProbeSamples || 0)],
+  ];
+  const weighted = counts.reduce((total, [kind, count]) => total + sourceWeight(kind) * Number(count), 0);
+  const sourceKinds = counts.filter(([, count]) => Number(count) > 0).length;
+  return bounded(weighted / 20 * 100 * 0.75 + sourceKinds / 3 * 100 * 0.25);
+}
+
 function normalizeModel(model) {
   return String(model || '').trim();
 }
@@ -139,6 +153,67 @@ function latestObservedRate(observations) {
     .map((item) => Number(item.rateMultiplier))[0] ?? null;
 }
 
+function metricSummaryKey(level, connectionId, model = '', keyId = null) {
+  return `${level}\u0000${Number(connectionId)}\u0000${normalizeModel(model)}\u0000${keyId === null || keyId === undefined ? '' : Number(keyId)}`;
+}
+
+function summarizedMetrics(summary = {}) {
+  return {
+    sampleCount: Number(summary.sampleCount || 0),
+    availabilitySamples: Number(summary.availabilitySamples || 0),
+    successSamples: Number(summary.successSamples || 0),
+    failureCount: Number(summary.failureCount || 0),
+    ttftP50Ms: finite(summary.ttftP50Ms),
+    ttftP95Ms: finite(summary.ttftP95Ms),
+    lastObservedAt: summary.lastObservedAt || null,
+    lastSuccessAt: summary.lastSuccessAt || null,
+    consecutiveFailures: Number(summary.consecutiveFailures || 0),
+    passiveUsageSamples: Number(summary.passiveUsageSamples || 0),
+    passiveMonitorSamples: Number(summary.passiveMonitorSamples || 0),
+    activeProbeSamples: Number(summary.activeProbeSamples || 0),
+  };
+}
+
+function newerDate(left, right) {
+  if (!left) return right || null;
+  if (!right) return left;
+  return new Date(left).getTime() >= new Date(right).getTime() ? left : right;
+}
+
+function weightedPercentile(left, right, field) {
+  const leftValue = finite(left?.[field]);
+  const rightValue = finite(right?.[field]);
+  const leftSamples = Number(left?.ttftSamples || 0);
+  const rightSamples = Number(right?.ttftSamples || 0);
+  if (leftValue === null) return rightValue;
+  if (rightValue === null) return leftValue;
+  const total = leftSamples + rightSamples;
+  return total ? (leftValue * leftSamples + rightValue * rightSamples) / total : leftValue;
+}
+
+function mergeMetricSummaries(left = null, right = null) {
+  if (!left) return right || {};
+  if (!right) return left;
+  return {
+    ...left,
+    sampleCount: Number(left.sampleCount || 0) + Number(right.sampleCount || 0),
+    availabilitySamples: Number(left.availabilitySamples || 0) + Number(right.availabilitySamples || 0),
+    successSamples: Number(left.successSamples || 0) + Number(right.successSamples || 0),
+    failureCount: Number(left.failureCount || 0) + Number(right.failureCount || 0),
+    ttftSamples: Number(left.ttftSamples || 0) + Number(right.ttftSamples || 0),
+    ttftP50Ms: weightedPercentile(left, right, 'ttftP50Ms'),
+    ttftP95Ms: weightedPercentile(left, right, 'ttftP95Ms'),
+    lastObservedAt: newerDate(left.lastObservedAt, right.lastObservedAt),
+    lastSuccessAt: newerDate(left.lastSuccessAt, right.lastSuccessAt),
+    consecutiveFailures: Math.max(Number(left.consecutiveFailures || 0), Number(right.consecutiveFailures || 0)),
+    passiveUsageSamples: Number(left.passiveUsageSamples || 0) + Number(right.passiveUsageSamples || 0),
+    passiveMonitorSamples: Number(left.passiveMonitorSamples || 0) + Number(right.passiveMonitorSamples || 0),
+    activeProbeSamples: Number(left.activeProbeSamples || 0) + Number(right.activeProbeSamples || 0),
+    latestRateMultiplier: left.latestRateMultiplier ?? right.latestRateMultiplier ?? null,
+    latestPassiveRateMultiplier: left.latestPassiveRateMultiplier ?? right.latestPassiveRateMultiplier ?? null,
+  };
+}
+
 function activeKeyRate(keys, keyIds = null) {
   const allowed = keyIds && keyIds.size ? keys.filter((key) => keyIds.has(Number(key.id))) : keys;
   const rates = allowed
@@ -155,6 +230,14 @@ function rateForModel(observations, keys) {
   if (observed !== null) return { value: observed, source: 'passive_usage' };
   const fallback = activeKeyRate(keys);
   return fallback === null ? { value: null, source: '' } : { value: fallback, source: 'supplier_key' };
+}
+
+function rateForSummary(summary, keys) {
+  const inventory = activeKeyRate(keys);
+  if (inventory !== null) return { value: inventory, source: 'supplier_key' };
+  const observed = finite(summary?.latestPassiveRateMultiplier);
+  if (observed !== null && observed > 0) return { value: observed, source: 'passive_usage' };
+  return { value: null, source: '' };
 }
 
 function buildModelScore(metrics, {
@@ -199,7 +282,7 @@ function buildModelScore(metrics, {
   const coverage = effectiveDimensions([
     [priceScore, 30], [availabilityScore, 35], [latencyScore, 20], [stableScore, 15],
   ]).available.length / 4 * 100;
-  const confidence = rounded(sampleConfidence * 0.4 + freshness * 0.25 + coverage * 0.2 + sourceConfidence(metrics.observations || []) * 0.15);
+  const confidence = rounded(sampleConfidence * 0.4 + freshness * 0.25 + coverage * 0.2 + metricsSourceConfidence(metrics) * 0.15);
   const riskAdjustedScore = cappedScore === null ? null : rounded(cappedScore * (0.6 + 0.4 * confidence / 100));
   return {
     overallScore: riskAdjustedScore,
@@ -293,11 +376,32 @@ function aggregateScores(items) {
 export function buildSupplierQualityScores({
   connections = [],
   observations = [],
+  observationMetrics = [],
   keys = [],
   targets = [],
   usageWeights = [],
   now = Date.now(),
 } = {}) {
+  const hasSummaries = observationMetrics.length > 0;
+  const summaryRows = observationMetrics.map((item) => ({
+    ...item,
+    level: String(item.level || ''),
+    connectionId: Number(item.connectionId),
+    model: normalizeModel(item.model),
+    keyId: finite(item.keyId),
+  }));
+  const summaries = new Map(summaryRows.map((item) => [
+    metricSummaryKey(item.level, item.connectionId, item.model, item.keyId),
+    item,
+  ]));
+  const summaryFor = (level, connectionId, model = '', keyId = null) => (
+    summaries.get(metricSummaryKey(level, connectionId, model, keyId)) || {}
+  );
+  const unitSummaryFor = (connectionId, model, keyId) => {
+    const direct = summaryFor('unit', connectionId, model, keyId);
+    if (keyId === null || keyId === undefined) return direct;
+    return mergeMetricSummaries(direct, summaryFor('unit', connectionId, model, null));
+  };
   const usageByConnection = new Map();
   for (const item of usageWeights) {
     const connectionId = Number(item.connectionId);
@@ -314,11 +418,15 @@ export function buildSupplierQualityScores({
   const descriptors = [];
   for (const connection of connections) {
     const connectionId = Number(connection.id);
-    const connectionObservations = observations.filter((item) => Number(item.connectionId) === connectionId);
+    const connectionObservations = hasSummaries
+      ? []
+      : observations.filter((item) => Number(item.connectionId) === connectionId);
     const connectionKeys = keys.filter((item) => Number(item.connectionId) === connectionId);
     const connectionTargets = targets.filter((item) => Number(item.connectionId) === connectionId && item.enabled);
     const modelNames = new Set([
       ...connectionObservations.map((item) => normalizeModel(item.model)).filter(Boolean),
+      ...summaryRows.filter((item) => item.level === 'model' && item.connectionId === connectionId)
+        .map((item) => item.model).filter(Boolean),
       ...connectionTargets.map((item) => normalizeModel(item.model)).filter(Boolean),
     ]);
     for (const model of modelNames) {
@@ -326,6 +434,8 @@ export function buildSupplierQualityScores({
       const modelTargets = connectionTargets.filter((item) => normalizeModel(item.model) === model);
       const keyIds = new Set([
         ...modelObservations.map((item) => finite(item.keyId)).filter((item) => item !== null && item > 0),
+        ...summaryRows.filter((item) => item.level === 'unit' && item.connectionId === connectionId && item.model === model)
+          .map((item) => item.keyId).filter((item) => item !== null && item > 0),
         ...modelTargets.map((item) => finite(item.keyId)).filter((item) => item !== null && item > 0),
       ]);
       if (!keyIds.size) keyIds.add(null);
@@ -334,13 +444,17 @@ export function buildSupplierQualityScores({
         const unitObservations = modelObservations.filter((item) => (
           finite(item.keyId) === null || keyId === null || Number(item.keyId) === Number(keyId)
         ));
-        const rate = rateForModel(unitObservations, key ? [key] : connectionKeys);
+        const summary = hasSummaries ? unitSummaryFor(connectionId, model, keyId) : null;
+        const rate = hasSummaries
+          ? rateForSummary(summary, key ? [key] : connectionKeys)
+          : rateForModel(unitObservations, key ? [key] : connectionKeys);
         descriptors.push({
           connectionId,
           model,
           keyId,
           key,
           observations: unitObservations,
+          summary,
           modelObservations,
           targets: modelTargets.filter((item) => keyId === null || Number(item.keyId) === Number(keyId)),
           rate,
@@ -359,7 +473,9 @@ export function buildSupplierQualityScores({
   }
   return connections.map((connection) => {
     const connectionId = Number(connection.id);
-    const connectionObservations = observations.filter((item) => Number(item.connectionId) === connectionId);
+    const connectionObservations = hasSummaries
+      ? []
+      : observations.filter((item) => Number(item.connectionId) === connectionId);
     const connectionKeys = keys.filter((item) => Number(item.connectionId) === connectionId);
     const connectionTargets = targets.filter((item) => Number(item.connectionId) === connectionId);
     const modelNames = [...new Set(descriptors.filter((item) => item.connectionId === connectionId).map((item) => item.model))]
@@ -367,14 +483,18 @@ export function buildSupplierQualityScores({
     const usage = usageByConnection.get(connectionId) || { models: new Map(), keys: new Map() };
     const modelScores = modelNames.map((model) => {
       const modelObservations = connectionObservations.filter((item) => normalizeModel(item.model) === model);
-      const metrics = modelMetrics(modelObservations);
-      metrics.observations = modelObservations;
+      const metrics = hasSummaries
+        ? summarizedMetrics(summaryFor('model', connectionId, model))
+        : modelMetrics(modelObservations);
+      if (!hasSummaries) metrics.observations = modelObservations;
       const market = marketRates.get(model) || { best: null, comparableSupplierCount: 0 };
       const keyScores = descriptors
         .filter((item) => item.connectionId === connectionId && item.model === model)
         .map((descriptor) => {
-          const unitMetrics = modelMetrics(descriptor.observations);
-          unitMetrics.observations = descriptor.observations;
+          const unitMetrics = hasSummaries
+            ? summarizedMetrics(descriptor.summary)
+            : modelMetrics(descriptor.observations);
+          if (!hasSummaries) unitMetrics.observations = descriptor.observations;
           return {
             keyId: descriptor.keyId,
             keyName: descriptor.key?.name || '',
@@ -404,8 +524,12 @@ export function buildSupplierQualityScores({
       };
     });
     const weighted = weightedItems(modelScores, usage.models, (item) => item.model, 0.4);
-    const metrics = modelMetrics(connectionObservations);
-    metrics.rateMultiplier = latestObservedRate(connectionObservations) ?? activeKeyRate(connectionKeys);
+    const metrics = hasSummaries
+      ? summarizedMetrics(summaryFor('connection', connectionId))
+      : modelMetrics(connectionObservations);
+    metrics.rateMultiplier = hasSummaries
+      ? finite(summaryFor('connection', connectionId).latestRateMultiplier) ?? activeKeyRate(connectionKeys)
+      : latestObservedRate(connectionObservations) ?? activeKeyRate(connectionKeys);
     metrics.modelsWithData = modelScores.filter((item) => item.metrics.sampleCount > 0).length;
     metrics.modelCount = modelScores.length;
     const score = aggregateScores(weighted);

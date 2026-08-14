@@ -19,6 +19,7 @@ const detailTab = ref<'usage' | 'recharges'>('usage');
 const detailPage = ref({ usage: 1, recharges: 1 });
 const whitelist = ref<AnyRecord | null>(null);
 let searchTimer: number | undefined;
+let loadRequestId = 0;
 const rows = computed(() => data.value.items || []);
 const pages = computed(() => Math.max(1, Math.ceil(Number(data.value.total || 0) / pageSize)));
 const money = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -26,10 +27,16 @@ const compact = (value: any) => new Intl.NumberFormat('zh-CN', { notation: 'comp
 const percent = (value: any) => value === null || value === undefined ? '--' : `${(Number(value) * 100).toFixed(1)}%`;
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 async function load() {
+  const requestId = ++loadRequestId;
   loading.value = true;
-  try { data.value = await get(`/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`); }
-  catch (error: any) { emit('toast', error.message); }
-  finally { loading.value = false; }
+  try {
+    const result = await get(`/users?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`);
+    if (requestId === loadRequestId) data.value = result;
+  } catch (error: any) {
+    if (requestId === loadRequestId) emit('toast', error.message);
+  } finally {
+    if (requestId === loadRequestId) loading.value = false;
+  }
 }
 function toggleSort(field: string) {
   if (sort.value === field) direction.value = direction.value === 'desc' ? 'asc' : 'desc';
@@ -86,8 +93,11 @@ async function toggleWhitelistUser(user: AnyRecord) {
   } catch (error: any) { emit('toast', error.message); }
 }
 watch(search, () => { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(() => { page.value = 1; load(); }, 250); });
-watch(() => props.range, () => { page.value = 1; load(); });
-watch(() => props.refreshToken, load);
+watch(() => props.refreshToken, () => {
+  page.value = 1;
+  detail.value = null;
+  load();
+});
 onMounted(load);
 </script>
 

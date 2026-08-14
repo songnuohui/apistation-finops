@@ -15,6 +15,7 @@ const direction = ref<'asc' | 'desc'>('desc');
 const data = ref<AnyRecord>({});
 const loading = ref(false);
 let searchTimer: number | undefined;
+let loadRequestId = 0;
 const money = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
 const usd = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(Number(value || 0));
 const compact = (value: any) => new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
@@ -29,17 +30,24 @@ function toggleSort(field: string) {
   load();
 }
 async function load() {
+  const requestId = ++loadRequestId;
   loading.value = true;
   try {
     const endpoint = tab.value === 'users' ? '/usage/users' : tab.value === 'models' ? '/usage/models' : '/usage/events';
-    data.value = await get(`${endpoint}?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`);
-  } catch (error: any) { emit('toast', error.message); }
-  finally { loading.value = false; }
+    const result = await get(`${endpoint}?${query({ ...rangeQuery(props.range, props.rangeStart, props.rangeEnd), page: page.value, page_size: pageSize, search: search.value, sort: sort.value, direction: direction.value })}`);
+    if (requestId === loadRequestId) data.value = result;
+  } catch (error: any) {
+    if (requestId === loadRequestId) emit('toast', error.message);
+  } finally {
+    if (requestId === loadRequestId) loading.value = false;
+  }
 }
 watch(search, () => { window.clearTimeout(searchTimer); searchTimer = window.setTimeout(() => { page.value = 1; load(); }, 250); });
 watch(tab, () => { page.value = 1; sort.value = 'userChargeCny'; direction.value = 'desc'; load(); });
-watch(() => props.range, () => { page.value = 1; load(); });
-watch(() => props.refreshToken, load);
+watch(() => props.refreshToken, () => {
+  page.value = 1;
+  load();
+});
 onMounted(load);
 </script>
 

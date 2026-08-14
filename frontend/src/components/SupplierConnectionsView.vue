@@ -48,6 +48,7 @@ let accountSearchTimer: number | undefined;
 let detailRequestToken = 0;
 let qualityRequestToken = 0;
 let accountRequestToken = 0;
+let connectionRequestToken = 0;
 
 const adapterLabels: Record<string, string> = {
   auto: '自动识别',
@@ -218,14 +219,15 @@ function connectionHint(item: AnyRecord) {
 }
 
 async function loadConnections() {
+  const requestToken = ++connectionRequestToken;
   loading.value = true;
   try {
     const result = await get(`/supplier-connections?${query({ search: search.value })}`);
-    connectionItems.value = result.items || [];
+    if (requestToken === connectionRequestToken) connectionItems.value = result.items || [];
   } catch (error: any) {
-    notify(error.message);
+    if (requestToken === connectionRequestToken) notify(error.message);
   } finally {
-    loading.value = false;
+    if (requestToken === connectionRequestToken) loading.value = false;
   }
 }
 

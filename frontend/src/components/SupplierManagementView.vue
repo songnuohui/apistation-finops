@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue';
 import { Activity, KeyRound, RefreshCw, ServerCog, ShieldCheck } from 'lucide-vue-next';
 import { useRoute, useRouter } from 'vue-router';
-import SupplierConnectionsView from './SupplierConnectionsView.vue';
-import SupplierKeysView from './SupplierKeysView.vue';
-import SupplierQualityView from './SupplierQualityView.vue';
+const SupplierConnectionsView = defineAsyncComponent(() => import('./SupplierConnectionsView.vue'));
+const SupplierKeysView = defineAsyncComponent(() => import('./SupplierKeysView.vue'));
+const SupplierQualityView = defineAsyncComponent(() => import('./SupplierQualityView.vue'));
 
 type TabId = 'connections' | 'keys' | 'quality';
 
