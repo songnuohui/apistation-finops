@@ -14,13 +14,13 @@
     <div v-if="error" class="error-banner">{{ error }}</div>
 
     <section class="metric-grid replenishment-metrics">
-      <div class="metric-card"><span>有效库存</span><strong>{{ dashboard.summary?.effectiveAccounts || 0 }}</strong><small>健康且额度充足</small></div>
-      <div class="metric-card warning"><span>低额度账号</span><strong>{{ dashboard.summary?.lowQuotaAccounts || 0 }}</strong><small>达到策略额度阈值</small></div>
-      <div class="metric-card danger"><span>不可用账号</span><strong>{{ dashboard.summary?.unavailableAccounts || 0 }}</strong><small>停用、过期或异常</small></div>
-      <div class="metric-card"><span>修复中</span><strong>{{ dashboard.summary?.repairingAccounts || 0 }}</strong><small>等待认领或重试</small></div>
-      <div class="metric-card"><span>进行中订单</span><strong>{{ dashboard.summary?.activeOrders || 0 }}</strong><small>审批、下单或导入中</small></div>
+      <div class="metric-card"><span>期间有效库存</span><strong>{{ dashboard.summary?.effectiveAccounts || 0 }}</strong><small>筛选期间采购，当前健康且额度充足</small></div>
+      <div class="metric-card warning"><span>期间低额度账号</span><strong>{{ dashboard.summary?.lowQuotaAccounts || 0 }}</strong><small>筛选期间采购，当前达到额度阈值</small></div>
+      <div class="metric-card danger"><span>期间不可用账号</span><strong>{{ dashboard.summary?.unavailableAccounts || 0 }}</strong><small>筛选期间采购，当前停用、过期或异常</small></div>
+      <div class="metric-card"><span>期间修复中</span><strong>{{ dashboard.summary?.repairingAccounts || 0 }}</strong><small>筛选期间采购，当前等待认领或重试</small></div>
+      <div class="metric-card"><span>期间进行中订单</span><strong>{{ dashboard.summary?.activeOrders || 0 }}</strong><small>当前筛选范围内审批、下单或导入中</small></div>
       <div class="metric-card good"><span>期间采购成本</span><strong>{{ money(dashboard.summary?.totalCostCny) }}</strong><small>当前筛选范围实际支付金额</small></div>
-      <div class="metric-card"><span>OAuth 可用余额</span><strong>{{ moneyFen(dashboard.oauthSupply?.balance?.available_fen) }}</strong><small>总余额 {{ moneyFen(dashboard.oauthSupply?.balance?.balance_fen) }}</small></div>
+      <div class="metric-card"><span>当前 OAuth 可用余额</span><strong>{{ moneyFen(dashboard.oauthSupply?.balance?.available_fen) }}</strong><small>实时值，不随历史区间变化；总余额 {{ moneyFen(dashboard.oauthSupply?.balance?.balance_fen) }}</small></div>
     </section>
 
     <nav class="replenishment-tabs" aria-label="自动补号工作区">
@@ -528,28 +528,47 @@ function eventDetailEntries(event: any) {
 async function load() {
   loading.value = true;
   error.value = '';
-  try {
-    const [nextDashboard, nextCatalog, nextMappings, nextRules, nextRecoveryPolicies] = await Promise.all([
-      get(`/replenishment/dashboard?${query(rangeQuery(props.range, props.rangeStart, props.rangeEnd))}`),
-      get('/replenishment/catalog').catch((err: any) => ({
-        groups: [], platforms: [], error: err?.message || 'Sub2API 分组目录暂时不可用',
-      })),
-      get('/replenishment/mappings'),
-      get('/replenishment/rules'), get('/replenishment/recovery-policies'),
-    ]);
-    dashboard.value = nextDashboard;
-    catalog.value = nextCatalog;
-    mappings.value = nextMappings;
-    rules.value = nextRules;
-    recoveryPolicies.value = nextRecoveryPolicies;
-    await Promise.all([loadOrders(), loadRecoveries()]);
-    if (nextCatalog.error) error.value = nextCatalog.error;
-  } catch (err: any) {
-    error.value = err.message || '补号数据加载失败';
-  } finally {
-    loading.value = false;
-  }
-  await loadEvents();
+  const failures: string[] = [];
+  const recordFailure = (fallback: string) => (err: any) => {
+    failures.push(err?.message || fallback);
+  };
+  const rangeParams = query(rangeQuery(props.range, props.rangeStart, props.rangeEnd));
+  const tasks = [
+    get(`/replenishment/dashboard?${rangeParams}`)
+      .then((nextDashboard) => {
+        dashboard.value = { ...nextDashboard, oauthSupply: dashboard.value.oauthSupply };
+        mappings.value = nextDashboard.mappings || [];
+        rules.value = nextDashboard.rules || [];
+      })
+      .catch(recordFailure('补号统计加载失败')),
+    get('/replenishment/balance')
+      .then((balance) => {
+        dashboard.value = { ...dashboard.value, oauthSupply: { balance } };
+      })
+      .catch((err: any) => {
+        dashboard.value = {
+          ...dashboard.value,
+          oauthSupply: { balance: { error: err?.message || 'OAuth Supply 余额读取失败' } },
+        };
+        recordFailure('OAuth Supply 余额读取失败')(err);
+      }),
+    get('/replenishment/catalog')
+      .then((nextCatalog) => {
+        catalog.value = nextCatalog;
+      })
+      .catch(recordFailure('Sub2API 分组目录暂时不可用')),
+    get('/replenishment/recovery-policies')
+      .then((nextRecoveryPolicies) => {
+        recoveryPolicies.value = nextRecoveryPolicies;
+      })
+      .catch(recordFailure('修复策略加载失败')),
+    loadOrders().catch(recordFailure('补号订单加载失败')),
+    loadRecoveries().catch(recordFailure('账号修复列表加载失败')),
+    loadEvents(),
+  ];
+  await Promise.allSettled(tasks);
+  if (failures.length) error.value = failures[0];
+  loading.value = false;
 }
 
 async function loadOrders() {

@@ -687,20 +687,31 @@ async function api(request,res,url){
     return json(res,200,await oauthSupplyAuthService.test());
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/dashboard'){
-    return json(res,200,{
-      ...(await replenishmentRepository.dashboard(range())),
-      oauthSupply: {
-        products: await replenishmentService.products().catch((error) => ({ error: error.message })),
-        balance: await replenishmentService.balance().catch((error) => ({ error: error.message })),
-      },
-    });
+    return json(res,200,await cached(
+      'replenishment-dashboard',
+      config.dashboardCacheTtlSeconds,
+      ()=>replenishmentRepository.dashboard(range()),
+    ));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/balance'){
+    return json(res,200,await cached(
+      'replenishment-balance',
+      config.dashboardCacheTtlSeconds,
+      ()=>replenishmentService.balance(),
+    ));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/mappings'){
-    return json(res,200,await replenishmentRepository.listMappings());
+    return json(res,200,await cached(
+      'replenishment-mappings',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentRepository.listMappings(),
+    ));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/catalog'){
-    const groups=await sub2ApiAccountImportGateway.listGroups();
-    return json(res,200,replenishmentCatalog(groups,await sub2ApiAccountImportGateway.listModelCandidates(groups)));
+    return json(res,200,await cached('replenishment-catalog',30,async()=>{
+      const groups=await sub2ApiAccountImportGateway.listGroups();
+      return replenishmentCatalog(groups,await sub2ApiAccountImportGateway.listModelCandidates(groups));
+    }));
   }
   if((request.method==='POST'||request.method==='PATCH')&&url.pathname==='/api/replenishment/mappings'){
     const input=await body(request);
@@ -715,10 +726,18 @@ async function api(request,res,url){
     return json(res,200,await replenishmentRepository.deleteMapping(Number(replenishmentMappingId[1])));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/rules'){
-    return json(res,200,await replenishmentRepository.listRules());
+    return json(res,200,await cached(
+      'replenishment-rules',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentRepository.listRules(),
+    ));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/recovery-policies'){
-    return json(res,200,await replenishmentRepository.listRecoveryPolicies());
+    return json(res,200,await cached(
+      'replenishment-recovery-policies',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentRepository.listRecoveryPolicies(),
+    ));
   }
   const replenishmentRecoveryPolicyId=/^\/api\/replenishment\/recovery-policies\/(\d+)$/.exec(url.pathname);
   if((request.method==='PATCH'||request.method==='PUT')&&replenishmentRecoveryPolicyId){
@@ -729,11 +748,15 @@ async function api(request,res,url){
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/events'){
     const ruleId=url.searchParams.get('ruleId');
-    return json(res,200,await replenishmentRepository.listEvents({
-      ...range(),
-      ruleId:ruleId?Number(ruleId):null,
-      limit:Math.min(200,Math.max(1,Number(url.searchParams.get('limit')||100))),
-    }));
+    return json(res,200,await cached(
+      'replenishment-events',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentRepository.listEvents({
+        ...range(),
+        ruleId:ruleId?Number(ruleId):null,
+        limit:Math.min(200,Math.max(1,Number(url.searchParams.get('limit')||100))),
+      }),
+    ));
   }
   if(request.method==='POST'&&url.pathname==='/api/replenishment/rules'){
     return json(res,201,await replenishmentRepository.saveRule(await body(request),auth.actor));
@@ -768,23 +791,27 @@ async function api(request,res,url){
     }));
   }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/orders'){
-    return json(res,200,await replenishmentRepository.listOrderPage({
-      ...page(),
-      ...range(),
-      search:searchTerm(url.searchParams),
-      filters:{
-        orderId:filterTerm(url.searchParams,'order_id',40),
-        externalOrderId:filterTerm(url.searchParams,'external_order_id',80),
-        accountName:filterTerm(url.searchParams,'account_name'),
-        sub2apiAccountId:filterTerm(url.searchParams,'sub2api_account_id',40),
-        ruleProduct:filterTerm(url.searchParams,'rule_product'),
-        status:filterTerm(url.searchParams,'status',40),
-      },
-      ...listSort(url.searchParams,[
-        'created_at','updated_at','id','external_order_id','status',
-        'requested_quantity','delivered_quantity','valid_quantity','actual_paid_amount_cny',
-      ]),
-    }));
+    return json(res,200,await cached(
+      'replenishment-orders',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentRepository.listOrderPage({
+        ...page(),
+        ...range(),
+        search:searchTerm(url.searchParams),
+        filters:{
+          orderId:filterTerm(url.searchParams,'order_id',40),
+          externalOrderId:filterTerm(url.searchParams,'external_order_id',80),
+          accountName:filterTerm(url.searchParams,'account_name'),
+          sub2apiAccountId:filterTerm(url.searchParams,'sub2api_account_id',40),
+          ruleProduct:filterTerm(url.searchParams,'rule_product'),
+          status:filterTerm(url.searchParams,'status',40),
+        },
+        ...listSort(url.searchParams,[
+          'created_at','updated_at','id','external_order_id','status',
+          'requested_quantity','delivered_quantity','valid_quantity','actual_paid_amount_cny',
+        ]),
+      }),
+    ));
   }
   const replenishmentOrderId=/^\/api\/replenishment\/orders\/(\d+)$/.exec(url.pathname);
   if(request.method==='GET'&&replenishmentOrderId){
@@ -798,23 +825,27 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/replenishment/recoveries'){
     const scope=String(url.searchParams.get('scope')||'pending').trim().toLowerCase();
     if(!['pending','completed','all'].includes(scope))return json(res,400,{error:'invalid recovery scope'});
-    return json(res,200,await replenishmentService.recoveries({
-      ...page(),
-      ...range(),
-      scope,
-      search:searchTerm(url.searchParams),
-      filters:{
-        accountName:filterTerm(url.searchParams,'account_name'),
-        orderId:filterTerm(url.searchParams,'order_id',40),
-        externalOrderId:filterTerm(url.searchParams,'external_order_id',80),
-        sub2apiAccountId:filterTerm(url.searchParams,'sub2api_account_id',40),
-        status:filterTerm(url.searchParams,'status',40),
-      },
-      ...listSort(url.searchParams,[
-        'created_at','updated_at','account_name','order_id','external_order_id',
-        'sub2api_account_id','status','attempt_count','claimed_at','recovered_at','account_cost_cny',
-      ]),
-    }));
+    return json(res,200,await cached(
+      'replenishment-recoveries',
+      config.listCacheTtlSeconds,
+      ()=>replenishmentService.recoveries({
+        ...page(),
+        ...range(),
+        scope,
+        search:searchTerm(url.searchParams),
+        filters:{
+          accountName:filterTerm(url.searchParams,'account_name'),
+          orderId:filterTerm(url.searchParams,'order_id',40),
+          externalOrderId:filterTerm(url.searchParams,'external_order_id',80),
+          sub2apiAccountId:filterTerm(url.searchParams,'sub2api_account_id',40),
+          status:filterTerm(url.searchParams,'status',40),
+        },
+        ...listSort(url.searchParams,[
+          'created_at','updated_at','account_name','order_id','external_order_id',
+          'sub2api_account_id','status','attempt_count','claimed_at','recovered_at','account_cost_cny',
+        ]),
+      }),
+    ));
   }
   const replenishmentImportRetryId=/^\/api\/replenishment\/import-retries\/(\d+)\/retry$/.exec(url.pathname);
   if(request.method==='POST'&&replenishmentImportRetryId){

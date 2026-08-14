@@ -1146,31 +1146,63 @@ export class ReplenishmentRepository {
         const createdAt = new Date(entry.createdAt).getTime();
         return createdAt >= rangeStart.getTime() && createdAt < rangeEnd.getTime();
       });
+      const scopedOrderIds = new Set(scopedOrders.map((entry) => Number(entry.id)));
+      const scopedItems = this.items.filter((entry) => (
+        scopedOrderIds.has(Number(entry.orderId))
+        && entry.sub2apiAccountId !== null
+        && entry.sub2apiAccountId !== undefined
+      ));
       return {
-        activeOrders: this.orders.filter((entry) => activeStatuses.includes(entry.status)).length,
+        activeOrders: scopedOrders.filter((entry) => activeStatuses.includes(entry.status)).length,
         completedOrders: scopedOrders.filter((entry) => entry.status === 'completed').length,
         totalCostCny: scopedOrders.reduce((sum, entry) => sum + Number(entry.actualPaidAmountCny || 0), 0),
         importedAccounts: scopedOrders.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0),
+        effectiveAccounts: scopedItems.filter((entry) => ['healthy', 'quota_unknown'].includes(entry.healthStatus)).length,
+        lowQuotaAccounts: scopedItems.filter((entry) => entry.healthStatus === 'low_quota').length,
+        unavailableAccounts: scopedItems.filter((entry) => entry.healthStatus === 'unavailable').length,
+        repairingAccounts: scopedItems.filter((entry) => entry.healthStatus === 'repairing').length,
       };
     }
     const result = await this.pool.query(`
+      WITH scoped_orders AS MATERIALIZED (
+        SELECT id,status,actual_paid_amount_cny,valid_quantity
+        FROM ${this.schema}.oauth_supply_orders
+        WHERE created_at>=$2 AND created_at<$3
+      ),
+      order_summary AS (
+        SELECT
+          COUNT(*) FILTER (WHERE status=ANY($1::text[]))::int AS active_orders,
+          COUNT(*) FILTER (WHERE status='completed')::int AS completed_orders,
+          COALESCE(SUM(actual_paid_amount_cny),0) AS total_cost_cny,
+          COALESCE(SUM(valid_quantity),0)::int AS imported_accounts
+        FROM scoped_orders
+      ),
+      item_summary AS (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE item.health_status=ANY(ARRAY['healthy','quota_unknown']::text[])
+          )::int AS effective_accounts,
+          COUNT(*) FILTER (WHERE item.health_status='low_quota')::int AS low_quota_accounts,
+          COUNT(*) FILTER (WHERE item.health_status='unavailable')::int AS unavailable_accounts,
+          COUNT(*) FILTER (WHERE item.health_status='repairing')::int AS repairing_accounts
+        FROM ${this.schema}.oauth_supply_order_items item
+        JOIN scoped_orders scoped_order ON scoped_order.id=item.order_id
+        WHERE item.sub2api_account_id IS NOT NULL
+      )
       SELECT
-        COUNT(*) FILTER (WHERE status=ANY($1::text[]))::int AS active_orders,
-        COUNT(*) FILTER (
-          WHERE created_at>=$2 AND created_at<$3 AND status='completed'
-        )::int AS completed_orders,
-        COALESCE(SUM(actual_paid_amount_cny) FILTER (
-          WHERE created_at>=$2 AND created_at<$3
-        ),0) AS total_cost_cny,
-        COALESCE(SUM(valid_quantity) FILTER (
-          WHERE created_at>=$2 AND created_at<$3
-        ),0)::int AS imported_accounts
-      FROM ${this.schema}.oauth_supply_orders`, [activeStatuses, rangeStart, rangeEnd]);
+        order_summary.*,
+        item_summary.*
+      FROM order_summary
+      CROSS JOIN item_summary`, [activeStatuses, rangeStart, rangeEnd]);
     return {
       activeOrders: Number(result.rows[0]?.active_orders || 0),
       completedOrders: Number(result.rows[0]?.completed_orders || 0),
       totalCostCny: Number(result.rows[0]?.total_cost_cny || 0),
       importedAccounts: Number(result.rows[0]?.imported_accounts || 0),
+      effectiveAccounts: Number(result.rows[0]?.effective_accounts || 0),
+      lowQuotaAccounts: Number(result.rows[0]?.low_quota_accounts || 0),
+      unavailableAccounts: Number(result.rows[0]?.unavailable_accounts || 0),
+      repairingAccounts: Number(result.rows[0]?.repairing_accounts || 0),
     };
   }
 
@@ -2076,10 +2108,6 @@ export class ReplenishmentRepository {
       summary: {
         enabledRules: rules.filter((entry) => entry.enabled).length,
         ...orderSummary,
-        effectiveAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.effectiveAccounts || 0), 0),
-        lowQuotaAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.lowQuotaAccounts || 0), 0),
-        unavailableAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.unavailableAccounts || 0), 0),
-        repairingAccounts: rules.reduce((sum, entry) => sum + Number(entry.lastInventorySnapshot?.repairingAccounts || 0), 0),
       },
     };
   }
