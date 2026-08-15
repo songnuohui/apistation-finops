@@ -293,6 +293,9 @@
           <label>修复重试间隔（秒）<input v-model.number="recoveryEditor.retryIntervalSeconds" type="number" min="15" max="86400" /></label>
           <label>固定并发数<input v-model.number="editor.concurrency" type="number" min="1" /></label>
           <label>固定优先级<input v-model.number="editor.priority" type="number" min="0" /></label>
+          <label>账号负载因子<input v-model.number="editor.loadFactor" type="number" min="1" max="10000" placeholder="留空使用 Sub2API 默认" /></label>
+          <label>账号计费倍率<input v-model.number="editor.rateMultiplier" type="number" min="0" max="999999.9999" step="0.0001" /></label>
+          <label class="toggle-field full-field"><input v-model="editor.autoPauseOnExpired" type="checkbox" /><span><strong>账号过期自动暂停调度</strong><small>过期后由 Sub2API 自动停止调度。</small></span></label>
           <label>单次成本上限<input v-model.number="editor.maxOrderAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
           <label>每日成本上限<input v-model.number="editor.maxDailyAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
           <label>验号模型<input v-model.trim="editor.verificationModel" /></label>
@@ -777,7 +780,8 @@ function newRule() {
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
     repairGraceSeconds: 900, recoveryRetryLimit: null,
     scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
-    maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, priority: 20,
+    maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, loadFactor: null, priority: 20,
+    rateMultiplier: 1, autoPauseOnExpired: true,
     verificationModel: 'gpt-5.6-luna',
     modelWhitelist: [],
     verificationPrompt: 'Reply with a short success marker if this account can complete a basic request.',
@@ -787,7 +791,14 @@ function newRule() {
 }
 function editRule(rule: any) {
   editorError.value = '';
-  editor.value = { ...rule, kind: 'rule', modelWhitelist: [...(rule.modelWhitelist || [])] };
+  editor.value = {
+    ...rule,
+    kind: 'rule',
+    loadFactor: rule.loadFactor ?? null,
+    rateMultiplier: rule.rateMultiplier ?? 1,
+    autoPauseOnExpired: rule.autoPauseOnExpired !== false,
+    modelWhitelist: [...(rule.modelWhitelist || [])],
+  };
   modelSearch.value = '';
   recoveryEditor.value = { ...recoveryPolicyFor(rule) };
 }
@@ -805,6 +816,15 @@ function validateEditor() {
   if (!editor.value.name) return '请输入策略名称。';
   if (Number(editor.value.minAvailableAccounts) < 1) return '最低有效库存必须至少为 1。';
   if (Number(editor.value.targetAvailableAccounts) < Number(editor.value.minAvailableAccounts)) return '目标库存不能低于最低有效库存。';
+  const loadFactor = editor.value.loadFactor;
+  if (loadFactor !== null && loadFactor !== undefined && loadFactor !== ''
+    && (!Number.isInteger(Number(loadFactor)) || Number(loadFactor) < 1 || Number(loadFactor) > 10000)) {
+    return '账号负载因子必须留空或填写 1 到 10000 之间的整数。';
+  }
+  const rateMultiplier = Number(editor.value.rateMultiplier);
+  if (!Number.isFinite(rateMultiplier) || rateMultiplier < 0 || rateMultiplier > 999999.9999) {
+    return '账号计费倍率必须在 0 到 999999.9999 之间。';
+  }
   return '';
 }
 

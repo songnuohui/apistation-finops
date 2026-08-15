@@ -42,8 +42,14 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
     }
     if (url.endsWith('/accounts/2780') && options.method === 'GET') {
       return new Response(JSON.stringify({
-        data: { id: 2780, group_ids: [9, 3], concurrency: 7, priority: 2 },
+        data: {
+          id: 2780, group_ids: [9, 3], concurrency: 7, priority: 2,
+          load_factor: 12, rate_multiplier: 0.75, auto_pause_on_expired: false,
+        },
       }), { status: 200 });
+    }
+    if (url.endsWith('/accounts/2780/schedulable')) {
+      return new Response(JSON.stringify({ data: { id: 2780, schedulable: true } }), { status: 200 });
     }
     if (url.endsWith('/accounts/2780/test')) {
       return new Response('data: {"type":"test_start"}\n\ndata: {"type":"test_complete","success":true}\n\n', {
@@ -65,7 +71,10 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
     credentials: { access_token: 'secret-token' },
     groupIds: [3, 9],
     concurrency: 7,
+    loadFactor: 12,
     priority: 2,
+    rateMultiplier: 0.75,
+    autoPauseOnExpired: false,
     modelId: 'gpt-5.6-luna',
     prompt: 'Reply with OK.',
     modelWhitelist: ['gpt-5.6', 'gpt-5.2'],
@@ -80,10 +89,57 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
   const putBody = JSON.parse(requests.find((entry) => entry.options.method === 'PUT').options.body);
   assert.deepEqual(putBody.group_ids, [3, 9]);
   assert.equal(putBody.concurrency, 7);
+  assert.equal(putBody.load_factor, 12);
   assert.equal(putBody.priority, 2);
+  assert.equal(putBody.rate_multiplier, 0.75);
+  assert.equal(putBody.auto_pause_on_expired, false);
   const testBody = JSON.parse(requests.find((entry) => entry.url.endsWith('/test')).options.body);
   assert.equal(testBody.model_id, 'gpt-5.6-luna');
   assert.equal(testBody.prompt, 'Reply with OK.');
+});
+
+test('blank load factor clears the Sub2API override and keeps explicit zero multiplier', async () => {
+  const requests = [];
+  const gateway = new Sub2ApiAccountImportGateway(config, console, async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/accounts') && options.method === 'POST') {
+      return new Response(JSON.stringify({ data: { id: 2790 } }), { status: 201 });
+    }
+    if (url.endsWith('/accounts/2790') && options.method === 'PUT') {
+      return new Response(JSON.stringify({ data: { id: 2790 } }), { status: 200 });
+    }
+    if (url.endsWith('/accounts/2790') && options.method === 'GET') {
+      return new Response(JSON.stringify({ data: {
+        id: 2790, group_ids: [3], concurrency: 1, priority: 0,
+        load_factor: 0, rate_multiplier: 0, auto_pause_on_expired: true,
+      } }), { status: 200 });
+    }
+    if (url.endsWith('/accounts/2790/schedulable')) {
+      return new Response(JSON.stringify({ data: { id: 2790, schedulable: true } }), { status: 200 });
+    }
+    if (url.endsWith('/accounts/2790/test')) {
+      return new Response('data: {"type":"test_complete","success":true}\n\n', {
+        status: 200, headers: { 'content-type': 'text/event-stream' },
+      });
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+  gateway.setAccessTokenProvider({
+    async getAuthentication() { return { credential: 'admin-key', headers: { 'x-api-key': 'admin-key' } }; },
+  });
+
+  await gateway.importAndVerify({
+    name: 'blank-factor@example.com', platform: 'openai', credentials: { access_token: 'secret-token' },
+    groupIds: [3], concurrency: 1, loadFactor: null, priority: 0, rateMultiplier: 0,
+    autoPauseOnExpired: true, modelId: 'gpt-5.6-luna', prompt: 'Reply with OK.',
+  });
+
+  const createBody = JSON.parse(requests.find((entry) => entry.url.endsWith('/accounts') && entry.options.method === 'POST').options.body);
+  assert.equal('load_factor' in createBody, false);
+  const putBody = JSON.parse(requests.find((entry) => entry.options.method === 'PUT').options.body);
+  assert.equal(putBody.load_factor, 0);
+  assert.equal(putBody.rate_multiplier, 0);
+  assert.equal(putBody.auto_pause_on_expired, true);
 });
 
 test('an empty model whitelist clears an inherited model restriction', () => {

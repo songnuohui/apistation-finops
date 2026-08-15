@@ -94,11 +94,17 @@ test('replenishment thresholds allow equal minimum and target at the new lower b
     minAvailableAccounts: 1,
     targetAvailableAccounts: 1,
     scheduleIntervalSeconds: 3,
+    loadFactor: 25,
+    rateMultiplier: 0.75,
+    autoPauseOnExpired: false,
   });
 
   assert.equal(saved.minAvailableAccounts, 1);
   assert.equal(saved.targetAvailableAccounts, 1);
   assert.equal(saved.scheduleIntervalSeconds, 3);
+  assert.equal(saved.loadFactor, 25);
+  assert.equal(saved.rateMultiplier, 0.75);
+  assert.equal(saved.autoPauseOnExpired, false);
 });
 
 test('replenishment thresholds reject values below the new lower bounds', async () => {
@@ -254,6 +260,9 @@ test('delivery uses per-account charged amount and imports fixed account setting
   assert.deepEqual(imports.map((item) => item.concurrency), [5, 5]);
   assert.deepEqual(imports.map((item) => item.groupIds), [[1], [1]]);
   assert.deepEqual(imports.map((item) => item.priority), [20, 20]);
+  assert.deepEqual(imports.map((item) => item.loadFactor), [null, null]);
+  assert.deepEqual(imports.map((item) => item.rateMultiplier), [1, 1]);
+  assert.deepEqual(imports.map((item) => item.autoPauseOnExpired), [true, true]);
   assert.equal(imports[0].expiresAt > Math.floor(Date.now() / 1000), true);
 });
 

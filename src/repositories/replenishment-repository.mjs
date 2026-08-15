@@ -90,7 +90,10 @@ function rule(row) {
     maxOrderAmountCny: number(row.max_order_amount_cny),
     maxDailyAmountCny: number(row.max_daily_amount_cny),
     concurrency: Number(row.concurrency || 1),
+    loadFactor: number(row.load_factor),
     priority: Number(row.priority || 0),
+    rateMultiplier: Number(row.rate_multiplier ?? 1),
+    autoPauseOnExpired: row.auto_pause_on_expired === undefined ? true : Boolean(row.auto_pause_on_expired),
     verificationModel: row.verification_model || 'gpt-5.6-luna',
     verificationPrompt: row.verification_prompt || '',
     modelWhitelist: Array.isArray(row.model_whitelist) ? row.model_whitelist.map(String).filter(Boolean) : [],
@@ -338,7 +341,12 @@ function normalizeRuleInput(input) {
     maxOrderAmountCny: input.maxOrderAmountCny === null || input.maxOrderAmountCny === '' ? null : Number(input.maxOrderAmountCny),
     maxDailyAmountCny: input.maxDailyAmountCny === null || input.maxDailyAmountCny === '' ? null : Number(input.maxDailyAmountCny),
     concurrency: Number(input.concurrency || 1),
+    loadFactor: input.loadFactor === null || input.loadFactor === undefined || input.loadFactor === ''
+      ? null : Number(input.loadFactor),
     priority: Number(input.priority ?? 100),
+    rateMultiplier: input.rateMultiplier === null || input.rateMultiplier === undefined || input.rateMultiplier === ''
+      ? 1 : Number(input.rateMultiplier),
+    autoPauseOnExpired: input.autoPauseOnExpired !== false,
     verificationModel: String(input.verificationModel || 'gpt-5.6-luna').trim(),
     verificationPrompt: String(input.verificationPrompt || '').trim(),
     modelWhitelist: [...new Set((Array.isArray(input.modelWhitelist) ? input.modelWhitelist : []).map((value) => String(value).trim()).filter(Boolean))],
@@ -363,6 +371,13 @@ function normalizeRuleInput(input) {
   }
   if (!Number.isSafeInteger(values.replenishQuantity) || values.replenishQuantity < 1 || values.replenishQuantity > 1000) {
     throw badRequest('单次最多购买数量必须在 1 到 1000 之间');
+  }
+  if (values.loadFactor !== null
+    && (!Number.isSafeInteger(values.loadFactor) || values.loadFactor < 1 || values.loadFactor > 10000)) {
+    throw badRequest('负载因子必须留空或填写 1 到 10000 之间的整数');
+  }
+  if (!Number.isFinite(values.rateMultiplier) || values.rateMultiplier < 0 || values.rateMultiplier > 999999.9999) {
+    throw badRequest('账号计费倍率必须在 0 到 999999.9999 之间');
   }
   if (!Number.isFinite(values.quotaUsedThresholdPercent)
     || values.quotaUsedThresholdPercent < 0 || values.quotaUsedThresholdPercent > 100) {
@@ -444,7 +459,10 @@ export class ReplenishmentRepository {
       maxOrderAmountCny: 100,
       maxDailyAmountCny: 300,
       concurrency: 5,
+      loadFactor: null,
       priority: 20,
+      rateMultiplier: 1,
+      autoPauseOnExpired: true,
       verificationModel: 'gpt-5.6-luna',
       verificationPrompt: 'Reply with OK.',
       modelWhitelist: [],
@@ -585,7 +603,8 @@ export class ReplenishmentRepository {
       values.minAvailableAccounts, values.targetAvailableAccounts, values.replenishQuantity,
       values.quotaUsedThresholdPercent, values.quotaWindow, values.quotaUnknownPolicy,
       values.repairGraceSeconds, values.recoveryRetryLimit,
-      values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.priority,
+      values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.loadFactor,
+      values.priority, values.rateMultiplier, values.autoPauseOnExpired,
       values.verificationModel, values.verificationPrompt, values.pollIntervalSeconds,
       values.modelWhitelist,
       values.retryLimit, values.cooldownSeconds,
@@ -597,20 +616,22 @@ export class ReplenishmentRepository {
             name=$2,product_mapping_id=$3,mode=$4,enabled=$5,min_available_accounts=$6,
             target_available_accounts=$7,replenish_quantity=$8,quota_used_threshold_percent=$9,
             quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
-            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,priority=$17,
-            verification_model=$18,verification_prompt=$19,poll_interval_seconds=$20,
-            model_whitelist=$21,retry_limit=$22,cooldown_seconds=$23,schedule_start_time=$24,schedule_end_time=$25,
-            schedule_interval_seconds=$26,updated_at=NOW()
+            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,load_factor=$17,priority=$18,
+            rate_multiplier=$19,auto_pause_on_expired=$20,verification_model=$21,
+            verification_prompt=$22,poll_interval_seconds=$23,model_whitelist=$24,retry_limit=$25,
+            cooldown_seconds=$26,schedule_start_time=$27,schedule_end_time=$28,
+            schedule_interval_seconds=$29,updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
             name,product_mapping_id,mode,enabled,min_available_accounts,target_available_accounts,
             replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
             repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
-            concurrency,priority,verification_model,verification_prompt,poll_interval_seconds,
-            model_whitelist,retry_limit,cooldown_seconds,schedule_start_time,schedule_end_time,
+            concurrency,load_factor,priority,rate_multiplier,auto_pause_on_expired,verification_model,
+            verification_prompt,poll_interval_seconds,model_whitelist,retry_limit,cooldown_seconds,
+            schedule_start_time,schedule_end_time,
             schedule_interval_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
@@ -1793,7 +1814,8 @@ export class ReplenishmentRepository {
       SELECT i.*,o.rule_id,o.run_id,o.requested_quantity,o.valid_quantity AS order_valid_quantity,
         o.delivered_quantity,o.actual_paid_amount_cny,o.quoted_amount_cny,o.status AS order_status,
         o.product,o.platform,o.target_pool_key,o.external_order_id,
-        r.name AS rule_name,m.target_group_ids,r.concurrency,r.priority,m.platform AS rule_platform,
+        r.name AS rule_name,m.target_group_ids,r.concurrency,r.load_factor,r.priority,
+        r.rate_multiplier,r.auto_pause_on_expired,m.platform AS rule_platform,
         r.verification_model,r.verification_prompt,r.model_whitelist,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
         policy.retry_limit AS recovery_policy_retry_limit,
@@ -1818,7 +1840,9 @@ export class ReplenishmentRepository {
       },
       rule: {
         id: Number(row.rule_id), name: row.rule_name, targetGroupIds: (row.target_group_ids || []).map(Number),
-        concurrency: Number(row.concurrency || 1), priority: Number(row.priority || 0),
+        concurrency: Number(row.concurrency || 1), loadFactor: number(row.load_factor),
+        priority: Number(row.priority || 0), rateMultiplier: Number(row.rate_multiplier ?? 1),
+        autoPauseOnExpired: row.auto_pause_on_expired === undefined ? true : Boolean(row.auto_pause_on_expired),
         platform: row.rule_platform || row.platform, verificationModel: row.verification_model,
         verificationPrompt: row.verification_prompt,
         modelWhitelist: Array.isArray(row.model_whitelist) ? row.model_whitelist.map(String).filter(Boolean) : [],

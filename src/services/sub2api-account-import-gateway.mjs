@@ -175,7 +175,10 @@ export class Sub2ApiAccountImportGateway {
   async updateAccountConfiguration(accountId, {
     groupIds,
     concurrency,
+    loadFactor = null,
     priority,
+    rateMultiplier = 1,
+    autoPauseOnExpired = true,
     clearExpiration = true,
   }) {
     const id = normalizeAccountId(accountId);
@@ -184,10 +187,14 @@ export class Sub2ApiAccountImportGateway {
       body: {
         group_ids: [...new Set((groupIds || []).map(Number))],
         concurrency: Number(concurrency),
+        load_factor: loadFactor === null || loadFactor === undefined || loadFactor === ''
+          ? 0 : Number(loadFactor),
         priority: Number(priority),
+        rate_multiplier: rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === ''
+          ? 1 : Number(rateMultiplier),
+        auto_pause_on_expired: Boolean(autoPauseOnExpired),
         ...(clearExpiration ? {
           expires_at: null,
-          auto_pause_on_expired: false,
         } : {}),
         confirm_mixed_channel_risk: true,
       },
@@ -266,7 +273,10 @@ export class Sub2ApiAccountImportGateway {
     accountId,
     groupIds,
     concurrency,
+    loadFactor = null,
     priority,
+    rateMultiplier = 1,
+    autoPauseOnExpired = true,
     modelId,
     prompt,
     clearExpiration = true,
@@ -274,15 +284,30 @@ export class Sub2ApiAccountImportGateway {
     await this.updateAccountConfiguration(accountId, {
       groupIds,
       concurrency,
+      loadFactor,
       priority,
+      rateMultiplier,
+      autoPauseOnExpired,
       clearExpiration,
     });
     const confirmed = await this.getAccount(accountId);
     const confirmedGroups = (confirmed?.groups || confirmed?.group_ids || []).map((entry) => Number(entry?.id ?? entry));
     const expectedGroups = [...new Set((groupIds || []).map(Number))].sort((a, b) => a - b);
     const actualGroups = [...new Set(confirmedGroups)].sort((a, b) => a - b);
+    const confirmedLoadFactorRaw = confirmed?.load_factor ?? confirmed?.loadFactor;
+    const confirmedLoadFactor = confirmedLoadFactorRaw === null || confirmedLoadFactorRaw === undefined
+      || Number(confirmedLoadFactorRaw) === 0 ? null : Number(confirmedLoadFactorRaw);
+    const expectedLoadFactor = loadFactor === null || loadFactor === undefined || loadFactor === ''
+      ? null : Number(loadFactor);
+    const confirmedAutoPause = confirmed?.auto_pause_on_expired
+      ?? confirmed?.autoPauseOnExpired
+      ?? true;
     if (Number(confirmed?.concurrency) !== Number(concurrency)
+      || confirmedLoadFactor !== expectedLoadFactor
       || Number(confirmed?.priority) !== Number(priority)
+      || Number(confirmed?.rate_multiplier ?? confirmed?.rateMultiplier ?? 1)
+        !== Number(rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === '' ? 1 : rateMultiplier)
+      || Boolean(confirmedAutoPause) !== Boolean(autoPauseOnExpired)
       || JSON.stringify(actualGroups) !== JSON.stringify(expectedGroups)) {
       throw Object.assign(new Error('Sub2API account configuration verification failed'), {
         statusCode: 502,
@@ -300,7 +325,10 @@ export class Sub2ApiAccountImportGateway {
     credentials,
     groupIds,
     concurrency,
+    loadFactor = null,
     priority,
+    rateMultiplier = 1,
+    autoPauseOnExpired = true,
     modelId,
     prompt,
     expiresAt = null,
@@ -315,7 +343,10 @@ export class Sub2ApiAccountImportGateway {
       credentials: normalizedCredentials,
       group_ids: groupIds,
       concurrency,
+      ...(loadFactor === null || loadFactor === undefined || loadFactor === '' ? {} : { load_factor: loadFactor }),
       priority,
+      rate_multiplier: rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === '' ? 1 : rateMultiplier,
+      auto_pause_on_expired: autoPauseOnExpired,
       ...(expiresAt ? { expires_at: expiresAt } : {}),
     });
     const accountId = normalizeAccountId(created?.id);
@@ -324,7 +355,10 @@ export class Sub2ApiAccountImportGateway {
       accountId,
       groupIds,
       concurrency,
+      loadFactor,
       priority,
+      rateMultiplier,
+      autoPauseOnExpired,
       modelId,
       prompt,
       clearExpiration: !expiresAt,
