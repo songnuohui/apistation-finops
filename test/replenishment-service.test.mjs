@@ -95,6 +95,7 @@ test('replenishment thresholds allow equal minimum and target at the new lower b
     targetAvailableAccounts: 1,
     scheduleIntervalSeconds: 3,
     loadFactor: 25,
+    proxyId: 44,
     rateMultiplier: 0.75,
     autoPauseOnExpired: false,
   });
@@ -103,6 +104,7 @@ test('replenishment thresholds allow equal minimum and target at the new lower b
   assert.equal(saved.targetAvailableAccounts, 1);
   assert.equal(saved.scheduleIntervalSeconds, 3);
   assert.equal(saved.loadFactor, 25);
+  assert.equal(saved.proxyId, 44);
   assert.equal(saved.rateMultiplier, 0.75);
   assert.equal(saved.autoPauseOnExpired, false);
 });

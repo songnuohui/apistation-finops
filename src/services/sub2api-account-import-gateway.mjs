@@ -149,6 +149,24 @@ export class Sub2ApiAccountImportGateway {
       .sort((left, right) => left.sortOrder - right.sortOrder || left.id - right.id);
   }
 
+  async listProxies({ includeInactive = true } = {}) {
+    const payload = await this.jsonRequest(`/api/v1/admin/proxies/all${includeInactive ? '?include_inactive=true' : ''}`);
+    const proxies = Array.isArray(payload) ? payload : payload?.items;
+    if (!Array.isArray(proxies)) {
+      throw Object.assign(new Error('Sub2API returned an invalid proxy catalog'), { statusCode: 502 });
+    }
+    return proxies.map((proxy) => {
+      const id = Number(proxy?.id);
+      if (!Number.isSafeInteger(id) || id <= 0) return null;
+      return {
+        id, name: String(proxy?.name || '').trim().slice(0, 160),
+        protocol: String(proxy?.protocol || '').trim(), host: String(proxy?.host || '').trim(),
+        port: Number(proxy?.port || 0), status: String(proxy?.status || '').trim(),
+        expiresAt: proxy?.expires_at ?? proxy?.expiresAt ?? null,
+      };
+    }).filter(Boolean).sort((left, right) => left.name.localeCompare(right.name) || left.id - right.id);
+  }
+
   async listModelCandidates(groups = []) {
     const representativeGroups = new Map();
     for (const group of groups) {
@@ -176,6 +194,7 @@ export class Sub2ApiAccountImportGateway {
     groupIds,
     concurrency,
     loadFactor = null,
+    proxyId = null,
     priority,
     rateMultiplier = 1,
     autoPauseOnExpired = true,
@@ -189,6 +208,7 @@ export class Sub2ApiAccountImportGateway {
         concurrency: Number(concurrency),
         load_factor: loadFactor === null || loadFactor === undefined || loadFactor === ''
           ? 0 : Number(loadFactor),
+      proxy_id: proxyId === null || proxyId === undefined || proxyId === '' ? 0 : Number(proxyId),
         priority: Number(priority),
         rate_multiplier: rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === ''
           ? 1 : Number(rateMultiplier),
@@ -274,6 +294,7 @@ export class Sub2ApiAccountImportGateway {
     groupIds,
     concurrency,
     loadFactor = null,
+    proxyId = null,
     priority,
     rateMultiplier = 1,
     autoPauseOnExpired = true,
@@ -285,6 +306,7 @@ export class Sub2ApiAccountImportGateway {
       groupIds,
       concurrency,
       loadFactor,
+      proxyId,
       priority,
       rateMultiplier,
       autoPauseOnExpired,
@@ -302,8 +324,12 @@ export class Sub2ApiAccountImportGateway {
     const confirmedAutoPause = confirmed?.auto_pause_on_expired
       ?? confirmed?.autoPauseOnExpired
       ?? true;
+    const confirmedProxyIdRaw = confirmed?.proxy_id ?? confirmed?.proxyId;
+    const confirmedProxyId = confirmedProxyIdRaw === null || confirmedProxyIdRaw === undefined
+      || Number(confirmedProxyIdRaw) === 0 ? null : Number(confirmedProxyIdRaw);
     if (Number(confirmed?.concurrency) !== Number(concurrency)
       || confirmedLoadFactor !== expectedLoadFactor
+      || confirmedProxyId !== (proxyId === null || proxyId === undefined || proxyId === '' ? null : Number(proxyId))
       || Number(confirmed?.priority) !== Number(priority)
       || Number(confirmed?.rate_multiplier ?? confirmed?.rateMultiplier ?? 1)
         !== Number(rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === '' ? 1 : rateMultiplier)
@@ -326,6 +352,7 @@ export class Sub2ApiAccountImportGateway {
     groupIds,
     concurrency,
     loadFactor = null,
+    proxyId = null,
     priority,
     rateMultiplier = 1,
     autoPauseOnExpired = true,
@@ -344,6 +371,7 @@ export class Sub2ApiAccountImportGateway {
       group_ids: groupIds,
       concurrency,
       ...(loadFactor === null || loadFactor === undefined || loadFactor === '' ? {} : { load_factor: loadFactor }),
+      ...(proxyId === null || proxyId === undefined || proxyId === '' ? {} : { proxy_id: Number(proxyId) }),
       priority,
       rate_multiplier: rateMultiplier === null || rateMultiplier === undefined || rateMultiplier === '' ? 1 : rateMultiplier,
       auto_pause_on_expired: autoPauseOnExpired,
@@ -356,6 +384,7 @@ export class Sub2ApiAccountImportGateway {
       groupIds,
       concurrency,
       loadFactor,
+      proxyId,
       priority,
       rateMultiplier,
       autoPauseOnExpired,

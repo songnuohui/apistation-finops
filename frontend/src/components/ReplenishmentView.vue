@@ -294,6 +294,7 @@
           <label>固定并发数<input v-model.number="editor.concurrency" type="number" min="1" /></label>
           <label>固定优先级<input v-model.number="editor.priority" type="number" min="0" /></label>
           <label>账号负载因子<input v-model.number="editor.loadFactor" type="number" min="1" max="10000" placeholder="留空使用 Sub2API 默认" /></label>
+          <label>导入账号代理<select v-model.number="editor.proxyId"><option :value="null">无代理</option><option v-for="proxy in catalog.proxies || []" :key="proxy.id" :value="proxy.id">{{ proxy.name || `代理 #${proxy.id}` }} · {{ proxy.protocol }}://{{ proxy.host }}:{{ proxy.port }}<template v-if="proxy.status && proxy.status !== 'active'"> · {{ proxy.status }}</template></option></select><small class="field-hint">代理由 Sub2API 管理，导入、重试和修复时都会绑定到账号。</small></label>
           <label>账号计费倍率<input v-model.number="editor.rateMultiplier" type="number" min="0" max="999999.9999" step="0.0001" /></label>
           <label class="toggle-field full-field"><input v-model="editor.autoPauseOnExpired" type="checkbox" /><span><strong>账号过期自动暂停调度</strong><small>过期后由 Sub2API 自动停止调度。</small></span></label>
           <label>单次成本上限<input v-model.number="editor.maxOrderAmountCny" type="number" min="0" step="0.01" placeholder="留空不限制" /></label>
@@ -393,7 +394,7 @@ const eventsLoaded = ref(false);
 const ordersLoaded = ref(false);
 const recoveriesLoaded = ref(false);
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
-const catalog = ref<any>({ groups: [], platforms: [] });
+const catalog = ref<any>({ groups: [], platforms: [], proxies: [] });
 const modelSearch = ref('');
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
@@ -780,7 +781,7 @@ function newRule() {
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
     repairGraceSeconds: 900, recoveryRetryLimit: null,
     scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
-    maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, loadFactor: null, priority: 20,
+    maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, loadFactor: null, proxyId: null, priority: 20,
     rateMultiplier: 1, autoPauseOnExpired: true,
     verificationModel: 'gpt-5.6-luna',
     modelWhitelist: [],
@@ -795,6 +796,7 @@ function editRule(rule: any) {
     ...rule,
     kind: 'rule',
     loadFactor: rule.loadFactor ?? null,
+    proxyId: rule.proxyId ?? null,
     rateMultiplier: rule.rateMultiplier ?? 1,
     autoPauseOnExpired: rule.autoPauseOnExpired !== false,
     modelWhitelist: [...(rule.modelWhitelist || [])],

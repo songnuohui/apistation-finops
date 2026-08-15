@@ -91,6 +91,7 @@ function rule(row) {
     maxDailyAmountCny: number(row.max_daily_amount_cny),
     concurrency: Number(row.concurrency || 1),
     loadFactor: number(row.load_factor),
+    proxyId: number(row.proxy_id),
     priority: Number(row.priority || 0),
     rateMultiplier: Number(row.rate_multiplier ?? 1),
     autoPauseOnExpired: row.auto_pause_on_expired === undefined ? true : Boolean(row.auto_pause_on_expired),
@@ -343,6 +344,8 @@ function normalizeRuleInput(input) {
     concurrency: Number(input.concurrency || 1),
     loadFactor: input.loadFactor === null || input.loadFactor === undefined || input.loadFactor === ''
       ? null : Number(input.loadFactor),
+    proxyId: input.proxyId === null || input.proxyId === undefined || input.proxyId === ''
+      ? null : Number(input.proxyId),
     priority: Number(input.priority ?? 100),
     rateMultiplier: input.rateMultiplier === null || input.rateMultiplier === undefined || input.rateMultiplier === ''
       ? 1 : Number(input.rateMultiplier),
@@ -375,6 +378,9 @@ function normalizeRuleInput(input) {
   if (values.loadFactor !== null
     && (!Number.isSafeInteger(values.loadFactor) || values.loadFactor < 1 || values.loadFactor > 10000)) {
     throw badRequest('负载因子必须留空或填写 1 到 10000 之间的整数');
+  }
+  if (values.proxyId !== null && (!Number.isSafeInteger(values.proxyId) || values.proxyId <= 0)) {
+    throw badRequest('代理选择无效');
   }
   if (!Number.isFinite(values.rateMultiplier) || values.rateMultiplier < 0 || values.rateMultiplier > 999999.9999) {
     throw badRequest('账号计费倍率必须在 0 到 999999.9999 之间');
@@ -460,6 +466,7 @@ export class ReplenishmentRepository {
       maxDailyAmountCny: 300,
       concurrency: 5,
       loadFactor: null,
+      proxyId: null,
       priority: 20,
       rateMultiplier: 1,
       autoPauseOnExpired: true,
@@ -603,7 +610,7 @@ export class ReplenishmentRepository {
       values.minAvailableAccounts, values.targetAvailableAccounts, values.replenishQuantity,
       values.quotaUsedThresholdPercent, values.quotaWindow, values.quotaUnknownPolicy,
       values.repairGraceSeconds, values.recoveryRetryLimit,
-      values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.loadFactor,
+      values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.loadFactor, values.proxyId,
       values.priority, values.rateMultiplier, values.autoPauseOnExpired,
       values.verificationModel, values.verificationPrompt, values.pollIntervalSeconds,
       values.modelWhitelist,
@@ -616,22 +623,22 @@ export class ReplenishmentRepository {
             name=$2,product_mapping_id=$3,mode=$4,enabled=$5,min_available_accounts=$6,
             target_available_accounts=$7,replenish_quantity=$8,quota_used_threshold_percent=$9,
             quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
-            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,load_factor=$17,priority=$18,
-            rate_multiplier=$19,auto_pause_on_expired=$20,verification_model=$21,
-            verification_prompt=$22,poll_interval_seconds=$23,model_whitelist=$24,retry_limit=$25,
-            cooldown_seconds=$26,schedule_start_time=$27,schedule_end_time=$28,
-            schedule_interval_seconds=$29,updated_at=NOW()
+            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,load_factor=$17,proxy_id=$18,priority=$19,
+            rate_multiplier=$20,auto_pause_on_expired=$21,verification_model=$22,
+            verification_prompt=$23,poll_interval_seconds=$24,model_whitelist=$25,retry_limit=$26,
+            cooldown_seconds=$27,schedule_start_time=$28,schedule_end_time=$29,
+            schedule_interval_seconds=$30,updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
             name,product_mapping_id,mode,enabled,min_available_accounts,target_available_accounts,
             replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
             repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
-            concurrency,load_factor,priority,rate_multiplier,auto_pause_on_expired,verification_model,
+            concurrency,load_factor,proxy_id,priority,rate_multiplier,auto_pause_on_expired,verification_model,
             verification_prompt,poll_interval_seconds,model_whitelist,retry_limit,cooldown_seconds,
             schedule_start_time,schedule_end_time,
             schedule_interval_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
@@ -1814,7 +1821,7 @@ export class ReplenishmentRepository {
       SELECT i.*,o.rule_id,o.run_id,o.requested_quantity,o.valid_quantity AS order_valid_quantity,
         o.delivered_quantity,o.actual_paid_amount_cny,o.quoted_amount_cny,o.status AS order_status,
         o.product,o.platform,o.target_pool_key,o.external_order_id,
-        r.name AS rule_name,m.target_group_ids,r.concurrency,r.load_factor,r.priority,
+        r.name AS rule_name,m.target_group_ids,r.concurrency,r.load_factor,r.proxy_id,r.priority,
         r.rate_multiplier,r.auto_pause_on_expired,m.platform AS rule_platform,
         r.verification_model,r.verification_prompt,r.model_whitelist,
         policy.enabled AS recovery_enabled,policy.mode AS recovery_mode,
@@ -1840,7 +1847,7 @@ export class ReplenishmentRepository {
       },
       rule: {
         id: Number(row.rule_id), name: row.rule_name, targetGroupIds: (row.target_group_ids || []).map(Number),
-        concurrency: Number(row.concurrency || 1), loadFactor: number(row.load_factor),
+        concurrency: Number(row.concurrency || 1), loadFactor: number(row.load_factor), proxyId: number(row.proxy_id),
         priority: Number(row.priority || 0), rateMultiplier: Number(row.rate_multiplier ?? 1),
         autoPauseOnExpired: row.auto_pause_on_expired === undefined ? true : Boolean(row.auto_pause_on_expired),
         platform: row.rule_platform || row.platform, verificationModel: row.verification_model,

@@ -44,7 +44,7 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
       return new Response(JSON.stringify({
         data: {
           id: 2780, group_ids: [9, 3], concurrency: 7, priority: 2,
-          load_factor: 12, rate_multiplier: 0.75, auto_pause_on_expired: false,
+          load_factor: 12, proxy_id: 44, rate_multiplier: 0.75, auto_pause_on_expired: false,
         },
       }), { status: 200 });
     }
@@ -72,6 +72,7 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
     groupIds: [3, 9],
     concurrency: 7,
     loadFactor: 12,
+    proxyId: 44,
     priority: 2,
     rateMultiplier: 0.75,
     autoPauseOnExpired: false,
@@ -90,12 +91,31 @@ test('Sub2API import fixes and verifies groups, concurrency and priority', async
   assert.deepEqual(putBody.group_ids, [3, 9]);
   assert.equal(putBody.concurrency, 7);
   assert.equal(putBody.load_factor, 12);
+  assert.equal(putBody.proxy_id, 44);
   assert.equal(putBody.priority, 2);
   assert.equal(putBody.rate_multiplier, 0.75);
   assert.equal(putBody.auto_pause_on_expired, false);
   const testBody = JSON.parse(requests.find((entry) => entry.url.endsWith('/test')).options.body);
   assert.equal(testBody.model_id, 'gpt-5.6-luna');
   assert.equal(testBody.prompt, 'Reply with OK.');
+});
+
+test('Sub2API proxy catalog returns selectable non-secret proxy metadata', async () => {
+  const gateway = new Sub2ApiAccountImportGateway(config, console, async (url) => {
+    assert.equal(url, 'https://sub2api.example/api/v1/admin/proxies/all?include_inactive=true');
+    return new Response(JSON.stringify({ data: [
+      { id: 44, name: '美国ip', protocol: 'socks5', host: '15.204.89.179', port: 1179, username: 'hidden', password: 'hidden', status: 'active' },
+      { id: 12, name: '无效代理', protocol: 'http', host: 'old.example', port: 8080, status: 'inactive' },
+    ] }), { status: 200 });
+  });
+  gateway.setAccessTokenProvider({
+    async getAuthentication() { return { credential: 'admin-key', headers: { 'x-api-key': 'admin-key' } }; },
+  });
+
+  assert.deepEqual(await gateway.listProxies(), [
+    { id: 44, name: '美国ip', protocol: 'socks5', host: '15.204.89.179', port: 1179, status: 'active', expiresAt: null },
+    { id: 12, name: '无效代理', protocol: 'http', host: 'old.example', port: 8080, status: 'inactive', expiresAt: null },
+  ]);
 });
 
 test('blank load factor clears the Sub2API override and keeps explicit zero multiplier', async () => {

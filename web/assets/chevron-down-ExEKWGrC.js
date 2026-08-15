@@ -1,0 +1,1 @@
+import{p as e}from"./index-Di1_v5VM.js";var t=e(`ChevronDownIcon`,[[`path`,{d:`m6 9 6 6 6-6`,key:`qrunsl`}]]);export{t};
