@@ -85,6 +85,40 @@ test('replenishment schedule accepts daily execution windows and intervals', asy
   assert.equal(saved.scheduleIntervalSeconds, 180);
 });
 
+test('replenishment thresholds allow equal minimum and target at the new lower bounds', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  const saved = await repository.saveRule({
+    ...current,
+    minAvailableAccounts: 1,
+    targetAvailableAccounts: 1,
+    scheduleIntervalSeconds: 3,
+  });
+
+  assert.equal(saved.minAvailableAccounts, 1);
+  assert.equal(saved.targetAvailableAccounts, 1);
+  assert.equal(saved.scheduleIntervalSeconds, 3);
+});
+
+test('replenishment thresholds reject values below the new lower bounds', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  await assert.rejects(
+    repository.saveRule({ ...current, minAvailableAccounts: 0 }),
+    (error) => error?.statusCode === 400 && /1/.test(error.message),
+  );
+  await assert.rejects(
+    repository.saveRule({ ...current, minAvailableAccounts: 2, targetAvailableAccounts: 1 }),
+    (error) => error?.statusCode === 400 && /不能低于/.test(error.message),
+  );
+  await assert.rejects(
+    repository.saveRule({ ...current, scheduleIntervalSeconds: 2 }),
+    (error) => error?.statusCode === 400 && /3/.test(error.message),
+  );
+});
+
 test('recovery policy is independent from replenishment rule enablement', async () => {
   const repository = new ReplenishmentRepository(null, config);
   await repository.setRuleEnabled(1, false);

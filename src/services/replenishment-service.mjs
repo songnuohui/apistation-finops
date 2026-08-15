@@ -412,7 +412,7 @@ export class ReplenishmentService {
 
   start() {
     if (this.timer || this.config.demoMode) return;
-    const intervalMs = Math.max(10_000, Number(this.config.replenishmentTickSeconds || 30) * 1000);
+    const intervalMs = Math.max(3_000, Number(this.config.replenishmentTickSeconds || 3) * 1000);
     this.timer = setInterval(() => this.tick().catch((error) => {
       this.logger.warn('[replenishment] tick failed', error?.message || error);
     }), intervalMs);

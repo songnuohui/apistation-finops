@@ -354,12 +354,12 @@ function normalizeRuleInput(input) {
     throw badRequest('请选择有效的商品映射');
   }
   if (!['observe', 'approval', 'auto'].includes(values.mode)) throw badRequest('运行模式无效');
-  if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 0) {
-    throw badRequest('最低有效库存必须是非负整数');
+  if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 1) {
+    throw badRequest('最低有效库存必须是至少为 1 的整数');
   }
   if (!Number.isSafeInteger(values.targetAvailableAccounts)
-    || values.targetAvailableAccounts <= values.minAvailableAccounts) {
-    throw badRequest('目标库存必须大于最低有效库存');
+    || values.targetAvailableAccounts < values.minAvailableAccounts) {
+    throw badRequest('目标库存不能低于最低有效库存');
   }
   if (!Number.isSafeInteger(values.replenishQuantity) || values.replenishQuantity < 1 || values.replenishQuantity > 1000) {
     throw badRequest('单次最多购买数量必须在 1 到 1000 之间');
@@ -383,8 +383,8 @@ function normalizeRuleInput(input) {
     throw badRequest('自动补号执行时段必须是有效的 24 小时时间');
   }
   if (!Number.isSafeInteger(values.scheduleIntervalSeconds)
-    || values.scheduleIntervalSeconds < 30 || values.scheduleIntervalSeconds > 86400) {
-    throw badRequest('自动补号轮询间隔必须在 30 到 86400 秒之间');
+    || values.scheduleIntervalSeconds < 3 || values.scheduleIntervalSeconds > 86400) {
+    throw badRequest('自动补号轮询间隔必须在 3 到 86400 秒之间');
   }
   return values;
 }

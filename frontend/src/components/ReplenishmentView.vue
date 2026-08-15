@@ -273,7 +273,7 @@
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
           <label>商品映射<select v-model.number="editor.productMappingId" @change="onRuleMappingChange"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
-          <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="0" /></label>
+          <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /></label>
           <label>目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
           <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
           <label>额度消耗阈值<input v-model.number="editor.quotaUsedThresholdPercent" type="number" min="0" max="100" step="1" /></label>
@@ -281,7 +281,7 @@
           <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
           <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
           <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
-          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="30" max="86400" /></label>
+          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" /></label>
           <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
           <label class="full-field">独立修复策略
             <span class="policy-editor">
@@ -803,7 +803,8 @@ function validateEditor() {
     return '';
   }
   if (!editor.value.name) return '请输入策略名称。';
-  if (Number(editor.value.targetAvailableAccounts) <= Number(editor.value.minAvailableAccounts)) return '目标库存必须大于最低有效库存。';
+  if (Number(editor.value.minAvailableAccounts) < 1) return '最低有效库存必须至少为 1。';
+  if (Number(editor.value.targetAvailableAccounts) < Number(editor.value.minAvailableAccounts)) return '目标库存不能低于最低有效库存。';
   return '';
 }
 
