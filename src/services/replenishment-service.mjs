@@ -391,6 +391,15 @@ function intervalElapsed(lastAt, seconds, nowMs) {
     || nowMs - Date.parse(lastAt) >= Number(seconds || 0) * 1000;
 }
 
+function recentlyHealthyAfterReadError(tracked, rule, nowMs) {
+  if (!tracked || !['healthy', 'quota_unknown'].includes(tracked.healthStatus)) return false;
+  const lastHealthAt = Date.parse(String(tracked.lastHealthAt || ''));
+  if (!Number.isFinite(lastHealthAt) || nowMs < lastHealthAt) return false;
+  // Do not turn a transient upstream/API failure into an apparent shortage.
+  const graceSeconds = Math.max(30, Number(rule.scheduleIntervalSeconds || 0) * 2);
+  return nowMs - lastHealthAt <= graceSeconds * 1000;
+}
+
 export class ReplenishmentService {
   constructor(repository, oauthSupplyAuthService, sub2ApiGateway, config, logger = console, {
     client,
@@ -1197,6 +1206,10 @@ export class ReplenishmentService {
         && !expired
         && !authFailed
         && !repairing;
+      const staleHealthy = Boolean(readError)
+        && !authFailed
+        && !repairing
+        && recentlyHealthyAfterReadError(tracked, rule, this.now());
       const quota = quotaSnapshot(account, usage);
       const selected = selectedQuota(quota, rule.quotaWindow);
       const quotaUnknown = selected.value === null;
@@ -1208,9 +1221,14 @@ export class ReplenishmentService {
         repairingAccounts += 1;
         const ageMs = this.now() - Date.parse(recoveryJob.firstSeenAt || new Date(this.now()).toISOString());
         if (ageMs < rule.repairGraceSeconds * 1000) graceRepairingAccounts += 1;
-      } else if (!healthyStatus) {
+      } else if (!healthyStatus && !staleHealthy) {
         healthStatus = 'unavailable';
         unavailableAccounts += 1;
+      } else if (staleHealthy) {
+        // Keep the last known healthy state until the read error outlives the
+        // grace window; a successful read will replace it on the next pass.
+        healthStatus = tracked.healthStatus;
+        effectiveAccounts += 1;
       } else if (lowQuota || unknownCountsLow) {
         healthStatus = 'low_quota';
         lowQuotaAccounts += 1;
@@ -1223,11 +1241,15 @@ export class ReplenishmentService {
         healthStatus,
         quotaUsedPercent: selected.value,
         quotaWindow: selected.window,
-        lastHealthAt: new Date(this.now()).toISOString(),
-        errorMessage: authFailed
+        lastHealthAt: staleHealthy
+          ? tracked.lastHealthAt
+          : new Date(this.now()).toISOString(),
+        errorMessage: staleHealthy
+          ? 'Sub2API account temporarily unavailable; using last known healthy state'
+          : authFailed
           ? 'Sub2API account requires reauthentication'
-          : healthyStatus
-            ? ''
+            : healthyStatus
+              ? ''
             : tracked.errorMessage,
       });
       accounts.push({
@@ -1246,6 +1268,7 @@ export class ReplenishmentService {
         tempUnschedulableUntil: schedule.tempUnschedulableUntil,
         tempUnschedulableReason: schedule.tempUnschedulableReason,
         expired,
+        staleHealthy,
         expiresAt,
         readError,
         lastError: readError || account?.error_message || account?.errorMessage || '',
@@ -1361,6 +1384,12 @@ export class ReplenishmentService {
         status: rule.mode === 'approval' ? 'approval_required' : 'ordering',
         idempotencyKey,
       });
+      if (!planned) {
+        await recordDecision('order_skipped', '已有进行中的补号订单，本轮不重复下单', {
+          reason: 'already_active', inventory: snapshot,
+        });
+        return { status: 'already_active', inventory: snapshot };
+      }
       await this.repository.addEvent({
         ruleId: rule.id,
         runId: planned.runId,

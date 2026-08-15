@@ -702,6 +702,43 @@ test('only normal and schedulable Sub2API accounts count as effective inventory'
   assert.deepEqual(snapshot.accounts.map((account) => account.schedulable), [true, false, false, true, true]);
 });
 
+test('a transient Sub2API read failure keeps the last known healthy account in inventory', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.scheduleIntervalSeconds = 3;
+  const tracked = await trackedItem(repository, rule, 36, 136);
+  let now = Date.parse('2026-08-15T12:00:00Z');
+  let readable = true;
+  const gateway = {
+    async getAccount(id) {
+      if (!readable) throw Object.assign(new Error('Sub2API temporarily unavailable'), { statusCode: 503 });
+      return { id, platform: 'openai', status: 'active', schedulable: true, group_ids: [1] };
+    },
+    async getAccountUsage() {
+      return { codex_7d_used_percent: 20 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, {
+    client: {},
+    now: () => now,
+  });
+
+  assert.equal((await service.inspectRuleInventory(rule)).effectiveAccounts, 1);
+  readable = false;
+  now += 10_000;
+  const duringFailure = await service.inspectRuleInventory(rule);
+  assert.equal(duringFailure.effectiveAccounts, 1);
+  assert.equal(duringFailure.accounts[0].staleHealthy, true);
+  assert.equal(duringFailure.accounts[0].healthStatus, 'healthy');
+
+  now += 31_000;
+  const afterGrace = await service.inspectRuleInventory(rule);
+  assert.equal(afterGrace.effectiveAccounts, 0);
+  assert.equal(afterGrace.accounts[0].staleHealthy, false);
+  assert.equal(afterGrace.accounts[0].healthStatus, 'unavailable');
+  assert.equal((await repository.getOrderItem(tracked.id)).healthStatus, 'unavailable');
+});
+
 test('inventory exactly at the minimum threshold does not replenish', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);

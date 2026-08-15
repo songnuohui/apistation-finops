@@ -1109,6 +1109,21 @@ export class ReplenishmentRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // Serialize creation per strategy and re-check active orders in the
+      // same transaction to close the check-then-insert race.
+      await client.query(`
+        SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`apistation-finops:replenishment-rule:${selectedRule.id}`]);
+      const active = await client.query(`
+        SELECT 1 FROM ${this.schema}.oauth_supply_orders
+        WHERE rule_id=$1
+          AND status=ANY($2::text[])
+        LIMIT 1`,
+      [selectedRule.id, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
+      if (active.rowCount) {
+        await client.query('ROLLBACK');
+        return null;
+      }
       const runResult = await client.query(`
         INSERT INTO ${this.schema}.replenishment_runs(
           rule_id,trigger,mode,status,requested_quantity,available_before,quoted_amount_cny,created_by)
