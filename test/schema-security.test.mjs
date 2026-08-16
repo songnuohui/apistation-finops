@@ -309,6 +309,14 @@ test('replenishment schedules and recovery policies remain FinOps-owned', () => 
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
 
+test('replenishment trigger strategies remain FinOps-owned and constrained', () => {
+  const migration = read('migrations/053_replenishment_trigger_strategy.sql');
+  assert.match(migration, /ALTER TABLE \{\{FINOPS_SCHEMA\}\}\.replenishment_rules/);
+  assert.match(migration, /trigger_strategy VARCHAR\(32\) NOT NULL DEFAULT 'inventory_threshold'/);
+  assert.match(migration, /CHECK \(trigger_strategy IN \('inventory_threshold','fixed_schedule'\)\)/);
+  assert.doesNotMatch(migration, /sub2api/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

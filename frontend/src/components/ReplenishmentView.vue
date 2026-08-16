@@ -33,7 +33,7 @@
     <div v-if="activeSection === 'setup'" class="replenishment-layout">
       <section class="panel">
         <div class="panel-head">
-          <div><h2>补号策略</h2><p>有效库存达到阈值时补到目标数量；在途订单和修复等待会自动扣除。</p></div>
+          <div><h2>补号策略</h2><p>可按有效库存补到目标数量，也可在执行时段内定时购买固定数量。</p></div>
           <button class="primary-button" @click="newRule"><Plus :size="15" />新增策略</button>
         </div>
         <div v-if="!rules.length" class="empty-state">还没有补号策略</div>
@@ -44,18 +44,22 @@
                 <strong>{{ rule.name }}</strong>
                 <span class="status-pill" :class="rule.enabled ? 'success' : 'warning'">{{ rule.enabled ? '启用' : '停用' }}</span>
                 <span class="mode-pill">{{ modeLabel(rule.mode) }}</span>
+                <span class="mode-pill">{{ triggerStrategyLabel(rule.triggerStrategy) }}</span>
               </div>
               <small>{{ rule.product }} · {{ platformText(rule.platform) }} · {{ groupSummary(rule.targetGroupIds) }}</small>
               <div class="rule-facts">
-                <span>有效 {{ rule.lastInventorySnapshot?.effectiveAccounts ?? '--' }}</span>
-                <span>≤ {{ rule.minAvailableAccounts }} 触发</span>
-                <span>补到 {{ rule.targetAvailableAccounts }}</span>
-                <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
+                <template v-if="rule.triggerStrategy !== 'fixed_schedule'">
+                  <span>有效 {{ rule.lastInventorySnapshot?.effectiveAccounts ?? '--' }}</span>
+                  <span>低于 {{ rule.minAvailableAccounts }} 触发</span>
+                  <span>补到 {{ rule.targetAvailableAccounts }}</span>
+                  <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
+                </template>
+                <span v-else>每次固定购买 {{ rule.replenishQuantity }}</span>
                 <span>补号时段 {{ rule.scheduleStartTime }}-{{ rule.scheduleEndTime }}</span>
                 <span>补号间隔 {{ duration(rule.scheduleIntervalSeconds) }}</span>
                 <span>修复策略 {{ recoveryPolicyFor(rule).enabled ? (recoveryPolicyFor(rule).mode === 'auto' ? '自动' : '手动') : '停用' }}</span>
               </div>
-              <div v-if="rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
+              <div v-if="rule.triggerStrategy !== 'fixed_schedule' && rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
                 <span>跟踪 {{ rule.lastInventorySnapshot.trackedAccounts || 0 }}</span>
                 <span>低额度 {{ rule.lastInventorySnapshot.lowQuotaAccounts || 0 }}</span>
                 <span>修复中 {{ rule.lastInventorySnapshot.repairingAccounts || 0 }}</span>
@@ -69,7 +73,7 @@
                 <Pause v-if="rule.enabled" :size="15" />
                 <Play v-else :size="15" />
               </button>
-              <button class="icon-button" title="立即检查并按策略执行" :disabled="actioningId === `rule-${rule.id}`" @click="trigger(rule)"><Zap :size="15" /></button>
+              <button class="icon-button" :title="rule.triggerStrategy === 'fixed_schedule' ? '立即执行一次' : '立即检查库存'" :disabled="actioningId === `rule-${rule.id}`" @click="trigger(rule)"><Zap :size="15" /></button>
               <button class="icon-button" title="编辑策略" @click="editRule(rule)"><Settings2 :size="15" /></button>
               <button class="icon-button danger-action" title="删除策略" :disabled="actioningId === `rule-${rule.id}`" @click="removeRule(rule)"><Trash2 :size="15" /></button>
             </div>
@@ -273,16 +277,20 @@
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
           <label>商品映射<select v-model.number="editor.productMappingId" @change="onRuleMappingChange"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
-          <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /></label>
-          <label>目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
-          <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
-          <label>额度消耗阈值<input v-model.number="editor.quotaUsedThresholdPercent" type="number" min="0" max="100" step="1" /></label>
-          <label>额度判断窗口<select v-model="editor.quotaWindow"><option value="any">任一窗口</option><option value="short">短窗口（5小时）</option><option value="long">长窗口（7天）</option></select></label>
-          <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
+          <label>补号方式<select v-model="editor.triggerStrategy"><option value="inventory_threshold">按库存补号</option><option value="fixed_schedule">定时定量补号</option></select></label>
+          <template v-if="editor.triggerStrategy !== 'fixed_schedule'">
+            <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /></label>
+            <label>目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
+            <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
+            <label>额度消耗阈值<input v-model.number="editor.quotaUsedThresholdPercent" type="number" min="0" max="100" step="1" /></label>
+            <label>额度判断窗口<select v-model="editor.quotaWindow"><option value="any">任一窗口</option><option value="short">短窗口（5小时）</option><option value="long">长窗口（7天）</option></select></label>
+            <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
+            <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
+          </template>
+          <label v-else>每次固定购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
           <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
           <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
           <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" /></label>
-          <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
           <label class="full-field">独立修复策略
             <span class="policy-editor">
               <select v-model="recoveryEditor.mode"><option value="manual">手动修复</option><option value="auto">自动修复</option></select>
@@ -447,8 +455,13 @@ const money = (value: any) => value === null || value === undefined ? '--' : `¥
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 const dateTimeWithSeconds = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '--';
-const duration = (seconds: any) => Number(seconds) >= 3600 ? `${Math.round(Number(seconds) / 3600)} 小时` : `${Math.round(Number(seconds) / 60)} 分钟`;
+const duration = (seconds: any) => Number(seconds) >= 3600
+  ? `${Math.round(Number(seconds) / 3600)} 小时`
+  : Number(seconds) >= 60
+    ? `${Math.round(Number(seconds) / 60)} 分钟`
+    : `${Number(seconds) || 0} 秒`;
 const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', auto: '全自动' } as Record<string, string>)[value] || value;
+const triggerStrategyLabel = (value: string) => value === 'fixed_schedule' ? '定时定量' : '按库存';
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusOptions = Object.entries({
@@ -488,7 +501,7 @@ const eventTypeLabel = (value: string) => ({
 const eventTone = (value: string) => ['rule_execution_failed', 'import_failed', 'recovery_manual_required'].includes(value)
   ? 'danger' : ['rule_blocked', 'order_skipped', 'approval_required', 'recovery_retry_scheduled', 'account_recovery_detected', 'rule_disabled'].includes(value)
     ? 'warning' : 'success';
-const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : value === 'scheduled' ? '自动检查' : '系统任务';
+const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : value === 'scheduled' ? '自动执行' : '系统任务';
 const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
 const groupSummary = (ids: any[] = []) => ids.length ? ids.map((id) => groupById.value.get(Number(id))?.name || `分组 #${id}`).join('、') : '未选择正式分组';
 const orderGroupSummary = (order: any) => groupSummary(rules.value.find((rule) => Number(rule.id) === Number(order.ruleId))?.targetGroupIds || []);
@@ -512,7 +525,7 @@ function eventAction(event: any) {
   const rule = relatedRule(event);
   if (event?.eventType === 'rule_disabled' && rule && !rule.enabled) return { type: 'enable', label: '启动策略', target: rule };
   if (rule?.enabled && ['inventory_healthy', 'order_skipped', 'rule_blocked', 'observed_replenishment', 'rule_execution_failed'].includes(event?.eventType)) {
-    return { type: 'trigger', label: '立即检查', target: rule };
+    return { type: 'trigger', label: rule.triggerStrategy === 'fixed_schedule' ? '立即执行一次' : '立即检查库存', target: rule };
   }
   return null;
 }
@@ -530,6 +543,7 @@ function eventDetailEntries(event: any) {
     error: '错误信息', externalOrderId: '供应商订单号', quantity: '计划购买数量',
     quotedCny: '报价（CNY）', reason: '原因代码', remoteStatus: '供应商状态',
     supplierAvailable: '供应商可售数量', trigger: '触发方式',
+    triggerStrategy: '补号方式', scheduledFor: '计划执行时间', projectedInventory: '投影库存',
   };
   return Object.entries(event?.details || {})
     .filter(([key]) => key !== 'trigger')
@@ -755,7 +769,9 @@ async function runEventAction(event: any) {
       emit('toast', `策略“${action.target.name}”已启动`);
     } else if (action.type === 'trigger') {
       await send('/replenishment/trigger', 'POST', { ruleId: action.target.id });
-      emit('toast', `策略“${action.target.name}”检查已完成`);
+      emit('toast', action.target.triggerStrategy === 'fixed_schedule'
+        ? `策略“${action.target.name}”已执行一次`
+        : `策略“${action.target.name}”库存检查已完成`);
     }
     selectedEvent.value = null;
     await load();
@@ -777,6 +793,7 @@ function newRule() {
   editorError.value = '';
   editor.value = {
     kind: 'rule', name: '', productMappingId: first.id, mode: 'observe', enabled: false,
+    triggerStrategy: 'inventory_threshold',
     minAvailableAccounts: 2, targetAvailableAccounts: 5, replenishQuantity: 3,
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
     repairGraceSeconds: 900, recoveryRetryLimit: null,
@@ -795,6 +812,7 @@ function editRule(rule: any) {
   editor.value = {
     ...rule,
     kind: 'rule',
+    triggerStrategy: rule.triggerStrategy || 'inventory_threshold',
     loadFactor: rule.loadFactor ?? null,
     proxyId: rule.proxyId ?? null,
     rateMultiplier: rule.rateMultiplier ?? 1,
@@ -816,8 +834,14 @@ function validateEditor() {
     return '';
   }
   if (!editor.value.name) return '请输入策略名称。';
-  if (Number(editor.value.minAvailableAccounts) < 1) return '最低有效库存必须至少为 1。';
-  if (Number(editor.value.targetAvailableAccounts) < Number(editor.value.minAvailableAccounts)) return '目标库存不能低于最低有效库存。';
+  if (editor.value.triggerStrategy !== 'fixed_schedule') {
+    if (Number(editor.value.minAvailableAccounts) < 1) return '最低有效库存必须至少为 1。';
+    if (Number(editor.value.targetAvailableAccounts) < Number(editor.value.minAvailableAccounts)) return '目标库存不能低于最低有效库存。';
+  }
+  if (!Number.isInteger(Number(editor.value.replenishQuantity))
+    || Number(editor.value.replenishQuantity) < 1 || Number(editor.value.replenishQuantity) > 1000) {
+    return '购买数量必须在 1 到 1000 之间。';
+  }
   const loadFactor = editor.value.loadFactor;
   if (loadFactor !== null && loadFactor !== undefined && loadFactor !== ''
     && (!Number.isInteger(Number(loadFactor)) || Number(loadFactor) < 1 || Number(loadFactor) > 10000)) {
@@ -865,7 +889,11 @@ async function saveEditor() {
 }
 async function trigger(rule: any) {
   actioningId.value = `rule-${rule.id}`;
-  try { await send('/replenishment/trigger', 'POST', { ruleId: rule.id }); emit('toast', '库存检查已完成'); await load(); }
+  try {
+    await send('/replenishment/trigger', 'POST', { ruleId: rule.id });
+    emit('toast', rule.triggerStrategy === 'fixed_schedule' ? '已执行一次' : '库存检查已完成');
+    await load();
+  }
   catch (err: any) { error.value = err.message || '执行补号失败'; }
   finally { actioningId.value = ''; }
 }

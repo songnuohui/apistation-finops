@@ -85,6 +85,19 @@ test('replenishment schedule accepts daily execution windows and intervals', asy
   assert.equal(saved.scheduleIntervalSeconds, 180);
 });
 
+test('replenishment trigger strategy is validated and stored', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  const saved = await repository.saveRule({ ...current, triggerStrategy: 'fixed_schedule' });
+
+  assert.equal(saved.triggerStrategy, 'fixed_schedule');
+  await assert.rejects(
+    repository.saveRule({ ...current, triggerStrategy: 'unknown' }),
+    /补号方式无效/,
+  );
+});
+
 test('replenishment thresholds allow equal minimum and target at the new lower bounds', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const current = await repository.getRule(1);
@@ -765,6 +778,134 @@ test('inventory exactly at the minimum threshold does not replenish', async () =
 
   assert.equal(result.status, 'healthy');
   assert.equal(result.available, 2);
+});
+
+test('inventory strategy reserves grace repairs and pending accounts before sizing an order', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, {
+    mode: 'observe',
+    triggerStrategy: 'inventory_threshold',
+    minAvailableAccounts: 3,
+    targetAvailableAccounts: 5,
+    replenishQuantity: 10,
+  });
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async inventory({ quantity }) {
+        assert.equal(quantity, 3);
+        return { payload: { available: 20, estimated_total_fen: 300 } };
+      },
+    },
+  });
+  service.inspectRuleInventory = async () => ({
+    capturedAt: new Date().toISOString(), trackedAccounts: 2, effectiveAccounts: 0,
+    lowQuotaAccounts: 0, unavailableAccounts: 0, repairingAccounts: 1,
+    graceRepairingAccounts: 1, unknownQuotaAccounts: 0, pendingAccounts: 1, accounts: [],
+  });
+
+  const result = await service.createOrderForRule(rule);
+
+  assert.equal(result.status, 'observed_need');
+  assert.equal(result.quantity, 3);
+});
+
+test('an expired repair grace no longer reserves inventory', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, {
+    mode: 'observe', triggerStrategy: 'inventory_threshold', minAvailableAccounts: 1,
+    targetAvailableAccounts: 1, replenishQuantity: 1,
+  });
+  let inventoryCalls = 0;
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async inventory() {
+        inventoryCalls += 1;
+        return { payload: { available: 5, estimated_total_fen: 100 } };
+      },
+    },
+  });
+  service.inspectRuleInventory = async () => ({
+    capturedAt: new Date().toISOString(), trackedAccounts: 1, effectiveAccounts: 0,
+    lowQuotaAccounts: 0, unavailableAccounts: 0, repairingAccounts: 1,
+    graceRepairingAccounts: 0, unknownQuotaAccounts: 0, pendingAccounts: 0, accounts: [],
+  });
+
+  const result = await service.createOrderForRule(rule);
+
+  assert.equal(result.status, 'observed_need');
+  assert.equal(result.quantity, 1);
+  assert.equal(inventoryCalls, 1);
+});
+
+test('fixed schedule buys the configured quantity without inspecting Sub2API inventory', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, {
+    mode: 'approval', triggerStrategy: 'fixed_schedule', replenishQuantity: 4,
+  });
+  const service = new ReplenishmentService(repository, authStub(), {
+    async getAccount() { throw new Error('Sub2API inventory must not be inspected'); },
+  }, config, console, {
+    client: {
+      async inventory({ quantity }) {
+        assert.equal(quantity, 4);
+        return { payload: { available: 10, estimated_total_fen: 400 } };
+      },
+      async balance() { return { payload: { available_fen: 10000 } }; },
+    },
+    now: () => Date.parse('2026-08-16T12:00:01Z'),
+  });
+  service.inspectRuleInventory = async () => { throw new Error('target inventory must not be inspected'); };
+
+  const result = await service.createOrderForRule(rule, {
+    scheduledFor: '2026-08-16T12:00:00.000Z',
+  });
+
+  assert.equal(result.requestedQuantity, 4);
+  assert.equal(result.availableBefore ?? null, null);
+  assert.equal((await repository.listOrders()).length, 1);
+});
+
+test('fixed schedule skips an active order before querying supplier inventory', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, { mode: 'approval', triggerStrategy: 'fixed_schedule', replenishQuantity: 2 });
+  await repository.createPlannedOrder({
+    rule, trigger: 'manual', quantity: 2, availableBefore: null, quotedAmountCny: 2,
+    actor: 'test', status: 'approval_required', idempotencyKey: 'fixed-active-order',
+  });
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async inventory() { throw new Error('supplier inventory must not be queried'); },
+    },
+  });
+
+  const result = await service.createOrderForRule(rule);
+
+  assert.equal(result.status, 'already_active');
+  assert.equal((await repository.listOrders()).length, 1);
+});
+
+test('scheduled replenishment is idempotent for the same execution slot', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, { mode: 'approval', triggerStrategy: 'fixed_schedule', replenishQuantity: 2 });
+  const service = new ReplenishmentService(repository, authStub(), {}, config, console, {
+    client: {
+      async inventory() { return { payload: { available: 10, estimated_total_fen: 200 } }; },
+      async balance() { return { payload: { available_fen: 10000 } }; },
+    },
+  });
+  const scheduledFor = '2026-08-16T12:00:00.000Z';
+
+  const first = await service.createOrderForRule(rule, { scheduledFor });
+  await repository.updateOrder(first.id, { status: 'completed' });
+  const replay = await service.createOrderForRule(rule, { scheduledFor });
+
+  assert.equal(replay.status, 'already_processed');
+  assert.equal((await repository.listOrders()).length, 1);
 });
 
 test('recovery saves claimed credentials before retrying Sub2API and verifies the same account', async () => {

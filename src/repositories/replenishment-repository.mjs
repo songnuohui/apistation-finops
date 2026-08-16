@@ -78,6 +78,7 @@ function rule(row) {
     productMappingId: Number(row.product_mapping_id),
     mode: row.mode,
     enabled: Boolean(row.enabled),
+    triggerStrategy: row.trigger_strategy || 'inventory_threshold',
     minAvailableAccounts: Number(row.min_available_accounts || 0),
     targetAvailableAccounts: Number(row.target_available_accounts || 0),
     replenishQuantity: Number(row.replenish_quantity || 1),
@@ -328,6 +329,7 @@ function normalizeRuleInput(input) {
     productMappingId: Number(input.productMappingId),
     mode: input.mode,
     enabled: Boolean(input.enabled),
+    triggerStrategy: String(input.triggerStrategy || 'inventory_threshold'),
     minAvailableAccounts: Number(input.minAvailableAccounts || 0),
     targetAvailableAccounts: Number(input.targetAvailableAccounts || 0),
     replenishQuantity: Number(input.replenishQuantity || 1),
@@ -365,6 +367,9 @@ function normalizeRuleInput(input) {
     throw badRequest('请选择有效的商品映射');
   }
   if (!['observe', 'approval', 'auto'].includes(values.mode)) throw badRequest('运行模式无效');
+  if (!['inventory_threshold', 'fixed_schedule'].includes(values.triggerStrategy)) {
+    throw badRequest('补号方式无效');
+  }
   if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 1) {
     throw badRequest('最低有效库存必须是至少为 1 的整数');
   }
@@ -454,6 +459,7 @@ export class ReplenishmentRepository {
       productMappingId: 1,
       mode: 'observe',
       enabled: true,
+      triggerStrategy: 'inventory_threshold',
       minAvailableAccounts: 3,
       targetAvailableAccounts: 5,
       replenishQuantity: 2,
@@ -607,7 +613,7 @@ export class ReplenishmentRepository {
     if (!productMapping.rowCount) throw badRequest('商品映射不存在，请刷新后重新选择');
     const params = [
       values.name, values.productMappingId, values.mode, values.enabled,
-      values.minAvailableAccounts, values.targetAvailableAccounts, values.replenishQuantity,
+      values.triggerStrategy, values.minAvailableAccounts, values.targetAvailableAccounts, values.replenishQuantity,
       values.quotaUsedThresholdPercent, values.quotaWindow, values.quotaUnknownPolicy,
       values.repairGraceSeconds, values.recoveryRetryLimit,
       values.maxOrderAmountCny, values.maxDailyAmountCny, values.concurrency, values.loadFactor, values.proxyId,
@@ -620,25 +626,25 @@ export class ReplenishmentRepository {
     const result = input.id
       ? await this.pool.query(`
           UPDATE ${this.schema}.replenishment_rules SET
-            name=$2,product_mapping_id=$3,mode=$4,enabled=$5,min_available_accounts=$6,
-            target_available_accounts=$7,replenish_quantity=$8,quota_used_threshold_percent=$9,
-            quota_window=$10,quota_unknown_policy=$11,repair_grace_seconds=$12,recovery_retry_limit=$13,
-            max_order_amount_cny=$14,max_daily_amount_cny=$15,concurrency=$16,load_factor=$17,proxy_id=$18,priority=$19,
-            rate_multiplier=$20,auto_pause_on_expired=$21,verification_model=$22,
-            verification_prompt=$23,poll_interval_seconds=$24,model_whitelist=$25,retry_limit=$26,
-            cooldown_seconds=$27,schedule_start_time=$28,schedule_end_time=$29,
-            schedule_interval_seconds=$30,updated_at=NOW()
+            name=$2,product_mapping_id=$3,mode=$4,enabled=$5,trigger_strategy=$6,min_available_accounts=$7,
+            target_available_accounts=$8,replenish_quantity=$9,quota_used_threshold_percent=$10,
+            quota_window=$11,quota_unknown_policy=$12,repair_grace_seconds=$13,recovery_retry_limit=$14,
+            max_order_amount_cny=$15,max_daily_amount_cny=$16,concurrency=$17,load_factor=$18,proxy_id=$19,priority=$20,
+            rate_multiplier=$21,auto_pause_on_expired=$22,verification_model=$23,
+            verification_prompt=$24,poll_interval_seconds=$25,model_whitelist=$26,retry_limit=$27,
+            cooldown_seconds=$28,schedule_start_time=$29,schedule_end_time=$30,
+            schedule_interval_seconds=$31,updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
-            name,product_mapping_id,mode,enabled,min_available_accounts,target_available_accounts,
+            name,product_mapping_id,mode,enabled,trigger_strategy,min_available_accounts,target_available_accounts,
             replenish_quantity,quota_used_threshold_percent,quota_window,quota_unknown_policy,
             repair_grace_seconds,recovery_retry_limit,max_order_amount_cny,max_daily_amount_cny,
             concurrency,load_factor,proxy_id,priority,rate_multiplier,auto_pause_on_expired,verification_model,
             verification_prompt,poll_interval_seconds,model_whitelist,retry_limit,cooldown_seconds,
             schedule_start_time,schedule_end_time,
             schedule_interval_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
@@ -823,6 +829,18 @@ export class ReplenishmentRepository {
     await this.pool.query(`
       UPDATE ${this.schema}.replenishment_rules SET
         last_inventory_at=NOW(),last_error=$2,updated_at=NOW()
+      WHERE id=$1`, [id, String(error || '').slice(0, 1000)]);
+  }
+
+  async markRuleError(id, error = '') {
+    if (this.demo) {
+      const current = this.rules.find((entry) => entry.id === Number(id));
+      if (current) current.lastError = String(error || '').slice(0, 1000);
+      return;
+    }
+    await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules SET
+        last_error=$2,updated_at=NOW()
       WHERE id=$1`, [id, String(error || '').slice(0, 1000)]);
   }
 
@@ -1087,6 +1105,9 @@ export class ReplenishmentRepository {
 
   async createPlannedOrder({ rule: selectedRule, trigger, quantity, availableBefore, quotedAmountCny, actor, status, idempotencyKey }) {
     if (this.demo) {
+      const existing = this.orders.find((entry) => entry.idempotencyKey === idempotencyKey);
+      if (existing) return { ...existing, idempotentReplay: true };
+      if (await this.hasActiveOrder(selectedRule.id)) return null;
       const run = {
         id: ++this.sequence, ruleId: selectedRule.id, trigger, mode: selectedRule.mode,
         status, requestedQuantity: quantity, availableBefore, quotedAmountCny,
@@ -1114,6 +1135,14 @@ export class ReplenishmentRepository {
       await client.query(`
         SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
       [`apistation-finops:replenishment-rule:${selectedRule.id}`]);
+      const duplicate = await client.query(`
+        SELECT * FROM ${this.schema}.oauth_supply_orders
+        WHERE idempotency_key=$1
+        LIMIT 1`, [idempotencyKey]);
+      if (duplicate.rowCount) {
+        await client.query('COMMIT');
+        return { ...order(duplicate.rows[0]), idempotentReplay: true };
+      }
       const active = await client.query(`
         SELECT 1 FROM ${this.schema}.oauth_supply_orders
         WHERE rule_id=$1
