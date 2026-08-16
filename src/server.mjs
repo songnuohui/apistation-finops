@@ -26,6 +26,7 @@ import {
   normalizeOAuthSupplyAuthSettings,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
+import { routeId } from './http/route.mjs';
 import { DemoRepository } from './repositories/demo-repository.mjs';
 import { PostgresRepository } from './repositories/postgres-repository.mjs';
 import { PendingLoginStore } from './services/pending-login-store.mjs';
@@ -233,12 +234,6 @@ async function refreshSourceGroupCatalog(accessToken,request){
   }catch(error){
     console.warn('[monitor group catalog]',error instanceof Sub2ApiAuthError?error.code:error?.message||error);
   }
-}
-function routeId(pathname,prefix){
-  const raw=pathname.slice(prefix.length);
-  if(!/^\d+$/.test(raw))return null;
-  const id=Number(raw);
-  return Number.isSafeInteger(id)&&id>0?id:null;
 }
 function detailPagination(searchParams,prefix){
   const params=new URLSearchParams({

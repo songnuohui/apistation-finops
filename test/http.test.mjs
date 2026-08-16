@@ -4,6 +4,7 @@ import path from 'node:path';
 import { authorize, sessionCookie } from '../src/auth.mjs';
 import { accountScope, cashScope, pagination, resolveRange, userBalanceScope } from '../src/http/query.mjs';
 import { resolveStaticPath } from '../src/http/static-path.mjs';
+import { routeId } from '../src/http/route.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
@@ -80,6 +81,13 @@ test('static path resolution rejects traversal outside the web root', () => {
   const webRoot = path.resolve('web');
   assert.equal(resolveStaticPath(webRoot, '/accounts'), path.join(webRoot, 'index.html'));
   assert.throws(() => resolveStaticPath(webRoot, '/../web-evil/secret.css'), /forbidden/);
+});
+
+test('resource id routes only match their own path prefix', () => {
+  assert.equal(routeId('/api/accounts/123', '/api/accounts/'), 123);
+  assert.equal(routeId('/api/accounts/123', '/api/monitor-groups/'), null);
+  assert.equal(routeId('/api/accounts/123', '/api/account-cost-periods/'), null);
+  assert.equal(routeId('/api/accounts/123/cost-rules', '/api/accounts/'), null);
 });
 
 test('write payloads are normalized and invalid financial data is rejected', () => {
