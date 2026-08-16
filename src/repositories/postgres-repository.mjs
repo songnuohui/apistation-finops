@@ -199,7 +199,8 @@ export class PostgresRepository {
   }
 
   async getSummary({ start, end }) {
-    const usage = await this.pool.query(`
+    const [usage, cash, costs, missing] = await Promise.all([
+      this.pool.query(`
       SELECT COUNT(*) AS requests,
              COALESCE(SUM(input_tokens),0) AS input_tokens,
              COALESCE(SUM(output_tokens),0) AS output_tokens,
@@ -210,8 +211,8 @@ export class PostgresRepository {
              COALESCE(SUM(user_charge_cny),0) AS user_charge_cny,
              COALESCE(SUM(standard_cost_usd_reference),0) AS token_list_value_usd
       FROM ${this.schema}.fact_usage_events
-      WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
-    const cash = await this.pool.query(`
+      WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]),
+      this.pool.query(`
       SELECT COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND status <> 'void'),0) AS inflow,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='in' AND transaction_type='recharge' AND status <> 'void'),0) AS recharge_received,
              COALESCE(SUM(base_amount) FILTER (
@@ -222,8 +223,8 @@ export class PostgresRepository {
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND transaction_type IN ('account_purchase','supplier_topup','subscription_renewal')),0) AS procurement_spend,
              COALESCE(SUM(base_amount) FILTER (WHERE direction='out' AND status <> 'void'),0) AS outflow
       FROM ${this.schema}.cash_transactions
-      WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]);
-    const costs = await this.pool.query(`
+      WHERE occurred_at >= $1 AND occurred_at < $2`, [start, end]),
+      this.pool.query(`
       WITH usage_by_account AS (
         SELECT source_account_id,COALESCE(SUM(user_charge_cny),0) AS user_charge_cny
         FROM ${this.schema}.fact_usage_events
@@ -284,8 +285,8 @@ export class PostgresRepository {
                WHEN cost_mode IN ('fixed_purchase','unconfigured') AND fixed_cost_record_count=0 THEN user_charge_cny
                ELSE 0
              END),0) AS unbooked_user_charge_cny
-      FROM account_costs`, [start, end]);
-    const missing = await this.pool.query(`
+      FROM account_costs`, [start, end]),
+      this.pool.query(`
       SELECT COUNT(*) AS count
       FROM ${this.schema}.dim_accounts a
       WHERE a.status='active' AND a.source_deleted_at IS NULL
@@ -309,8 +310,9 @@ export class PostgresRepository {
           WHERE probe.source_account_id=a.source_account_id
             AND probe.status='ok'
             AND probe.effective_rate_multiplier>=0
-            AND probe.fresh_until>NOW()
-        )`);
+          AND probe.fresh_until>NOW()
+        )`),
+    ]);
 
     const u = usage.rows[0];
     const c = cash.rows[0];

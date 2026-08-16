@@ -11,7 +11,9 @@ const dashboard = ref<AnyRecord>({});
 const trend = ref<AnyRecord>({});
 const models = ref<AnyRecord>({});
 const runtime = ref<AnyRecord>({});
-const loading = ref(false);
+const dashboardLoading = ref(false);
+const trendLoading = ref(false);
+const modelsLoading = ref(false);
 const detail = ref<AnyRecord | null>(null);
 const detailType = ref<DetailType>(null);
 const detailTab = ref<'users' | 'models'>('users');
@@ -55,7 +57,9 @@ async function loadRuntime() {
 }
 async function load() {
   const requestId = ++loadRequestId;
-  loading.value = true;
+  dashboardLoading.value = true;
+  trendLoading.value = true;
+  modelsLoading.value = true;
   const params = query(rangeQuery(props.range, props.rangeStart, props.rangeEnd));
   const assign = async (request: Promise<any>, apply: (value: any) => Promise<void> | void) => {
     try {
@@ -66,15 +70,20 @@ async function load() {
     }
   };
   await Promise.allSettled([
-    assign(get(`/overview-dashboard?${params}`), (value) => { dashboard.value = value; }),
+    assign(get(`/overview-dashboard?${params}`), (value) => { dashboard.value = value; dashboardLoading.value = false; }),
     assign(get(`/trend?${params}`), async (value) => {
       trend.value = value;
+      trendLoading.value = false;
       await nextTick();
       await drawChart();
     }),
-    assign(get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`), (value) => { models.value = value; }),
+    assign(get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`), (value) => { models.value = value; modelsLoading.value = false; }),
   ]);
-  if (requestId === loadRequestId) loading.value = false;
+  if (requestId === loadRequestId) {
+    dashboardLoading.value = false;
+    trendLoading.value = false;
+    modelsLoading.value = false;
+  }
 }
 async function drawChart() {
   if (!chartCanvas.value) return;
@@ -177,8 +186,8 @@ onUnmounted(() => {
       </section>
       <section class="panel"><div class="panel-head"><div><h2>待处理事项</h2><p>需要关注的经营和成本问题</p></div><AlertTriangle :size="20" class="head-icon warning-icon" /></div><div class="alert-list"><div v-for="alert in summary.alerts || []" :key="alert.title" class="alert-row" :class="alert.severity"><span></span><div><strong>{{ alert.title }}</strong><p>{{ alert.detail }}</p></div></div><div v-if="!(summary.alerts || []).length" class="empty">没有待处理事项</div></div></section>
     </div>
-    <section class="panel chart-panel"><div class="panel-head"><div><h2>经营趋势</h2><p>实际消费、总成本、毛利和充值实收按日汇总</p></div><BarChart3 :size="20" class="head-icon" /></div><div class="trend-chart"><canvas ref="chartCanvas"></canvas><div v-if="loading && !(trend.items || []).length" class="chart-empty">正在加载趋势数据</div><div v-if="!loading && !(trend.items || []).length" class="chart-empty">暂无趋势数据</div></div></section>
-    <section class="panel table-panel"><div class="panel-head"><div><h2>模型单位经济性</h2><p>销售额、成本、毛利和成本覆盖情况</p></div><button class="icon-button" title="刷新模型统计" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button></div><div class="table-wrap"><table><thead><tr><th>模型</th><th class="number">请求</th><th class="number">Token</th><th class="number">销售额</th><th class="number">总成本</th><th class="number">毛利</th><th class="number">毛利率</th></tr></thead><tbody><tr v-for="row in models.items || []" :key="row.name || row.model"><td><strong>{{ row.name || row.model || '未标注模型' }}</strong></td><td class="number">{{ compact(row.requests) }}</td><td class="number">{{ compact(row.tokens) }}</td><td class="number">{{ money(row.userChargeCny) }}</td><td class="number">{{ money(row.bookedCostCny || row.effectiveCostCny) }}</td><td class="number positive">{{ money(row.bookedProfitCny || row.profitCny) }}</td><td class="number">{{ percent(row.grossMargin || row.margin) }}</td></tr><tr v-if="!loading && !(models.items || []).length"><td colspan="7" class="table-empty">暂无模型数据</td></tr></tbody></table></div></section>
+    <section class="panel chart-panel"><div class="panel-head"><div><h2>经营趋势</h2><p>实际消费、总成本、毛利和充值实收按日汇总</p></div><BarChart3 :size="20" class="head-icon" /></div><div class="trend-chart"><canvas ref="chartCanvas"></canvas><div v-if="trendLoading && !(trend.items || []).length" class="chart-empty">正在加载趋势数据</div><div v-if="!trendLoading && !(trend.items || []).length" class="chart-empty">暂无趋势数据</div></div></section>
+    <section class="panel table-panel"><div class="panel-head"><div><h2>模型单位经济性</h2><p>销售额、成本、毛利和成本覆盖情况</p></div><button class="icon-button" title="刷新模型统计" @click="load"><RefreshCw :size="17" :class="{ spin: modelsLoading }" /></button></div><div class="table-wrap"><table><thead><tr><th>模型</th><th class="number">请求</th><th class="number">Token</th><th class="number">销售额</th><th class="number">总成本</th><th class="number">毛利</th><th class="number">毛利率</th></tr></thead><tbody><tr v-for="row in models.items || []" :key="row.name || row.model"><td><strong>{{ row.name || row.model || '未标注模型' }}</strong></td><td class="number">{{ compact(row.requests) }}</td><td class="number">{{ compact(row.tokens) }}</td><td class="number">{{ money(row.userChargeCny) }}</td><td class="number">{{ money(row.bookedCostCny || row.effectiveCostCny) }}</td><td class="number positive">{{ money(row.bookedProfitCny || row.profitCny) }}</td><td class="number">{{ percent(row.grossMargin || row.margin) }}</td></tr><tr v-if="!modelsLoading && !(models.items || []).length"><td colspan="7" class="table-empty">暂无模型数据</td></tr></tbody></table></div></section>
 
     <div v-if="detailType" class="modal-layer" @click.self="closeDetail"><section class="modal overview-detail-modal"><header><div><h2>{{ detailTitle }}</h2><p>统计口径与当前顶部时间范围一致</p></div><button class="icon-button" @click="closeDetail"><X :size="19" /></button></header>
       <div v-if="detailType === 'consumption'" class="detail-tabs"><button :class="{ active: detailTab === 'users' }" @click="detailTab = 'users'">用户消费汇总</button><button :class="{ active: detailTab === 'models' }" @click="detailTab = 'models'">模型消费汇总</button></div>
