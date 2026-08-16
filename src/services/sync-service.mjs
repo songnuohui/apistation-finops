@@ -516,6 +516,17 @@ export class SyncService {
     }
   }
 
+  async rebuildUsersBestEffort(userIds, sourceName) {
+    const users = [...new Set([...userIds].map(Number).filter((userId) => Number.isSafeInteger(userId) && userId > 0))];
+    for (const userId of users) {
+      try {
+        await inTransaction(this.finopsPool, (client) => this.rebuildUserLedger(client, userId));
+      } catch (error) {
+        this.logger.warn(`[sync] ${sourceName} ledger rebuild deferred for user ${userId}`, error?.message || error);
+      }
+    }
+  }
+
   async runOnce() {
     // The service can be invoked without the CLI/server preflight. Refuse to
     // write a ledger whenever the configured source balance unit is not CNY.
@@ -591,16 +602,20 @@ export class SyncService {
 
   async syncDimensions() {
     try {
-      const [users, accounts] = await Promise.all([
-        this.sourcePool.query(`
+      const users = await this.sourcePool.query(`
           SELECT id,email,COALESCE(username,'') AS username,status,balance,
             COALESCE(total_recharged,0) AS total_recharged,deleted_at,updated_at
-          FROM ${this.source}.users`),
-        this.sourcePool.query(`
+          FROM ${this.source}.users`);
+      let accounts = { rows: [] };
+      try {
+        accounts = await this.sourcePool.query(`
           SELECT id,name,platform,type,status,expires_at,deleted_at,updated_at,
             extra->'upstream_billing_probe' AS upstream_billing_probe
-          FROM ${this.source}.accounts account`),
-      ]);
+          FROM ${this.source}.accounts account`);
+      } catch (error) {
+        if (error?.code !== '42501') throw error;
+        this.logger.warn('[sync] account dimensions skipped because the source reader lacks SELECT permission');
+      }
       const sourceAccountRows = this.accountDimensionReader
         ? await this.accountDimensionReader()
         : [];
@@ -1287,21 +1302,24 @@ export class SyncService {
       WHERE (created_at,id)>($1,$2)
       ORDER BY created_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
-    return inTransaction(this.finopsPool, async (client) => {
+    let rebuildUsers = new Set();
+    const syncedRows = await inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'usage_logs');
       if (!sourceRows.rowCount) {
         await this.markSuccess(client, 'usage_logs', null, 0);
         return 0;
       }
-      await this.upsertUsageRows(client, sourceRows.rows);
+      rebuildUsers = await this.upsertUsageRows(client, sourceRows.rows, { deferLedgerRebuild: true });
       const last = sourceRows.rows.at(-1);
       await this.markSuccess(client, 'usage_logs', { time: cursorTimeKey(last), id: last.source_usage_id }, sourceRows.rowCount);
       return sourceRows.rowCount;
     });
+    await this.rebuildUsersBestEffort(rebuildUsers, 'usage_logs');
+    return syncedRows;
   }
 
-  async upsertUsageRows(client, rows) {
-    if (!rows.length) return;
+  async upsertUsageRows(client, rows, { deferLedgerRebuild = false } = {}) {
+    if (!rows.length) return new Set();
     const ids = rows.map((row) => row.source_usage_id);
     const users = [...new Set(rows.map((row) => Number(row.source_user_id)).filter(Boolean))];
     const days = new Set(rows.map((row) => dateKey(row.occurred_at, this.config.timezone)));
@@ -1385,9 +1403,12 @@ export class SyncService {
       UPDATE ${this.schema}.fact_usage_events
       SET revenue_recognition_status='subscription',recognized_revenue_cny=0
       WHERE source_usage_id=ANY($1::bigint[]) AND billing_type=1`, [ids]);
-    for (const userId of changedUsers) if (userId) await this.rebuildUserLedger(client, userId);
+    if (!deferLedgerRebuild) {
+      for (const userId of changedUsers) if (userId) await this.rebuildUserLedger(client, userId);
+    }
     for (const userId of users) if (!changedUsers.has(userId)) await this.allocatePendingUsage(client, userId);
     await this.refreshUsageDaily(client, [...days]);
+    return changedUsers;
   }
 
   async allocatePendingUsage(client, userId) {
@@ -1485,9 +1506,13 @@ export class SyncService {
         COALESCE(rate_multiplier,1) AS user_rate_multiplier,account_rate_multiplier,
         duration_ms,first_token_ms,created_at AS occurred_at
       FROM ${this.source}.usage_logs WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2`, [since, this.config.syncBatchSize]);
+    let rebuildUsers = new Set();
     await inTransaction(this.finopsPool, async (client) => {
-      if (rows.rowCount) await this.upsertUsageRows(client, rows.rows);
+      if (rows.rowCount) {
+        rebuildUsers = await this.upsertUsageRows(client, rows.rows, { deferLedgerRebuild: true });
+      }
     });
+    await this.rebuildUsersBestEffort(rebuildUsers, 'recent_usage');
   }
 
   async syncPayments() {
@@ -1503,14 +1528,13 @@ export class SyncService {
       FROM ${this.source}.payment_orders
       WHERE (updated_at,id)>($1,$2)${orderFilter} ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
-    return inTransaction(this.finopsPool, async (client) => {
+    const users = new Set();
+    const syncedRows = await inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'payment_orders');
-      const users = new Set();
       for (const row of sourceRows.rows) {
         const affectedUsers = await this.upsertPaymentRow(client, row);
         for (const userId of affectedUsers) users.add(Number(userId));
       }
-      for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       if (!sourceRows.rowCount) await this.markSuccess(client, 'payment_orders', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
@@ -1518,6 +1542,8 @@ export class SyncService {
       }
       return sourceRows.rowCount;
     });
+    await this.rebuildUsersBestEffort(users, 'payment_orders');
+    return syncedRows;
   }
 
   async upsertPaymentRow(client, row) {
@@ -1676,9 +1702,9 @@ export class SyncService {
       WHERE (COALESCE(rc.used_at,rc.created_at),rc.id)>($1,$2)
       ORDER BY COALESCE(rc.used_at,rc.created_at),rc.id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
-    return inTransaction(this.finopsPool, async (client) => {
+    const users = new Set();
+    const syncedRows = await inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'redeem_codes');
-      const users = new Set();
       for (const row of sourceRows.rows) {
         if (!row.used_by || !row.used_at || !['balance', 'admin_balance'].includes(row.type)) continue;
         const value = decimal(row.value);
@@ -1701,7 +1727,6 @@ export class SyncService {
         });
         if (result.changed) users.add(Number(row.used_by));
       }
-      for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       if (!sourceRows.rowCount) await this.markSuccess(client, 'redeem_codes', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
@@ -1709,6 +1734,8 @@ export class SyncService {
       }
       return sourceRows.rowCount;
     });
+    await this.rebuildUsersBestEffort(users, 'redeem_codes');
+    return syncedRows;
   }
 
   async syncAffiliateLedger() {
@@ -1718,9 +1745,9 @@ export class SyncService {
       FROM ${this.source}.user_affiliate_ledger
       WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
-    return inTransaction(this.finopsPool, async (client) => {
+    const users = new Set();
+    const syncedRows = await inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'user_affiliate_ledger');
-      const users = new Set();
       for (const row of sourceRows.rows) {
         const amount = decimal(row.amount);
         if (amount.eq(0)) continue;
@@ -1736,7 +1763,6 @@ export class SyncService {
         });
         if (result.changed) users.add(Number(row.user_id));
       }
-      for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       if (!sourceRows.rowCount) await this.markSuccess(client, 'user_affiliate_ledger', null, 0);
       else {
         const last = sourceRows.rows.at(-1);
@@ -1744,6 +1770,8 @@ export class SyncService {
       }
       return sourceRows.rowCount;
     });
+    await this.rebuildUsersBestEffort(users, 'user_affiliate_ledger');
+    return syncedRows;
   }
 
   async syncPaymentAuditLogs() {
@@ -2016,15 +2044,16 @@ export class SyncService {
       ORDER BY updated_at DESC,id DESC LIMIT $2`,
     [since, this.config.syncBatchSize]);
     if (!sourceRows.rowCount) return 0;
-    return inTransaction(this.finopsPool, async (client) => {
-      const users = new Set();
+    const users = new Set();
+    const syncedRows = await inTransaction(this.finopsPool, async (client) => {
       for (const row of sourceRows.rows) {
         const affectedUsers = await this.upsertPaymentRow(client, row);
         for (const userId of affectedUsers) users.add(Number(userId));
       }
-      for (const userId of users) if (userId) await this.rebuildUserLedger(client, userId);
       return sourceRows.rowCount;
     });
+    await this.rebuildUsersBestEffort(users, 'recent_payments');
+    return syncedRows;
   }
 
   async reconcileWalletBalances() {
