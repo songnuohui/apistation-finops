@@ -252,6 +252,14 @@ test('OAuth Supply replenishment remains FinOps-owned and keeps account credenti
   assert.doesNotMatch(migration, /\b(?:access_token|refresh_token|password)\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('custom account cost rule timing remains FinOps-owned', () => {
+  const migration = read('migrations/052_custom_account_cost_rule_time.sql');
+  assert.match(migration, /account_cost_rules_change_strategy_v52/);
+  assert.match(migration, /'custom_time'/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /credentials|redis/i);
+});
+
 test('replenishment model whitelist remains FinOps-owned', () => {
   const migration = read('migrations/038_replenishment_model_whitelist.sql');
   assert.match(migration, /ALTER TABLE .*replenishment_rules/s);

@@ -1039,6 +1039,52 @@ test('current-day multiplier correction replaces every open version from local m
   assert.equal(rule.effective_from, '2026-07-31T16:00:00.000Z');
 });
 
+test('custom-time multiplier correction replaces the timeline from the exact timestamp', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('WITH clock AS') && text.includes('account_cost_rules')) {
+        return {
+          rows: [{
+            now_at: '2026-08-01T04:00:00.000Z',
+            day_start: '2026-07-31T16:00:00.000Z',
+            has_multiplier_before_today: true,
+            first_today_multiplier_rule_id: 41,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('FROM "finops".account_cost_archives')) return { rows: [], rowCount: 0 };
+      if (text.includes('INSERT INTO "finops".account_cost_rules')) {
+        return { rows: [{ effective_from: params[7] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const effectiveFrom = '2026-07-31T18:30:00.000Z';
+  const rule = await repository.upsertAccountCostRule(client, 8, {
+    costMode: 'manual_multiplier', basisMode: 'revenue_backsolve',
+    upstreamMultiplier: '0.08', cnyPerReferenceUnit: null,
+    changeStrategy: 'custom_time', effectiveFrom, notes: '',
+  });
+  const voidFromCustomTime = queries.find((query) => (
+    query.text.includes("SET status='void'") && query.text.includes('effective_from >= $2')
+  ));
+  const closePrevious = queries.find((query) => (
+    query.text.includes('SET effective_to=$2') && query.text.includes('effective_from < $2')
+  ));
+  const insert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_cost_rules'));
+  const repriceQueue = queries.find((query) => query.text.includes('usage_cost_reprice_queue'));
+  assert.deepEqual(voidFromCustomTime.params, [8, effectiveFrom, '2026-08-01T04:00:00.000Z']);
+  assert.deepEqual(closePrevious.params, [8, effectiveFrom, '2026-08-01T04:00:00.000Z']);
+  assert.equal(insert.params[7], effectiveFrom);
+  assert.equal(insert.params[10], 'custom_time');
+  assert.deepEqual(repriceQueue.params, [8, effectiveFrom]);
+  assert.equal(rule.effective_from, effectiveFrom);
+});
+
 for (const adapterType of ['sub2api', 'newapi']) test(`linking an active ${adapterType} supplier key creates a key-bound automatic cost rule`, async () => {
   const queries = [];
   const client = {

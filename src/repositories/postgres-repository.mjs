@@ -2469,8 +2469,16 @@ export class PostgresRepository {
 
   async upsertAccountCostRule(client, accountId, input, profile, actor='admin') {
     const costMode = input.costMode || profile?.cost_mode || (profile?.cost_type === 'free' ? 'free' : 'fixed_purchase');
+    const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(costMode);
     const basisMode = input.basisMode || profile?.basis_mode || 'revenue_backsolve';
     const changeStrategy = input.changeStrategy || 'future_only';
+    const customEffectiveFrom = changeStrategy === 'custom_time' ? input.effectiveFrom : null;
+    if (changeStrategy === 'custom_time' && !customEffectiveFrom) {
+      throw httpError('custom_time requires effectiveFrom', 400);
+    }
+    if (changeStrategy === 'custom_time' && !multiplierMode) {
+      throw httpError('custom_time is supported only for multiplier cost rules', 400);
+    }
     const strictFutureOnly = Boolean(input.strictFutureOnly);
     const supplierKeyId = input.supplierKeyId ?? null;
     const upstreamMultiplier = input.upstreamMultiplier ?? (
@@ -2525,8 +2533,9 @@ export class PostgresRepository {
       && String(currentRule.cny_per_reference_unit ?? '') === String(cnyPerReferenceUnit ?? '')
       && String(currentRule.supplier_key_id ?? '') === String(supplierKeyId ?? '')
       && String(currentRule.notes || '') === String(input.notes || '');
-    const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(costMode);
-    if (sameCurrentRule && changeStrategy !== 'current_day') return { ...currentRule, unchanged: true };
+    const replacesExistingTimeline = multiplierMode
+      && (changeStrategy === 'current_day' || changeStrategy === 'custom_time');
+    if (sameCurrentRule && !replacesExistingTimeline) return { ...currentRule, unchanged: true };
 
     if (changeStrategy === 'current_day' && multiplierMode) {
       const archive = await client.query(`
@@ -2552,6 +2561,29 @@ export class PostgresRepository {
           AND status IN ('active','superseded')
           AND effective_from < $2
           AND (effective_to IS NULL OR effective_to>$2)`, [accountId, clock.day_start, clock.now_at]);
+    } else if (changeStrategy === 'custom_time' && multiplierMode) {
+      const archive = await client.query(`
+        SELECT cutoff_at
+        FROM ${this.schema}.account_cost_archives
+        WHERE source_account_id=$1 AND cutoff_at>$2
+        ORDER BY cutoff_at DESC,id DESC LIMIT 1
+        FOR UPDATE`, [accountId, customEffectiveFrom]);
+      if (archive.rowCount) {
+        throw httpError('the custom start time overlaps archived pricing; create an audited historical correction', 409);
+      }
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET status='void',effective_to=NULL,updated_at=$3
+        WHERE source_account_id=$1
+          AND status IN ('active','superseded')
+          AND effective_from >= $2`, [accountId, customEffectiveFrom, clock.now_at]);
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_rules
+        SET effective_to=$2,status='superseded',updated_at=$3
+        WHERE source_account_id=$1
+          AND status IN ('active','superseded')
+          AND effective_from < $2
+          AND (effective_to IS NULL OR effective_to>$2)`, [accountId, customEffectiveFrom, clock.now_at]);
     } else if (!strictFutureOnly && !clock.has_multiplier_before_today && clock.first_today_multiplier_rule_id) {
       await client.query(`
         UPDATE ${this.schema}.account_cost_rules
@@ -2565,12 +2597,14 @@ export class PostgresRepository {
       ? clock.now_at
       : changeStrategy === 'current_day' && multiplierMode
       ? clock.day_start
+      : changeStrategy === 'custom_time' && multiplierMode
+      ? customEffectiveFrom
       : multiplierMode
       && !clock.has_multiplier_before_today
       && !firstMultiplierToday
       ? clock.day_start
       : clock.now_at;
-    if (!(changeStrategy === 'current_day' && multiplierMode)) {
+    if (!replacesExistingTimeline) {
       await client.query(`
         UPDATE ${this.schema}.account_cost_rules
         SET effective_to=$2,status='superseded',updated_at=$2

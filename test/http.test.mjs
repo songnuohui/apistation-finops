@@ -109,6 +109,15 @@ test('write payloads are normalized and invalid financial data is rejected', () 
   assert.equal(manualLedger.upstreamMultiplier, '0.07');
   assert.equal(manualLedger.basisMode, 'revenue_backsolve');
   assert.equal(normalizeAccountLedger({ costMode: 'manual_multiplier', changeStrategy: 'current_day' }).changeStrategy, 'current_day');
+  const customLedger = normalizeAccountLedger({
+    costMode: 'manual_multiplier', changeStrategy: 'custom_time', effectiveFrom: '2026-08-01T00:30:00+08:00',
+  });
+  assert.equal(customLedger.changeStrategy, 'custom_time');
+  assert.equal(customLedger.effectiveFrom, '2026-07-31T16:30:00.000Z');
+  assert.throws(
+    () => normalizeAccountLedger({ costMode: 'manual_multiplier', changeStrategy: 'custom_time' }),
+    /effectiveFrom/,
+  );
   assert.throws(() => normalizeAccountLedger({ changeStrategy: 'rewrite_everything' }), /invalid changeStrategy/);
   assert.equal(normalizeAccountCostArchive({ cutoffAt: '2026-08-01T12:00:00+08:00', notes: '日结' }).notes, '日结');
   const reprice = normalizeAccountCostReprice({

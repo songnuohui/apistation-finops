@@ -149,6 +149,11 @@ function inputDateTime(value: any) {
   const pad = (number: number) => String(number).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+function localDayStartInput() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return inputDateTime(date);
+}
 function statusClass(value: any) {
   return ['complete', 'configured', 'free', 'priced'].includes(String(value)) ? 'success' : ['missing', 'failed'].includes(String(value)) ? 'danger' : 'warning';
 }
@@ -223,6 +228,7 @@ function makeEditor(account: AnyRecord) {
     supplier: account.supplier || account.linkedSupplierName || '',
     purchaseBatch: account.purchaseBatch || '',
     changeStrategy: 'future_only',
+    customEffectiveFrom: localDayStartInput(),
     tagsText: Array.isArray(account.tags) ? account.tags.join(',') : '',
   };
 }
@@ -334,6 +340,14 @@ async function saveEditor() {
   const current = editor.value;
   saving.value = true;
   try {
+    const multiplierMode = ['manual_multiplier', 'probe_multiplier'].includes(current.costMode);
+    const changeStrategy = multiplierMode ? current.changeStrategy : 'future_only';
+    const customEffectiveFrom = changeStrategy === 'custom_time'
+      ? new Date(current.customEffectiveFrom)
+      : null;
+    if (customEffectiveFrom && !Number.isFinite(customEffectiveFrom.getTime())) {
+      throw new Error('请选择有效的开始计算日期和时间');
+    }
     const oldKeyId = current.originalSupplierKeyId;
     if (current.costMode === 'probe_multiplier') {
       if (!current.supplierKeyId) throw new Error('供应商密钥倍率必须选择已连接的密钥');
@@ -354,7 +368,8 @@ async function saveEditor() {
       basisMode: ['manual_multiplier', 'probe_multiplier'].includes(current.costMode) ? current.basisMode : null,
       upstreamMultiplier: current.costMode === 'manual_multiplier' ? current.upstreamMultiplier || null : null,
       cnyPerReferenceUnit: current.costMode === 'manual_multiplier' && current.basisMode === 'reference_cny' ? current.cnyPerReferenceUnit || null : null,
-      changeStrategy: current.changeStrategy,
+      changeStrategy,
+      effectiveFrom: customEffectiveFrom?.toISOString() || null,
       supplier: current.supplier || '',
       purchaseBatch: current.purchaseBatch || '',
       tags: tags(current.tagsText || ''),
@@ -547,7 +562,8 @@ onUnmounted(() => window.clearTimeout(searchTimer));
     <div v-if="editor" class="modal-layer" @click.self="editor = null"><section class="modal form-modal account-editor-modal"><header><div><h2>配置账号成本</h2><p>{{ editor.name }} · {{ editor.platform }}</p></div><button class="icon-button" @click="editor = null"><X :size="19" /></button></header>
       <div class="form-grid">
         <label>成本模式<select v-model="editor.costMode"><option value="probe_multiplier">供应商密钥倍率（自动）</option><option value="manual_multiplier">手动填写进货倍率</option><option value="fixed_purchase">固定采购成本</option><option value="free">免费资源</option></select></label>
-        <label>变更范围<select v-model="editor.changeStrategy"><option value="future_only">仅未来用量</option><option value="current_day">从今天 0 点开始</option></select></label>
+        <label v-if="['manual_multiplier','probe_multiplier'].includes(editor.costMode)">变更范围<select v-model="editor.changeStrategy"><option value="future_only">仅未来用量</option><option value="current_day">从今天 0 点开始</option><option value="custom_time">自定义日期和时间</option></select></label>
+        <label v-if="['manual_multiplier','probe_multiplier'].includes(editor.costMode) && editor.changeStrategy === 'custom_time'">开始计算时间<input v-model="editor.customEffectiveFrom" type="datetime-local" step="60" /></label>
         <label v-if="editor.costMode === 'probe_multiplier'" class="full-field">采购批次 / 供应商密钥<select v-model="editor.supplierKeyId"><option value="">请选择已连接的密钥</option><option v-for="key in selectedSupplierKeys" :key="key.id" :value="key.id">{{ key.supplier }} · {{ key.name || key.maskedKey }} · {{ key.groupName || '未分组' }}{{ key.rateMultiplier == null ? ' · 暂无倍率' : ` · ${key.rateMultiplier}x` }}</option></select><small class="field-hint">绑定后，后续消费自动使用最新同步的密钥倍率；历史成本不会自动补算。</small></label>
         <label v-if="['manual_multiplier','probe_multiplier'].includes(editor.costMode)">倍率成本基础<select v-model="editor.basisMode"><option value="revenue_backsolve">按实际消费记录回推（推荐）</option><option value="reference_cny">目录价乘 CNY 基准</option></select></label>
         <label v-if="editor.costMode === 'manual_multiplier'">进货倍率<input v-model="editor.upstreamMultiplier" type="number" min="0" step="0.0001" placeholder="例如 0.5" /></label>

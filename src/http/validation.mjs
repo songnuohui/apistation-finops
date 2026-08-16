@@ -4,7 +4,7 @@ const COST_TYPES = new Set(['metered', 'prepaid', 'subscription', 'one_time', 'f
 const ALLOCATION_METHODS = new Set(['standard_cost_weight', 'token_weight', 'none']);
 const COST_MODES = new Set(['probe_multiplier', 'manual_multiplier', 'fixed_purchase', 'free']);
 const BASIS_MODES = new Set(['revenue_backsolve', 'reference_cny']);
-const COST_CHANGE_STRATEGIES = new Set(['future_only', 'current_day']);
+const COST_CHANGE_STRATEGIES = new Set(['future_only', 'current_day', 'custom_time']);
 const FIXED_ALLOCATION_STRATEGIES = new Set(['equal', 'standard_cost_weight', 'token_weight']);
 const CASH_TYPES = new Set([
   'other_expense', 'other_income', 'gateway_fee', 'account_purchase', 'supplier_topup',
@@ -198,6 +198,7 @@ export function normalizeAccountLedger(input) {
   const basisMode = optionalEnum(input.basisMode, 'basisMode', BASIS_MODES);
   const upstreamMultiplier = optionalDecimal(input.upstreamMultiplier, 'upstreamMultiplier', { min: 0, allowZero: false });
   const cnyPerReferenceUnit = optionalDecimal(input.cnyPerReferenceUnit, 'cnyPerReferenceUnit', { min: 0, allowZero: false });
+  const changeStrategy = optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only';
   return {
     costProfileId: optionalId(input.costProfileId, 'costProfileId'),
     supplierKeyId: optionalId(input.supplierKeyId, 'supplierKeyId'),
@@ -205,7 +206,8 @@ export function normalizeAccountLedger(input) {
     basisMode,
     upstreamMultiplier,
     cnyPerReferenceUnit,
-    changeStrategy: optionalEnum(input.changeStrategy, 'changeStrategy', COST_CHANGE_STRATEGIES) || 'future_only',
+    changeStrategy,
+    effectiveFrom: changeStrategy === 'custom_time' ? dateValue(input.effectiveFrom, 'effectiveFrom') : null,
     supplier: textValue(input.supplier, 'supplier', { required: false, max: 160 }),
     purchaseBatch: textValue(input.purchaseBatch, 'purchaseBatch', { required: false, max: 120 }),
     tags: tagValues(input.tags) || [],
