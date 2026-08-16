@@ -480,7 +480,15 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .replenishment-hero-actions{justify-content:space-between}
   .replenishment-layout{grid-template-columns:1fr}
   .replenishment-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .rule-row{align-items:flex-start}
+  .rule-row{align-items:stretch;flex-direction:column;gap:12px}
+  .rule-main{width:100%}
+  .rule-main>small{white-space:normal;overflow-wrap:anywhere}
+  .rule-row>.row-actions{position:relative;z-index:2;width:100%;display:grid;grid-template-columns:repeat(5,minmax(44px,1fr));gap:8px;padding-top:12px;border-top:1px solid #edf1f6;pointer-events:auto}
+  .rule-row>.row-actions .icon-button{width:100%;min-width:44px;height:44px;touch-action:manipulation}
+  .mapping-row{align-items:stretch;flex-direction:column;gap:12px}
+  .mapping-actions{position:relative;z-index:2;width:100%;display:grid;grid-template-columns:minmax(0,1fr) 44px 44px;gap:8px;pointer-events:auto}
+  .mapping-actions .mapping-group-summary{max-width:none;align-self:center;white-space:normal;overflow-wrap:anywhere}
+  .mapping-actions .icon-button{width:44px;height:44px;touch-action:manipulation}
   .rule-facts{gap:7px 10px}
   .execution-log-head{align-items:stretch}
   .execution-log-actions{width:100%}
