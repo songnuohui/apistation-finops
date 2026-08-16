@@ -1299,7 +1299,8 @@ export class SyncService {
         account_rate_multiplier,
         duration_ms,first_token_ms,created_at AS occurred_at,created_at::text AS cursor_time_key
       FROM ${this.source}.usage_logs
-      WHERE (created_at,id)>($1,$2)
+      -- postgres_fdw does not push ROW(created_at,id) comparisons to the source.
+      WHERE created_at>$1 OR (created_at=$1 AND id>$2)
       ORDER BY created_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     let rebuildUsers = new Set();
@@ -1526,7 +1527,7 @@ export class SyncService {
         provider_snapshot,payment_type,order_type${subscriptionColumns},status,
         refund_amount,paid_at,refund_at,fee_rate,recharge_code,updated_at,updated_at::text AS cursor_time_key
       FROM ${this.source}.payment_orders
-      WHERE (updated_at,id)>($1,$2)${orderFilter} ORDER BY updated_at,id LIMIT $3`,
+      WHERE (updated_at>$1 OR (updated_at=$1 AND id>$2))${orderFilter} ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     const users = new Set();
     const syncedRows = await inTransaction(this.finopsPool, async (client) => {
@@ -1699,7 +1700,8 @@ export class SyncService {
         COALESCE(po.provider_snapshot->>'currency','CNY') AS payment_currency
       FROM ${this.source}.redeem_codes rc
       LEFT JOIN ${this.source}.payment_orders po ON po.recharge_code=rc.code AND po.order_type='balance' AND po.paid_at IS NOT NULL
-      WHERE (COALESCE(rc.used_at,rc.created_at),rc.id)>($1,$2)
+      WHERE COALESCE(rc.used_at,rc.created_at)>$1
+        OR (COALESCE(rc.used_at,rc.created_at)=$1 AND rc.id>$2)
       ORDER BY COALESCE(rc.used_at,rc.created_at),rc.id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     const users = new Set();
@@ -1743,7 +1745,7 @@ export class SyncService {
     const sourceRows = await this.sourcePool.query(`
       SELECT id,user_id,action,amount,source_user_id,source_order_id,created_at,updated_at,updated_at::text AS cursor_time_key
       FROM ${this.source}.user_affiliate_ledger
-      WHERE (updated_at,id)>($1,$2) ORDER BY updated_at,id LIMIT $3`,
+      WHERE updated_at>$1 OR (updated_at=$1 AND id>$2) ORDER BY updated_at,id LIMIT $3`,
     [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     const users = new Set();
     const syncedRows = await inTransaction(this.finopsPool, async (client) => {
@@ -1778,7 +1780,8 @@ export class SyncService {
     const cursor = await this.readCursor('payment_audit_logs');
     const rows = await this.sourcePool.query(`
       SELECT id,order_id,action,detail,operator,created_at,created_at::text AS cursor_time_key
-      FROM ${this.source}.payment_audit_logs WHERE (created_at,id)>($1,$2)
+      FROM ${this.source}.payment_audit_logs
+      WHERE created_at>$1 OR (created_at=$1 AND id>$2)
       ORDER BY created_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     return inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'payment_audit_logs');
@@ -1802,7 +1805,8 @@ export class SyncService {
     const cursor = await this.readCursor('user_subscriptions');
     const rows = await this.sourcePool.query(`
       SELECT id,user_id,group_id,starts_at,expires_at,status,daily_usage_usd,weekly_usage_usd,monthly_usage_usd,updated_at,updated_at::text AS cursor_time_key,deleted_at
-      FROM ${this.source}.user_subscriptions WHERE (updated_at,id)>($1,$2)
+      FROM ${this.source}.user_subscriptions
+      WHERE updated_at>$1 OR (updated_at=$1 AND id>$2)
       ORDER BY updated_at,id LIMIT $3`, [sourceTimestamp(cursor), cursor?.cursor_id || 0, this.config.syncBatchSize]);
     return inTransaction(this.finopsPool, async (client) => {
       await this.cursor(client, 'user_subscriptions');

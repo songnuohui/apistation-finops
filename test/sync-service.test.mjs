@@ -705,6 +705,8 @@ test('usage source query never treats account statistics pricing as a CNY cost',
   assert.match(sourceQuery.text, /total_cost AS standard_cost_usd_reference/);
   assert.match(sourceQuery.text, /actual_cost AS user_charge_cny/);
   assert.match(sourceQuery.text, /0::smallint AS billing_type/);
+  assert.match(sourceQuery.text, /created_at>\$1 OR \(created_at=\$1 AND id>\$2\)/);
+  assert.doesNotMatch(sourceQuery.text, /\(created_at,id\)>\(\$1,\$2\)/);
   assert.doesNotMatch(sourceQuery.text, /COALESCE\(billing_type/);
   assert.doesNotMatch(sourceQuery.text, /account_stats_cost|estimated_upstream_cost/);
   assert.ok(!targetQueries.some((query) => query.text.includes('"public".usage_logs')));
