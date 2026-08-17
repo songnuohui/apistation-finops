@@ -213,14 +213,29 @@ function coverageLabel(account: AnyRecord) {
   } as Record<string, string>)[String(account.costCoverageStatus || '')] || '待核算';
 }
 function costBasisLabel(account: AnyRecord) {
+  const costSource = String(account.multiplierCostSource || '');
+  if (costSource === 'sub2api_account_multiplier') {
+    const min = Number(account.sourceAccountMultiplierMin);
+    const max = Number(account.sourceAccountMultiplierMax);
+    const range = Number.isFinite(min) && Number.isFinite(max)
+      ? Math.abs(min - max) < 0.0000001 ? `${min}x` : `${min}-${max}x`
+      : '';
+    return `Sub2API 账号倍率${range ? ` ${range}` : ''}`;
+  }
+  if (costSource === 'mixed_rate_snapshots') return '按倍率历史分段核算';
   if (account.costMode === 'fixed_purchase') return '完整采购实扣';
   if (account.costMode === 'free') return '免费资源';
   const upstream = multiplierRange(account, 'upstream')
     || (account.supplierKeyInventoryMultiplier != null ? `${account.supplierKeyInventoryMultiplier}x` : '')
     || (account.upstreamMultiplier != null ? `${account.upstreamMultiplier}x` : '');
   const selling = multiplierRange(account, 'selling');
-  if (upstream && selling) return `进货 ${upstream} · 销售 ${selling}`;
-  if (upstream) return `进货倍率 ${upstream}`;
+  const sourceLabel = costSource === 'supplier_rate_snapshot'
+    ? '供应商自动倍率'
+    : costSource === 'manual_rate_snapshot'
+    ? '手动倍率'
+    : '进货倍率';
+  if (upstream && selling) return `${sourceLabel} ${upstream} · 销售 ${selling}`;
+  if (upstream) return `${sourceLabel} ${upstream}`;
   return coverageLabel(account);
 }
 function makeEditor(account: AnyRecord) {

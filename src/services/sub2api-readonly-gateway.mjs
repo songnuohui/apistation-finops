@@ -258,6 +258,20 @@ export class Sub2ApiReadonlyGateway {
     });
   }
 
+  dashboardGroups({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    userId, accountId, groupId,
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/dashboard/groups', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      user_id: userId,
+      account_id: accountId,
+      group_id: groupId,
+    });
+  }
+
   dashboardUserBreakdown({
     startDate = '', endDate = '', timezone = this.config.timezone,
     userId, accountId, limit = 200, sortBy = 'actual_cost',

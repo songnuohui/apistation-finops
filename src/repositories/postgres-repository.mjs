@@ -1100,6 +1100,76 @@ export class PostgresRepository {
     };
   }
 
+  async getAccountCostRateTimelines({ accountIds, start, end }) {
+    const ids = [...new Set((accountIds || [])
+      .map(Number)
+      .filter((value) => Number.isSafeInteger(value) && value > 0))];
+    const timelines = new Map(ids.map((id) => [id, { rules: [], observationsByKey: new Map() }]));
+    if (!ids.length) return timelines;
+
+    const rulesResult = await this.pool.query(`
+      SELECT r.id,r.source_account_id,r.cost_mode,r.basis_mode,r.upstream_multiplier,
+             r.supplier_key_id,r.effective_from,r.effective_to,r.status,
+             k.rate_multiplier AS current_supplier_multiplier
+      FROM ${this.schema}.account_cost_rules r
+      LEFT JOIN ${this.schema}.supplier_keys k ON k.id=r.supplier_key_id
+      WHERE r.source_account_id=ANY($1::bigint[])
+        AND r.status IN ('active','superseded')
+        AND r.effective_from<$3
+        AND (r.effective_to IS NULL OR r.effective_to>$2)
+      ORDER BY r.source_account_id,r.effective_from,r.id`, [ids, start, end]);
+
+    const supplierKeyIds = new Set();
+    for (const row of rulesResult.rows) {
+      const accountId = Number(row.source_account_id);
+      const timeline = timelines.get(accountId);
+      if (!timeline) continue;
+      const supplierKeyId = row.supplier_key_id ? Number(row.supplier_key_id) : null;
+      if (supplierKeyId) supplierKeyIds.add(supplierKeyId);
+      timeline.rules.push({
+        id: Number(row.id),
+        costMode: row.cost_mode || '',
+        basisMode: row.basis_mode || 'revenue_backsolve',
+        upstreamMultiplier: nullableNumber(row.upstream_multiplier),
+        supplierKeyId,
+        effectiveFrom: row.effective_from,
+        effectiveTo: row.effective_to || null,
+        currentSupplierMultiplier: nullableNumber(row.current_supplier_multiplier),
+      });
+    }
+
+    if (!supplierKeyIds.size) return timelines;
+    const observationsResult = await this.pool.query(`
+      SELECT supplier_key_id,rate_multiplier,observed_at,change_type
+      FROM ${this.schema}.supplier_key_observations
+      WHERE supplier_key_id=ANY($1::bigint[])
+        AND observed_at<$2
+        AND change_type NOT IN ('snapshot','quota_changed')
+        AND rate_multiplier IS NOT NULL
+      ORDER BY supplier_key_id,observed_at,id`, [[...supplierKeyIds], end]);
+    const observationsByKey = new Map();
+    for (const row of observationsResult.rows) {
+      const keyId = Number(row.supplier_key_id);
+      if (!observationsByKey.has(keyId)) observationsByKey.set(keyId, []);
+      observationsByKey.get(keyId).push({
+        rateMultiplier: nullableNumber(row.rate_multiplier),
+        observedAt: row.observed_at,
+        changeType: row.change_type || '',
+      });
+    }
+    for (const timeline of timelines.values()) {
+      for (const rule of timeline.rules) {
+        if (rule.supplierKeyId && observationsByKey.has(rule.supplierKeyId)) {
+          timeline.observationsByKey.set(
+            rule.supplierKeyId,
+            observationsByKey.get(rule.supplierKeyId),
+          );
+        }
+      }
+    }
+    return timelines;
+  }
+
   async listAccounts({
     start, end, dailyStart = start, dailyEnd = end,
     search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,
@@ -4149,12 +4219,19 @@ export class PostgresRepository {
         const multiplierChanged = previous && nullableNumber(previous.rate_multiplier) !== nullableNumber(item.rateMultiplier);
         const statusChanged = previous && previous.status !== item.status;
         const groupChanged = previous && (previous.group_id !== item.groupId || previous.group_name !== item.groupName);
-        const quotaChanged = previous && nullableNumber(previous.quota_remaining) !== nullableNumber(item.quotaRemaining);
-        const changeType = !previous ? 'discovered' : multiplierChanged ? 'multiplier_changed' : statusChanged ? 'status_changed' : groupChanged ? 'group_changed' : quotaChanged ? 'quota_changed' : 'snapshot';
-        await client.query(`INSERT INTO ${this.schema}.supplier_key_observations(
-          supplier_key_id,status,group_name,rate_multiplier,quota_remaining,change_type,snapshot_data)
-          VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
-        [key.id,item.status,item.groupName,item.rateMultiplier,item.quotaRemaining,changeType,JSON.stringify(item.sourceData || {})]);
+        const changeType = !previous
+          ? 'discovered'
+          : multiplierChanged
+          ? 'multiplier_changed'
+          : statusChanged
+          ? 'status_changed'
+          : 'group_changed';
+        if (!previous || multiplierChanged || statusChanged || groupChanged) {
+          await client.query(`INSERT INTO ${this.schema}.supplier_key_observations(
+            supplier_key_id,status,group_name,rate_multiplier,quota_remaining,change_type,snapshot_data)
+            VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+          [key.id,item.status,item.groupName,item.rateMultiplier,item.quotaRemaining,changeType,JSON.stringify(item.sourceData || {})]);
+        }
         if (multiplierChanged) await alert({
           keyId:key.id,dedupeKey:`key:${key.id}:multiplier`,type:'multiplier_changed',title:'密钥倍率发生变化',
           message:`${item.name || item.maskedKey}：${previous.rate_multiplier ?? '--'}x → ${item.rateMultiplier ?? '--'}x`,
@@ -4193,9 +4270,36 @@ export class PostgresRepository {
                 fresh_until,last_attempt_at,next_probe_at,failure_count,http_status,last_error,
                 group_rate_multiplier,user_rate_multiplier,resolved_rate_multiplier,effective_rate_multiplier,
                 peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data,supplier_key_id)
-              VALUES($1,$2,'supplier_direct_probe','ok','token',$3,NOW(),
+              SELECT $1,$2,'supplier_direct_probe','ok','token',$3,NOW(),
                 NOW()+($4*2)*INTERVAL '1 second',NOW(),NOW()+$4*INTERVAL '1 second',0,$5,'',
-                $6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15)
+                $6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM (
+                  SELECT status,billing_scope,group_rate_multiplier,user_rate_multiplier,
+                         resolved_rate_multiplier,effective_rate_multiplier,peak_rate_enabled,
+                         peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data
+                  FROM ${this.schema}.account_rate_observations
+                  WHERE source_account_id=$1 AND supplier_key_id=$15
+                    AND source_kind='supplier_direct_probe'
+                  ORDER BY COALESCE(observed_at,received_at,last_attempt_at,captured_at) DESC,id DESC
+                  LIMIT 1
+                ) previous
+                WHERE previous.status IS NOT DISTINCT FROM 'ok'
+                  AND previous.billing_scope IS NOT DISTINCT FROM 'token'
+                  AND previous.group_rate_multiplier IS NOT DISTINCT FROM $6
+                  AND previous.user_rate_multiplier IS NOT DISTINCT FROM $7
+                  AND previous.resolved_rate_multiplier IS NOT DISTINCT FROM $8
+                  AND previous.effective_rate_multiplier IS NOT DISTINCT FROM $9
+                  AND previous.peak_rate_enabled IS NOT DISTINCT FROM $10
+                  AND previous.peak_rate_multiplier IS NOT DISTINCT FROM $11
+                  AND previous.applied_peak_multiplier IS NOT DISTINCT FROM $12
+                  AND previous.timezone IS NOT DISTINCT FROM $13
+                  AND previous.snapshot_data->>'peak_start'
+                    IS NOT DISTINCT FROM $14::jsonb->>'peak_start'
+                  AND previous.snapshot_data->>'peak_end'
+                    IS NOT DISTINCT FROM $14::jsonb->>'peak_end'
+              )
               ON CONFLICT(source_account_id,observation_key) DO NOTHING`, [
               link.source_account_id,`supplier:${key.id}:${observedAt}`,observedAt,connection.inventory_interval_seconds,
               check.httpStatus || 200,check.billing.group_rate_multiplier,check.billing.user_rate_multiplier,

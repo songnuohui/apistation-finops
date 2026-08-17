@@ -101,6 +101,140 @@ function summarizeModels(payload) {
   });
 }
 
+function summarizeGroups(payload) {
+  const groups = (Array.isArray(payload?.groups) ? payload.groups : []).map((item) => {
+    const cost = number(item.cost);
+    const actualCost = number(item.actual_cost);
+    const accountCost = number(item.account_cost);
+    return {
+      groupId: number(item.group_id),
+      groupName: item.group_name || '',
+      requests: number(item.requests),
+      totalTokens: number(item.total_tokens),
+      cost,
+      actualCost,
+      accountCost,
+      sellingMultiplier: cost > 0 ? actualCost / cost : null,
+      accountMultiplier: cost > 0 ? accountCost / cost : null,
+    };
+  });
+  return groups.reduce((summary, group) => {
+    summary.total_requests += group.requests;
+    summary.total_tokens += group.totalTokens;
+    summary.total_cost += group.cost;
+    summary.total_actual_cost += group.actualCost;
+    summary.total_account_cost += group.accountCost;
+    if (group.sellingMultiplier !== null) {
+      summary.selling_multiplier_min = summary.selling_multiplier_min === null
+        ? group.sellingMultiplier
+        : Math.min(summary.selling_multiplier_min, group.sellingMultiplier);
+      summary.selling_multiplier_max = summary.selling_multiplier_max === null
+        ? group.sellingMultiplier
+        : Math.max(summary.selling_multiplier_max, group.sellingMultiplier);
+    }
+    if (group.accountMultiplier !== null) {
+      summary.account_multiplier_min = summary.account_multiplier_min === null
+        ? group.accountMultiplier
+        : Math.min(summary.account_multiplier_min, group.accountMultiplier);
+      summary.account_multiplier_max = summary.account_multiplier_max === null
+        ? group.accountMultiplier
+        : Math.max(summary.account_multiplier_max, group.accountMultiplier);
+    }
+    return summary;
+  }, {
+    groups,
+    total_requests: 0,
+    total_tokens: 0,
+    total_cost: 0,
+    total_actual_cost: 0,
+    total_account_cost: 0,
+    selling_multiplier_min: null,
+    selling_multiplier_max: null,
+    account_multiplier_min: null,
+    account_multiplier_max: null,
+  });
+}
+
+function mergeAccountStats(items) {
+  return items.reduce((summary, item) => {
+    summary.groups.push(...(item.groups || []));
+    summary.total_requests += number(item.total_requests);
+    summary.total_tokens += number(item.total_tokens);
+    summary.total_cost += number(item.total_cost);
+    summary.total_actual_cost += number(item.total_actual_cost);
+    summary.total_account_cost += number(item.total_account_cost);
+    for (const field of ['selling_multiplier_min', 'account_multiplier_min']) {
+      const value = nullableNumber(item[field]);
+      if (value !== null) summary[field] = summary[field] === null ? value : Math.min(summary[field], value);
+    }
+    for (const field of ['selling_multiplier_max', 'account_multiplier_max']) {
+      const value = nullableNumber(item[field]);
+      if (value !== null) summary[field] = summary[field] === null ? value : Math.max(summary[field], value);
+    }
+    return summary;
+  }, {
+    groups: [],
+    total_requests: 0,
+    total_tokens: 0,
+    total_cost: 0,
+    total_actual_cost: 0,
+    total_account_cost: 0,
+    selling_multiplier_min: null,
+    selling_multiplier_max: null,
+    account_multiplier_min: null,
+    account_multiplier_max: null,
+  });
+}
+
+function dayNumber(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return null;
+  return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function dayKey(value) {
+  const date = new Date(value);
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, '0'),
+    String(date.getUTCDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function zonedDayKey(value, timeZone) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function listDayKeys(startDay, endDay) {
+  const start = dayNumber(startDay);
+  const end = dayNumber(endDay);
+  if (start === null || end === null || start > end) return [];
+  const days = [];
+  for (let current = start; current <= end; current += 86_400_000) days.push(dayKey(current));
+  return days;
+}
+
+function groupMultiplierCost(groups, upstreamMultiplier) {
+  return (groups || []).reduce((total, group) => {
+    const upstream = nullableNumber(upstreamMultiplier);
+    if (upstream === null || upstream < 0) return total;
+    const selling = nullableNumber(group.sellingMultiplier);
+    if (selling !== null && selling > 0) {
+      return total + number(group.actualCost) / selling * upstream;
+    }
+    return total + number(group.cost) * upstream;
+  }, 0);
+}
+
 export class SourceUsageService {
   constructor(repository, gateway, config, logger = console) {
     this.repository = repository;
@@ -458,6 +592,90 @@ export class SourceUsageService {
     };
   }
 
+  accountRateSegments(input, account, timeline) {
+    const days = listDayKeys(input.dailyStart, input.dailyEnd);
+    if (!days.length) return [];
+    const mode = String(account.costMode || account.costType || 'unconfigured');
+    const rules = Array.isArray(timeline?.rules) ? timeline.rules : [];
+    const observationsByKey = timeline?.observationsByKey instanceof Map
+      ? timeline.observationsByKey
+      : new Map();
+    const defaultRate = nullableNumber(account.supplierKeyInventoryMultiplier)
+      ?? nullableNumber(account.upstreamMultiplier);
+    const segments = [];
+
+    for (const day of days) {
+      const matchingRules = rules.filter((rule) => {
+        const startDay = zonedDayKey(rule.effectiveFrom, this.config.timezone);
+        const endDay = rule.effectiveTo
+          ? zonedDayKey(rule.effectiveTo, this.config.timezone)
+          : '';
+        return startDay <= day && (!endDay || endDay >= day);
+      });
+      const rule = matchingRules.sort((left, right) => (
+        new Date(right.effectiveFrom).getTime() - new Date(left.effectiveFrom).getTime()
+        || number(right.id) - number(left.id)
+      ))[0] || null;
+
+      let kind = 'source_account_multiplier';
+      let rate = null;
+      let source = 'sub2api_account_multiplier';
+      if (rule?.costMode === 'manual_multiplier') {
+        rate = nullableNumber(rule.upstreamMultiplier);
+        if (rate !== null && rate >= 0) {
+          kind = 'multiplier';
+          source = 'manual_rate_snapshot';
+        }
+      } else if (rule?.costMode === 'probe_multiplier') {
+        const observations = observationsByKey.get(rule.supplierKeyId) || [];
+        const observation = [...observations].reverse().find((item) => (
+          zonedDayKey(item.observedAt, this.config.timezone) <= day
+        ));
+        rate = nullableNumber(observation?.rateMultiplier)
+          ?? nullableNumber(rule.currentSupplierMultiplier)
+          ?? defaultRate;
+        if (rate !== null && rate >= 0) {
+          kind = 'multiplier';
+          source = 'supplier_rate_snapshot';
+        }
+      } else if (!rule && rules.length === 0 && ['manual_multiplier', 'probe_multiplier'].includes(mode)) {
+        rate = defaultRate;
+        if (rate !== null && rate >= 0) {
+          kind = 'multiplier';
+          source = mode === 'manual_multiplier'
+            ? 'manual_rate_snapshot'
+            : 'supplier_rate_snapshot';
+        }
+      }
+
+      const key = `${kind}:${rate ?? ''}:${source}`;
+      const previous = segments[segments.length - 1];
+      if (previous?.key === key) {
+        previous.endDate = day;
+      } else {
+        segments.push({
+          key,
+          startDate: day,
+          endDate: day,
+          kind,
+          rate,
+          source,
+        });
+      }
+    }
+    return segments;
+  }
+
+  async fetchAccountGroupStats(accountId, startDate, endDate) {
+    const payload = await this.gateway.dashboardGroups({
+      startDate,
+      endDate,
+      timezone: this.config.timezone,
+      accountId,
+    });
+    return { ...summarizeGroups(payload), source_available: true };
+  }
+
   calculateAccountCost(account, stats) {
     const mode = String(account.costMode || account.costType || 'unconfigured');
     const fixedCost = number(account.fixedAcquisitionCostCny);
@@ -468,28 +686,54 @@ export class SourceUsageService {
         || fixedCost > 0,
       );
       return hasFixedCost
-        ? { cost: fixedCost, fixedCost, multiplierCost: 0, costKnown: true }
+        ? {
+          cost: fixedCost,
+          fixedCost,
+          multiplierCost: 0,
+          costKnown: true,
+          source: 'fixed_purchase',
+        }
         : { cost: null, fixedCost: null, multiplierCost: null, costKnown: false };
     }
     if (mode === 'free') {
-      return { cost: 0, fixedCost: 0, multiplierCost: 0, costKnown: true };
+      return {
+        cost: 0,
+        fixedCost: 0,
+        multiplierCost: 0,
+        costKnown: true,
+        source: 'free',
+      };
     }
     if (['probe_multiplier', 'manual_multiplier'].includes(mode)) {
-      const upstream = nullableNumber(account.upstreamMultiplier);
-      if (upstream === null || upstream < 0) {
+      const multiplierCost = nullableNumber(stats.calculated_multiplier_cost_cny);
+      if (multiplierCost === null) {
         return { cost: null, fixedCost: 0, multiplierCost: null, costKnown: false };
       }
-      const reference = number(stats.total_cost);
-      const basis = account.basisMode === 'reference_cny'
-        ? nullableNumber(account.cnyPerReferenceUnit)
-        : 1;
-      if (basis === null || basis <= 0) {
-        return { cost: null, fixedCost: 0, multiplierCost: null, costKnown: false };
-      }
-      const cost = reference * upstream * basis;
-      return { cost, fixedCost: 0, multiplierCost: cost, costKnown: true };
+      return {
+        cost: multiplierCost,
+        fixedCost: 0,
+        multiplierCost,
+        costKnown: true,
+        source: stats.multiplier_cost_source || (
+          mode === 'manual_multiplier' ? 'manual_rate_snapshot' : 'supplier_rate_snapshot'
+        ),
+      };
     }
-    return { cost: null, fixedCost: null, multiplierCost: null, costKnown: false };
+    if (!stats.source_available) {
+      return {
+        cost: null,
+        fixedCost: null,
+        multiplierCost: null,
+        costKnown: false,
+      };
+    }
+    return {
+      cost: number(stats.total_account_cost),
+      fixedCost: 0,
+      multiplierCost: number(stats.total_account_cost),
+      costKnown: true,
+      source: 'sub2api_account_multiplier',
+    };
   }
 
   enrichAccount(account, stats) {
@@ -516,20 +760,50 @@ export class SourceUsageService {
       unpricedUserChargeCny: missing ? revenue : 0,
       pricedUsageCount: missing ? 0 : requests,
       unpricedUsageCount: missing ? requests : 0,
-      multiplierCostSource: (
-        calculated.costKnown
-        && ['probe_multiplier', 'manual_multiplier'].includes(mode)
-      ) ? 'source_api_aggregate' : '',
+      periodUpstreamMultiplierMin: nullableNumber(stats.upstream_multiplier_min),
+      periodUpstreamMultiplierMax: nullableNumber(stats.upstream_multiplier_max),
+      periodSellingMultiplierMin: nullableNumber(stats.selling_multiplier_min),
+      periodSellingMultiplierMax: nullableNumber(stats.selling_multiplier_max),
+      sourceAccountMultiplierMin: nullableNumber(stats.account_multiplier_min),
+      sourceAccountMultiplierMax: nullableNumber(stats.account_multiplier_max),
+      multiplierCostSource: calculated.source || '',
       ...financialFields(revenue, calculated.cost),
     };
   }
 
-  async accountStats(input, accountId) {
-    const payload = await this.gateway.dashboardModels({
-      ...usageRange(input, this.config.timezone),
-      accountId,
-    });
-    return summarizeModels(payload);
+  async accountStats(input, account, timeline) {
+    const accountId = number(account.id);
+    const mode = String(account.costMode || account.costType || 'unconfigured');
+    if (!['probe_multiplier', 'manual_multiplier'].includes(mode)) {
+      return this.fetchAccountGroupStats(accountId, input.dailyStart, input.dailyEnd);
+    }
+
+    const segments = this.accountRateSegments(input, account, timeline);
+    const loaded = await Promise.all(segments.map(async (segment) => ({
+      ...segment,
+      stats: await this.fetchAccountGroupStats(accountId, segment.startDate, segment.endDate),
+    })));
+    const stats = mergeAccountStats(loaded.map((item) => item.stats));
+    let multiplierCost = 0;
+    const sources = new Set();
+    const upstreamRates = [];
+    for (const segment of loaded) {
+      sources.add(segment.source);
+      if (segment.kind === 'multiplier') {
+        multiplierCost += groupMultiplierCost(segment.stats.groups, segment.rate);
+        upstreamRates.push(number(segment.rate));
+      } else {
+        multiplierCost += number(segment.stats.total_account_cost);
+      }
+    }
+    stats.calculated_multiplier_cost_cny = multiplierCost;
+    stats.multiplier_cost_source = sources.size === 1
+      ? [...sources][0]
+      : 'mixed_rate_snapshots';
+    stats.upstream_multiplier_min = upstreamRates.length ? Math.min(...upstreamRates) : null;
+    stats.upstream_multiplier_max = upstreamRates.length ? Math.max(...upstreamRates) : null;
+    stats.source_available = loaded.length > 0 && loaded.every((item) => item.stats.source_available);
+    return stats;
   }
 
   accountSummary(items, total, partialUsageSummary = false) {
@@ -585,9 +859,22 @@ export class SourceUsageService {
       });
       targetItems = all.items;
     }
+    let timelines = new Map();
+    try {
+      timelines = await this.repository.getAccountCostRateTimelines({
+        accountIds: targetItems.map((account) => number(account.id)),
+        start: input.start,
+        end: input.end,
+      });
+    } catch (error) {
+      this.logger.warn('[source usage] account rate timeline failed', error?.message || error);
+    }
     const enriched = await Promise.all(targetItems.map(async (account) => {
       try {
-        return this.enrichAccount(account, await this.accountStats(input, number(account.id)));
+        return this.enrichAccount(
+          account,
+          await this.accountStats(input, account, timelines.get(number(account.id))),
+        );
       } catch (error) {
         this.logger.warn('[source usage] account aggregate failed', account.id, error?.message || error);
         return this.enrichAccount(account, {});
