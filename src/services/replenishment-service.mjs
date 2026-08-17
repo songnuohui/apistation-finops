@@ -284,6 +284,11 @@ function scheduleSnapshot(account, {
     || account?.tempUnschedulableReason
     || '',
   );
+  const rateLimitResetAt = account?.rate_limit_reset_at
+    || account?.rateLimitResetAt
+    || null;
+  const rateLimitResetMs = rateLimitResetAt ? Date.parse(rateLimitResetAt) : Number.NaN;
+  const rateLimited = Number.isFinite(rateLimitResetMs) && rateLimitResetMs > nowMs;
   const tempUntilMs = tempUnschedulableUntil ? Date.parse(tempUnschedulableUntil) : Number.NaN;
   const temporarilyUnschedulable = Number.isFinite(tempUntilMs) && tempUntilMs > nowMs;
   if (readError) return {
@@ -341,6 +346,14 @@ function scheduleSnapshot(account, {
     reason: tempUnschedulableReason || 'Sub2API 临时停止调度',
     tempUnschedulableUntil,
     tempUnschedulableReason,
+  };
+  if (rateLimited) return {
+    sourceSchedulable,
+    state: 'rate_limited',
+    reason: `Sub2API rate limited until ${rateLimitResetAt}`,
+    tempUnschedulableUntil,
+    tempUnschedulableReason,
+    rateLimitResetAt,
   };
   if (sourceSchedulable === false) return {
     sourceSchedulable,
@@ -1203,6 +1216,7 @@ export class ReplenishmentService {
         // Treat missing runtime eligibility conservatively so a partial API
         // response cannot inflate the replenishment inventory.
         && account?.schedulable === true
+        && schedule.state === 'schedulable'
         && !expired
         && !authFailed
         && !repairing;
@@ -1265,6 +1279,10 @@ export class ReplenishmentService {
         schedulable: schedule.sourceSchedulable === true,
         scheduleState: schedule.state,
         scheduleReason: schedule.reason,
+        rateLimitResetAt: schedule.rateLimitResetAt
+          || account?.rate_limit_reset_at
+          || account?.rateLimitResetAt
+          || null,
         tempUnschedulableUntil: schedule.tempUnschedulableUntil,
         tempUnschedulableReason: schedule.tempUnschedulableReason,
         expired,
