@@ -19,7 +19,7 @@ if (!configuredFinopsDatabase || configuredFinopsDatabase === configuredSourceDa
 
 const pool = createFinopsPool(config);
 const schema = `"${config.finopsSchema}"`;
-const countTargets = [
+const cleanupTargets = [
   'revenue_recognition',
   'usage_cost_reprice_queue',
   'fact_usage_cost_snapshots',
@@ -30,10 +30,12 @@ const countTargets = [
 ];
 
 async function counts(client) {
-  return Object.fromEntries(await Promise.all(countTargets.map(async (table) => {
+  const countsByTable = {};
+  for (const table of cleanupTargets) {
     const result = await client.query(`SELECT COUNT(*)::bigint AS count FROM ${schema}."${table}"`);
-    return [table, Number(result.rows[0].count)];
-  })));
+    countsByTable[table] = Number(result.rows[0].count);
+  }
+  return countsByTable;
 }
 
 try {
@@ -54,13 +56,8 @@ try {
       [`${config.finopsSchema}:clear-synced-usage`],
     );
     const before = await counts(client);
-    await client.query(`DELETE FROM ${schema}.revenue_recognition`);
-    await client.query(`DELETE FROM ${schema}.usage_cost_reprice_queue`);
-    await client.query(`DELETE FROM ${schema}.fact_usage_cost_snapshots`);
-    await client.query(`DELETE FROM ${schema}.fact_usage_daily`);
-    await client.query(`DELETE FROM ${schema}.fact_usage_events`);
-    await client.query(`DELETE FROM ${schema}.credit_lots`);
-    await client.query(`DELETE FROM ${schema}.wallet_reconciliation_snapshots`);
+    const tables = cleanupTargets.map((table) => `${schema}."${table}"`).join(',');
+    await client.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY`);
     const reconciliations = await client.query(`
       DELETE FROM ${schema}.reconciliation_runs
       WHERE reconciliation_type IN (
