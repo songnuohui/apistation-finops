@@ -46,7 +46,7 @@ let searchTimer: number | undefined;
 const rows = computed(() => accounts.value.items || []);
 const summary = computed(() => accounts.value.summary || {});
 const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total || 0) / pageSize.value)));
-const metricScope = computed(() => summary.value.partialUsageSummary ? '当前页' : '筛选结果');
+const metricScope = '筛选范围';
 const suppliers = computed(() => [...new Set(
   catalog.value.filterSuppliers || catalog.value.suppliers || [],
 )].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
@@ -483,7 +483,7 @@ onUnmounted(() => window.clearTimeout(searchTimer));
 <template>
   <div class="page-view account-cost-view">
     <div class="metric-grid account-cost-metrics">
-      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small><template v-if="summary.partialUsageSummary">当前页核算 {{ summary.summarizedAccountCount || rows.length }} 个 · </template>{{ summary.missingCostCount || 0 }} 个成本待核算</small></div>
+      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>时间范围与筛选条件内全部账号 · {{ summary.missingCostCount || 0 }} 个成本待核算</small></div>
       <div class="metric-card"><span>{{ metricScope }}已核算成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}</small></div>
       <div class="metric-card"><span>{{ metricScope }}销售额</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次请求<template v-if="summary.unpricedUserChargeCny"> · 待核算销售额 {{ money(summary.unpricedUserChargeCny) }}</template></small></div>
       <div class="metric-card good"><span>{{ metricScope }}已核算收益</span><strong>{{ money(summary.profitCny) }}</strong><small>仅包含成本完整账号<template v-if="summary.unpricedUserChargeCny"> · {{ money(summary.unpricedUserChargeCny) }} 待核算</template></small></div>

@@ -4,7 +4,12 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
-import { assertDistinctDatabases, createFinopsPool, createSourcePool } from './db.mjs';
+import {
+  assertDistinctDatabases,
+  createFinopsPool,
+  createSourcePool,
+  createSub2ApiUsagePool,
+} from './db.mjs';
 import {
   authorize,
   clearPendingLoginCookie,
@@ -42,6 +47,7 @@ import { OAuthSupplyClient } from './services/oauth-supply-client.mjs';
 import { Sub2ApiAccountImportGateway } from './services/sub2api-account-import-gateway.mjs';
 import { ReplenishmentService } from './services/replenishment-service.mjs';
 import { ReplenishmentRepository } from './repositories/replenishment-repository.mjs';
+import { SourceUsageRepository } from './repositories/source-usage-repository.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
   getSub2ApiRuntimeQueueStatus,
@@ -61,6 +67,7 @@ const webRoot=path.join(root,'web');
 const config=loadConfig();
 const sourcePool=createSourcePool(config);
 const finopsPool=createFinopsPool(config);
+const sub2ApiUsagePool=createSub2ApiUsagePool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
@@ -68,7 +75,13 @@ const qqAlertNotificationService=new QqAlertNotificationService(repository,confi
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
-const sourceUsageService=config.demoMode?repository:new SourceUsageService(repository,sub2ApiReadonlyGateway,config);
+const sourceUsageRepository=config.demoMode?null:new SourceUsageRepository(sub2ApiUsagePool,config);
+const sourceUsageService=config.demoMode?repository:new SourceUsageService(
+  repository,
+  sub2ApiReadonlyGateway,
+  config,
+  sourceUsageRepository,
+);
 const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
 const oauthSupplyAuthService=new OAuthSupplyAuthService(repository,config);
 const oauthSupplyClient=new OAuthSupplyClient(config);
@@ -1037,7 +1050,14 @@ async function staticFile(res,url,{embeddable=false}={}){
 
 async function readiness(){
   if(config.demoMode)return {status:'ready',mode:'demo'};
-  await Promise.all([sourcePool.query('SELECT 1'),finopsPool.query('SELECT 1')]);
+  const [, , usageReadOnly] = await Promise.all([
+    sourcePool.query('SELECT 1'),
+    finopsPool.query('SELECT 1'),
+    sub2ApiUsagePool.query('SHOW transaction_read_only'),
+  ]);
+  if(usageReadOnly.rows[0]?.transaction_read_only!=='on'){
+    throw new Error('Sub2API usage database connection is not read-only');
+  }
   const migration=await finopsPool.query(
     `SELECT version FROM "${config.finopsSchema}".schema_migrations
      WHERE version = ANY($1::text[])`,
@@ -1112,6 +1132,6 @@ async function start(){
   qqAlertNotificationService.start();
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);sub2ApiServiceAuthService.stop();syncService?.stop();supplierMonitorService?.stop();qqAlertNotificationService.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);sub2ApiServiceAuthService.stop();syncService?.stop();supplierMonitorService?.stop();qqAlertNotificationService.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),sub2ApiUsagePool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

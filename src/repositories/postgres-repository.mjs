@@ -1170,6 +1170,68 @@ export class PostgresRepository {
     return timelines;
   }
 
+  async getAccountCostingProfiles({ accountIds }) {
+    const ids = [...new Set((accountIds || [])
+      .map(Number)
+      .filter((value) => Number.isSafeInteger(value) && value > 0))];
+    if (!ids.length) return [];
+    const result = await this.pool.query(`
+      WITH cost_ledger AS (
+        SELECT p.source_account_id,
+               COALESCE(SUM(
+                 COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount)
+               ),0) AS acquisition_cost_cny,
+               COUNT(*)::int AS cost_record_count
+        FROM ${this.schema}.account_cost_periods p
+        WHERE p.status='active' AND p.source_account_id=ANY($1::bigint[])
+        GROUP BY p.source_account_id
+      )
+      SELECT a.source_account_id AS id,
+             COALESCE(rule.cost_mode,cp.cost_mode,
+               CASE
+                 WHEN cp.cost_type='free' THEN 'free'
+                 WHEN COALESCE(ledger.cost_record_count,0)>0 THEN 'fixed_purchase'
+                 WHEN linked_key.status='active' AND linked_key.rate_multiplier IS NOT NULL
+                   THEN 'probe_multiplier'
+                 ELSE 'unconfigured'
+               END
+             ) AS cost_type,
+             COALESCE(rule.upstream_multiplier,
+               CASE WHEN linked_key.status='active' THEN linked_key.rate_multiplier END
+             ) AS upstream_multiplier,
+             COALESCE(ledger.acquisition_cost_cny,0) AS acquisition_cost_cny,
+             COALESCE(ledger.cost_record_count,0) AS cost_record_count,
+             linked_key.rate_multiplier AS supplier_key_inventory_multiplier
+      FROM ${this.schema}.dim_accounts a
+      LEFT JOIN cost_ledger ledger ON ledger.source_account_id=a.source_account_id
+      LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=a.cost_profile_id
+      LEFT JOIN LATERAL (
+        SELECT r.*
+        FROM ${this.schema}.account_cost_rules r
+        WHERE r.source_account_id=a.source_account_id
+          AND r.status='active'
+          AND (r.effective_to IS NULL OR r.effective_to>NOW())
+        ORDER BY r.effective_from DESC,r.id DESC
+        LIMIT 1
+      ) rule ON TRUE
+      LEFT JOIN ${this.schema}.supplier_account_links supplier_link
+        ON supplier_link.source_account_id=a.source_account_id
+      LEFT JOIN ${this.schema}.supplier_keys linked_key
+        ON linked_key.id=supplier_link.supplier_key_id
+        AND linked_key.removed_at IS NULL
+      WHERE a.source_account_id=ANY($1::bigint[])
+    `, [ids]);
+    return result.rows.map((row) => ({
+      id: number(row.id),
+      costMode: row.cost_type || 'unconfigured',
+      costType: row.cost_type || 'unconfigured',
+      upstreamMultiplier: nullableNumber(row.upstream_multiplier),
+      supplierKeyInventoryMultiplier: nullableNumber(row.supplier_key_inventory_multiplier),
+      fixedAcquisitionCostCny: number(row.acquisition_cost_cny),
+      hasCostRecord: number(row.cost_record_count) > 0,
+    }));
+  }
+
   async listAccounts({
     start, end, dailyStart = start, dailyEnd = end,
     search = '', scope = 'current', page = 1, pageSize = 20, offset = 0,

@@ -236,10 +236,11 @@ function groupMultiplierCost(groups, upstreamMultiplier) {
 }
 
 export class SourceUsageService {
-  constructor(repository, gateway, config, logger = console) {
+  constructor(repository, gateway, config, sourceUsageRepository = null, logger = console) {
     this.repository = repository;
     this.gateway = gateway;
     this.config = config;
+    this.sourceUsageRepository = sourceUsageRepository;
     this.logger = logger;
   }
 
@@ -256,12 +257,11 @@ export class SourceUsageService {
   }
 
   summaryFrom(local, source) {
-    const stats = summarizeModels(source);
-    const revenue = number(stats.total_actual_cost);
-    const sourceAccountCost = number(stats.total_account_cost);
+    const revenue = number(source.total_actual_cost);
+    const multiplierCost = number(source.calculated_cost_cny);
+    const sourceAccountCost = number(source.total_account_cost);
     const registeredProcurementCost = number(local.operations?.purchaseAllocatedCostCny);
-    const effectiveCost = sourceAccountCost > 0 ? sourceAccountCost : registeredProcurementCost;
-    const usingSourceCost = sourceAccountCost > 0;
+    const effectiveCost = registeredProcurementCost + multiplierCost;
     const profit = revenue - effectiveCost;
     return {
       ...local,
@@ -272,12 +272,12 @@ export class SourceUsageService {
         revenueCny: revenue,
         recognizedRevenueCny: revenue,
         userChargeCny: revenue,
-        tokenListValueUsd: number(stats.total_cost),
-        purchaseAllocatedCostCny: usingSourceCost ? 0 : registeredProcurementCost,
-        allocatedCost: usingSourceCost ? 0 : registeredProcurementCost,
-        allocatedCostCny: usingSourceCost ? 0 : registeredProcurementCost,
+        tokenListValueUsd: number(source.total_cost),
+        purchaseAllocatedCostCny: registeredProcurementCost,
+        allocatedCost: registeredProcurementCost,
+        allocatedCostCny: registeredProcurementCost,
         registeredProcurementCostCny: registeredProcurementCost,
-        multiplierCostCny: sourceAccountCost,
+        multiplierCostCny: multiplierCost,
         sourceReportedAccountCostCny: sourceAccountCost,
         effectiveCostCny: effectiveCost,
         fullyLoadedCostCny: effectiveCost,
@@ -286,17 +286,18 @@ export class SourceUsageService {
         grossProfitCny: profit,
         bookedProfitCny: profit,
         grossMargin: revenue ? profit / revenue : null,
-        profitBasis: usingSourceCost
-          ? 'Sub2API 聚合账号成本'
-          : 'FinOps 已登记采购成本',
+        unbookedAccountCount: number(source.missing_cost_count),
+        unbookedRevenueCny: number(source.unpriced_actual_cost),
+        unbookedUserChargeCny: number(source.unpriced_actual_cost),
+        profitBasis: 'FinOps 账号成本规则',
       },
       usage: {
-        requests: number(stats.total_requests),
-        inputTokens: number(stats.total_input_tokens),
-        outputTokens: number(stats.total_output_tokens),
-        cacheTokens: number(stats.total_cache_tokens),
+        requests: number(source.total_requests),
+        inputTokens: number(source.total_input_tokens),
+        outputTokens: number(source.total_output_tokens),
+        cacheTokens: number(source.total_cache_tokens),
         activeUsers: 0,
-        activeAccounts: 0,
+        activeAccounts: number(source.active_accounts),
         averageLatencyMs: 0,
       },
     };
@@ -305,7 +306,7 @@ export class SourceUsageService {
   async getSummary(input) {
     const [local, source] = await Promise.all([
       this.repository.getSummary(input),
-      this.sourceSnapshot(input),
+      this.getSourceEconomics(input),
     ]);
     return this.summaryFrom(local, source);
   }
@@ -313,7 +314,7 @@ export class SourceUsageService {
   async getOverviewDashboard(input) {
     const [local, source, breakdown] = await Promise.all([
       this.repository.getOverviewDashboard(input),
-      this.sourceSnapshot(input),
+      this.getSourceEconomics(input),
       this.gateway.dashboardUserBreakdown({
         ...usageRange(input, this.config.timezone),
         limit: 8,
@@ -344,32 +345,26 @@ export class SourceUsageService {
 
   async getTrend(input) {
     const [source, local] = await Promise.all([
-      this.sourceSnapshot(input),
+      this.getSourceEconomics(input),
       this.repository.getTrend(input),
     ]);
-    const stats = summarizeModels(source);
-    const ratio = number(stats.total_cost) > 0
-      ? number(stats.total_account_cost) / number(stats.total_cost)
-      : 0;
-    const sourceByDay = new Map(
-      (Array.isArray(source?.trend) ? source.trend : []).map((item) => [String(item.date), item]),
-    );
+    const sourceByDay = source.by_day || new Map();
     const localByDay = new Map((local.items || []).map((item) => [String(item.day), item]));
     const days = [...new Set([...localByDay.keys(), ...sourceByDay.keys()])].sort();
     return {
       items: days.map((day) => {
         const point = sourceByDay.get(day) || {};
         const localPoint = localByDay.get(day) || {};
-        const revenue = number(point.actual_cost);
-        const sourceCost = Math.max(0, number(point.cost) * ratio);
+        const revenue = number(point.total_actual_cost);
+        const sourceCost = number(point.calculated_cost_cny);
         const registeredProcurementCost = number(localPoint.purchaseAllocatedCostCny);
-        const cost = sourceCost > 0 ? sourceCost : registeredProcurementCost;
+        const cost = sourceCost + registeredProcurementCost;
         return {
           day,
           ...financialFields(revenue, cost),
-          allocatedCost: sourceCost > 0 ? 0 : registeredProcurementCost,
-          allocatedCostCny: sourceCost > 0 ? 0 : registeredProcurementCost,
-          purchaseAllocatedCostCny: sourceCost > 0 ? 0 : registeredProcurementCost,
+          allocatedCost: registeredProcurementCost,
+          allocatedCostCny: registeredProcurementCost,
+          purchaseAllocatedCostCny: registeredProcurementCost,
           registeredProcurementCostCny: registeredProcurementCost,
           multiplierCostCny: sourceCost,
           rechargeCny: number(localPoint.rechargeCny),
@@ -676,6 +671,220 @@ export class SourceUsageService {
     return { ...summarizeGroups(payload), source_available: true };
   }
 
+  emptySourceStats() {
+    return {
+      groups: [],
+      total_requests: 0,
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_cache_tokens: 0,
+      total_tokens: 0,
+      total_cost: 0,
+      total_actual_cost: 0,
+      total_account_cost: 0,
+      selling_multiplier_min: null,
+      selling_multiplier_max: null,
+      account_multiplier_min: null,
+      account_multiplier_max: null,
+      source_available: true,
+    };
+  }
+
+  dailyAccountStats(rows) {
+    const byAccount = new Map();
+    for (const row of rows || []) {
+      const accountId = number(row.accountId);
+      if (!byAccount.has(accountId)) byAccount.set(accountId, new Map());
+      const byDay = byAccount.get(accountId);
+      if (!byDay.has(row.day)) byDay.set(row.day, this.emptySourceStats());
+      const stats = byDay.get(row.day);
+      const cost = number(row.cost);
+      const actualCost = number(row.actualCost);
+      const accountCost = number(row.accountCost);
+      const group = {
+        groupId: number(row.groupId),
+        groupName: '',
+        requests: number(row.requests),
+        totalTokens: number(row.totalTokens),
+        cost,
+        actualCost,
+        accountCost,
+        sellingMultiplier: cost > 0 ? actualCost / cost : null,
+        accountMultiplier: cost > 0 ? accountCost / cost : null,
+      };
+      stats.groups.push(group);
+      stats.total_requests += group.requests;
+      stats.total_input_tokens += number(row.inputTokens);
+      stats.total_output_tokens += number(row.outputTokens);
+      stats.total_cache_tokens += number(row.cacheTokens);
+      stats.total_tokens += group.totalTokens;
+      stats.total_cost += cost;
+      stats.total_actual_cost += actualCost;
+      stats.total_account_cost += accountCost;
+      for (const [field, value] of [
+        ['selling_multiplier_min', group.sellingMultiplier],
+        ['account_multiplier_min', group.accountMultiplier],
+      ]) {
+        if (value !== null) {
+          stats[field] = stats[field] === null ? value : Math.min(stats[field], value);
+        }
+      }
+      for (const [field, value] of [
+        ['selling_multiplier_max', group.sellingMultiplier],
+        ['account_multiplier_max', group.accountMultiplier],
+      ]) {
+        if (value !== null) {
+          stats[field] = stats[field] === null ? value : Math.max(stats[field], value);
+        }
+      }
+    }
+    return byAccount;
+  }
+
+  accountStatsFromDaily(input, account, timeline, dailyStats = new Map()) {
+    const dailyValues = [...dailyStats.values()];
+    const stats = mergeAccountStats(dailyValues);
+    stats.total_input_tokens = dailyValues
+      .reduce((total, item) => total + number(item.total_input_tokens), 0);
+    stats.total_output_tokens = dailyValues
+      .reduce((total, item) => total + number(item.total_output_tokens), 0);
+    stats.total_cache_tokens = dailyValues
+      .reduce((total, item) => total + number(item.total_cache_tokens), 0);
+    stats.source_available = true;
+    const mode = String(account.costMode || account.costType || 'unconfigured');
+    if (!['probe_multiplier', 'manual_multiplier'].includes(mode)) return stats;
+
+    const segments = this.accountRateSegments(input, account, timeline);
+    let multiplierCost = 0;
+    const costsByDay = new Map();
+    const sources = new Set();
+    const upstreamRates = [];
+    for (const segment of segments) {
+      sources.add(segment.source);
+      if (segment.kind === 'multiplier') upstreamRates.push(number(segment.rate));
+      for (const day of listDayKeys(segment.startDate, segment.endDate)) {
+        const dayStats = dailyStats.get(day) || this.emptySourceStats();
+        const cost = segment.kind === 'multiplier'
+          ? groupMultiplierCost(dayStats.groups, segment.rate)
+          : number(dayStats.total_account_cost);
+        multiplierCost += cost;
+        costsByDay.set(day, cost);
+      }
+    }
+    stats.calculated_multiplier_cost_cny = multiplierCost;
+    stats.calculated_multiplier_cost_by_day = costsByDay;
+    stats.multiplier_cost_source = sources.size === 1
+      ? [...sources][0]
+      : 'mixed_rate_snapshots';
+    stats.upstream_multiplier_min = upstreamRates.length ? Math.min(...upstreamRates) : null;
+    stats.upstream_multiplier_max = upstreamRates.length ? Math.max(...upstreamRates) : null;
+    return stats;
+  }
+
+  calculateOperatingCost(account, stats) {
+    const mode = String(account.costMode || account.costType || 'unconfigured');
+    if (mode === 'fixed_purchase') {
+      return account.hasCostRecord || number(account.fixedAcquisitionCostCny) > 0
+        ? { cost: 0, costKnown: true }
+        : { cost: null, costKnown: false };
+    }
+    if (mode === 'free') return { cost: 0, costKnown: true };
+    if (['probe_multiplier', 'manual_multiplier'].includes(mode)) {
+      const cost = nullableNumber(stats.calculated_multiplier_cost_cny);
+      return cost === null ? { cost: null, costKnown: false } : { cost, costKnown: true };
+    }
+    return stats.source_available
+      ? { cost: number(stats.total_account_cost), costKnown: true }
+      : { cost: null, costKnown: false };
+  }
+
+  async getSourceEconomics(input) {
+    if (!this.sourceUsageRepository) {
+      const stats = summarizeModels(await this.sourceSnapshot(input));
+      return {
+        ...stats,
+        calculated_cost_cny: stats.total_account_cost,
+        active_accounts: 0,
+        missing_cost_count: 0,
+        unpriced_actual_cost: 0,
+        by_day: new Map(),
+      };
+    }
+    const rows = await this.sourceUsageRepository.getDailyAccountGroupStats({
+      start: input.start,
+      end: input.end,
+    });
+    const dailyByAccount = this.dailyAccountStats(rows);
+    const accountIds = [...dailyByAccount.keys()].filter((id) => id > 0);
+    const [accounts, timelines] = await Promise.all([
+      this.repository.getAccountCostingProfiles({ accountIds }),
+      this.repository.getAccountCostRateTimelines({
+        accountIds,
+        start: input.start,
+        end: input.end,
+      }),
+    ]);
+    const accountsById = new Map(accounts.map((account) => [number(account.id), account]));
+    const summary = this.emptySourceStats();
+    summary.calculated_cost_cny = 0;
+    summary.unpriced_actual_cost = 0;
+    summary.missing_cost_count = 0;
+    summary.active_accounts = 0;
+    summary.by_day = new Map();
+
+    for (const [accountId, byDay] of dailyByAccount) {
+      const account = accountsById.get(accountId) || {
+        id: accountId,
+        costMode: 'unconfigured',
+        costType: 'unconfigured',
+      };
+      const stats = this.accountStatsFromDaily(
+        input,
+        account,
+        timelines.get(accountId),
+        byDay,
+      );
+      const calculated = this.calculateOperatingCost(account, stats);
+      summary.active_accounts += 1;
+      summary.total_requests += number(stats.total_requests);
+      summary.total_input_tokens += number(stats.total_input_tokens);
+      summary.total_output_tokens += number(stats.total_output_tokens);
+      summary.total_cache_tokens += number(stats.total_cache_tokens);
+      summary.total_tokens += number(stats.total_tokens);
+      summary.total_cost += number(stats.total_cost);
+      summary.total_actual_cost += number(stats.total_actual_cost);
+      summary.total_account_cost += number(stats.total_account_cost);
+      if (calculated.costKnown) summary.calculated_cost_cny += number(calculated.cost);
+      else {
+        summary.missing_cost_count += 1;
+        summary.unpriced_actual_cost += number(stats.total_actual_cost);
+      }
+
+      for (const [day, dayStats] of byDay) {
+        const point = summary.by_day.get(day) || {
+          total_requests: 0,
+          total_tokens: 0,
+          total_cost: 0,
+          total_actual_cost: 0,
+          total_account_cost: 0,
+          calculated_cost_cny: 0,
+        };
+        const dayCost = ['probe_multiplier', 'manual_multiplier']
+          .includes(String(account.costMode || account.costType))
+          ? number(stats.calculated_multiplier_cost_by_day?.get(day))
+          : number(this.calculateOperatingCost(account, dayStats).cost);
+        point.total_requests += number(dayStats.total_requests);
+        point.total_tokens += number(dayStats.total_tokens);
+        point.total_cost += number(dayStats.total_cost);
+        point.total_actual_cost += number(dayStats.total_actual_cost);
+        point.total_account_cost += number(dayStats.total_account_cost);
+        point.calculated_cost_cny += dayCost;
+        summary.by_day.set(day, point);
+      }
+    }
+    return summary;
+  }
+
   calculateAccountCost(account, stats) {
     const mode = String(account.costMode || account.costType || 'unconfigured');
     const fixedCost = number(account.fixedAcquisitionCostCny);
@@ -845,10 +1054,8 @@ export class SourceUsageService {
 
   async listAccounts(input) {
     const first = await this.repository.listAccounts(input);
-    const fanoutLimit = this.config.sub2apiUsageAccountFanoutLimit || 20;
-    const canLoadAll = first.total > 0 && first.total <= fanoutLimit;
     let targetItems = first.items;
-    if (canLoadAll && first.total > first.items.length) {
+    if (first.total > first.items.length) {
       const all = await this.repository.listAccounts({
         ...input,
         page: 1,
@@ -859,27 +1066,36 @@ export class SourceUsageService {
       });
       targetItems = all.items;
     }
-    let timelines = new Map();
+    const accountIds = targetItems.map((account) => number(account.id));
+    let timelines;
+    let sourceRows;
     try {
-      timelines = await this.repository.getAccountCostRateTimelines({
-        accountIds: targetItems.map((account) => number(account.id)),
-        start: input.start,
-        end: input.end,
-      });
+      [timelines, sourceRows] = await Promise.all([
+        this.repository.getAccountCostRateTimelines({
+          accountIds,
+          start: input.start,
+          end: input.end,
+        }),
+        this.sourceUsageRepository.getDailyAccountGroupStats({
+          start: input.start,
+          end: input.end,
+          accountIds,
+        }),
+      ]);
     } catch (error) {
-      this.logger.warn('[source usage] account rate timeline failed', error?.message || error);
+      this.logger.warn('[source usage] account batch aggregate failed', error?.message || error);
+      throw error;
     }
-    const enriched = await Promise.all(targetItems.map(async (account) => {
-      try {
-        return this.enrichAccount(
-          account,
-          await this.accountStats(input, account, timelines.get(number(account.id))),
-        );
-      } catch (error) {
-        this.logger.warn('[source usage] account aggregate failed', account.id, error?.message || error);
-        return this.enrichAccount(account, {});
-      }
-    }));
+    const dailyByAccount = this.dailyAccountStats(sourceRows);
+    const enriched = targetItems.map((account) => this.enrichAccount(
+      account,
+      this.accountStatsFromDaily(
+        input,
+        account,
+        timelines.get(number(account.id)),
+        dailyByAccount.get(number(account.id)),
+      ),
+    ));
     const byId = new Map(enriched.map((item) => [number(item.id), item]));
     let visible = first.items.map((item) => byId.get(number(item.id)) || item);
     const sortField = {
@@ -889,14 +1105,14 @@ export class SourceUsageService {
       requests: 'requests',
       tokens: 'tokens',
     }[input.sortBy];
-    if (sortField && canLoadAll) {
+    if (sortField) {
       const sorted = [...enriched].sort(compare(sortField, input.sortOrder));
       visible = sorted.slice(input.offset, input.offset + input.pageSize);
     }
     return {
       ...first,
       items: visible,
-      summary: this.accountSummary(enriched, first.total, !canLoadAll && first.total > enriched.length),
+      summary: this.accountSummary(enriched, first.total, false),
     };
   }
 

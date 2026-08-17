@@ -136,6 +136,7 @@ function hostList(value, name) {
 export function loadConfig(env = process.env) {
   const sourceDatabaseUrl = env.SOURCE_DATABASE_URL?.trim() || '';
   const finopsDatabaseUrl = env.FINOPS_DATABASE_URL?.trim() || '';
+  const sub2apiUsageDatabaseUrl = env.SUB2API_USAGE_DATABASE_URL?.trim() || sourceDatabaseUrl;
   const nodeEnv = env.NODE_ENV || 'development';
   if (env.DATABASE_URL?.trim()) {
     throw new Error('DATABASE_URL is no longer supported; configure separate SOURCE_DATABASE_URL and FINOPS_DATABASE_URL');
@@ -178,7 +179,9 @@ export function loadConfig(env = process.env) {
     port: intValue(env.PORT, 8090, { min: 1, max: 65535 }),
     sourceDatabaseUrl,
     finopsDatabaseUrl,
+    sub2apiUsageDatabaseUrl,
     sourceDatabasePoolMax: intValue(env.SOURCE_DATABASE_POOL_MAX, 3, { min: 1, max: 10 }),
+    sub2apiUsageDatabasePoolMax: intValue(env.SUB2API_USAGE_DATABASE_POOL_MAX, 2, { min: 1, max: 4 }),
     finopsDatabasePoolMax: intValue(env.FINOPS_DATABASE_POOL_MAX, 8, { min: 2, max: 20 }),
     sourceStatementTimeoutMs: intValue(env.SOURCE_STATEMENT_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
     finopsStatementTimeoutMs: intValue(env.FINOPS_STATEMENT_TIMEOUT_MS, 30_000, { min: 5_000, max: 120_000 }),

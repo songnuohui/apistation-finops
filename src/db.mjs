@@ -2,7 +2,7 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
-function createPool(connectionString, applicationName, max, statementTimeoutMs) {
+function createPool(connectionString, applicationName, max, statementTimeoutMs, { readOnly = false } = {}) {
   if (!connectionString) return null;
   return new Pool({
     connectionString,
@@ -12,6 +12,7 @@ function createPool(connectionString, applicationName, max, statementTimeoutMs) 
     connectionTimeoutMillis: 5_000,
     statement_timeout: statementTimeoutMs,
     application_name: applicationName,
+    ...(readOnly ? { options: '-c default_transaction_read_only=on' } : {}),
   });
 }
 
@@ -30,6 +31,16 @@ export function createFinopsPool(config) {
     'apistation-finops',
     config.finopsDatabasePoolMax ?? 8,
     config.finopsStatementTimeoutMs ?? 30_000,
+  );
+}
+
+export function createSub2ApiUsagePool(config) {
+  return createPool(
+    config.sub2apiUsageDatabaseUrl,
+    'apistation-finops-usage-reader',
+    config.sub2apiUsageDatabasePoolMax ?? 2,
+    config.sourceStatementTimeoutMs ?? 10_000,
+    { readOnly: true },
   );
 }
 
