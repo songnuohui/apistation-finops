@@ -31,7 +31,7 @@ try {
   for (let cycle = 1; cycle <= maxCycles && !stopping; cycle += 1) {
     const result = await sync.runOnce();
     const rows = [
-      result.usageRows, result.paymentRows, result.redeemRows, result.affiliateRows,
+      result.paymentRows, result.redeemRows, result.affiliateRows,
       result.auditRows, result.subscriptionRows,
     ].reduce((sum, value) => sum + Number(value || 0), 0);
     console.log(JSON.stringify({ cycle, rows, durationMs: result.durationMs }));

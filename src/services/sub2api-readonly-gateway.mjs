@@ -2,6 +2,16 @@ function endpoint(baseUrl, pathname) {
   return new URL(pathname, `${baseUrl}/`).toString();
 }
 
+function queryPath(pathname, params = {}) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    search.set(key, String(value));
+  }
+  const query = search.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
 export class Sub2ApiReadonlyGateway {
   constructor(config, logger = console, fetchImpl = fetch) {
     this.config = config;
@@ -10,6 +20,9 @@ export class Sub2ApiReadonlyGateway {
     this.accessToken = '';
     this.accessTokenProvider = null;
     this.cache = new Map();
+    this.inflight = new Map();
+    this.activeRequests = 0;
+    this.waiters = [];
   }
 
   setAccessTokenProvider(provider) {
@@ -27,6 +40,7 @@ export class Sub2ApiReadonlyGateway {
   clearAccessToken() {
     this.accessToken = '';
     this.cache.clear();
+    this.inflight.clear();
   }
 
   async authentication({ force = false } = {}) {
@@ -49,14 +63,48 @@ export class Sub2ApiReadonlyGateway {
     };
   }
 
-  async request(pathname, { method = 'GET', body, cacheKey = pathname, ttlMs = 30_000, cache = true } = {}) {
+  async acquireRequestSlot() {
+    const limit = this.config.sub2apiUsageMaxConcurrency || 4;
+    if (this.activeRequests < limit) {
+      this.activeRequests += 1;
+      return;
+    }
+    await new Promise((resolve) => this.waiters.push(resolve));
+    this.activeRequests += 1;
+  }
+
+  releaseRequestSlot() {
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    this.waiters.shift()?.();
+  }
+
+  pruneCache(now = Date.now()) {
+    if (this.cache.size <= 500) return;
+    for (const [key, entry] of this.cache) {
+      if (entry.staleUntil <= now) this.cache.delete(key);
+      if (this.cache.size <= 400) break;
+    }
+  }
+
+  async request(pathname, {
+    method = 'GET',
+    body,
+    cacheKey = pathname,
+    ttlMs = 30_000,
+    staleTtlMs = (this.config.sub2apiUsageStaleTtlSeconds || 0) * 1_000,
+    timeoutMs = this.config.sub2apiAuthTimeoutMs || 10_000,
+    cache = true,
+  } = {}) {
     const now = Date.now();
     const existing = cache && method === 'GET' ? this.cache.get(cacheKey) : null;
     if (existing && existing.expiresAt > now) return existing.payload;
+    const coalesced = cache && method === 'GET' ? this.inflight.get(cacheKey) : null;
+    if (coalesced) return coalesced;
     const requestWithAuthentication = async (authentication) => {
       if (!authentication?.credential) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
+      await this.acquireRequestSlot();
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.config.sub2apiAuthTimeoutMs || 10_000);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await this.fetchImpl(endpoint(this.config.sub2apiAuthUrl, pathname), {
           method,
@@ -82,23 +130,171 @@ export class Sub2ApiReadonlyGateway {
         return Object.hasOwn(raw, 'data') ? raw.data : raw;
       } finally {
         clearTimeout(timer);
+        this.releaseRequestSlot();
       }
     };
-    const selected = await this.authentication();
-    try {
-      const payload = await requestWithAuthentication(selected);
-      if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
-      return payload;
-    } catch (error) {
-      if ((error?.statusCode === 401 || error?.statusCode === 403) && selected.serviceManaged) {
-        await this.accessTokenProvider.invalidateAccessToken(selected.credential);
-        const retryAuthentication = await this.authentication({ force: true });
-        const payload = await requestWithAuthentication(retryAuthentication);
-        if (cache && method === 'GET') this.cache.set(cacheKey, { payload, expiresAt: now + ttlMs });
+    const execute = async () => {
+      const selected = await this.authentication();
+      try {
+        const payload = await requestWithAuthentication(selected);
+        if (cache && method === 'GET') {
+          this.cache.set(cacheKey, {
+            payload,
+            expiresAt: Date.now() + ttlMs,
+            staleUntil: Date.now() + ttlMs + staleTtlMs,
+          });
+          this.pruneCache();
+        }
         return payload;
+      } catch (error) {
+        if ((error?.statusCode === 401 || error?.statusCode === 403) && selected.serviceManaged) {
+          await this.accessTokenProvider.invalidateAccessToken(selected.credential);
+          const retryAuthentication = await this.authentication({ force: true });
+          try {
+            const payload = await requestWithAuthentication(retryAuthentication);
+            if (cache && method === 'GET') {
+              this.cache.set(cacheKey, {
+                payload,
+                expiresAt: Date.now() + ttlMs,
+                staleUntil: Date.now() + ttlMs + staleTtlMs,
+              });
+            }
+            return payload;
+          } catch (retryError) {
+            if (existing && existing.staleUntil > Date.now()) {
+              this.logger.warn('[sub2api readonly] using stale cached response after authentication retry', cacheKey, retryError?.message || retryError);
+              return existing.payload;
+            }
+            throw retryError;
+          }
+        }
+        if (error?.statusCode === 401 || error?.statusCode === 403) this.clearAccessToken();
+        if (existing && existing.staleUntil > Date.now()) {
+          this.logger.warn('[sub2api readonly] using stale cached response', cacheKey, error?.message || error);
+          return existing.payload;
+        }
+        throw error;
       }
-      if (error?.statusCode === 401 || error?.statusCode === 403) this.clearAccessToken();
-      throw error;
+    };
+    const promise = execute().finally(() => {
+      if (cache && method === 'GET') this.inflight.delete(cacheKey);
+    });
+    if (cache && method === 'GET') this.inflight.set(cacheKey, promise);
+    return promise;
+  }
+
+  usageRequest(pathname, params = {}, { ttlSeconds, cacheKey } = {}) {
+    const path = queryPath(pathname, params);
+    return this.request(path, {
+      cacheKey: cacheKey || `usage:${path}`,
+      ttlMs: (ttlSeconds || this.config.sub2apiUsageCacheTtlSeconds || 30) * 1_000,
+      timeoutMs: this.config.sub2apiUsageTimeoutMs || 15_000,
+    });
+  }
+
+  usageStats({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    userId, apiKeyId, accountId, groupId, model = '', billingMode = '',
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/usage/stats', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      user_id: userId,
+      api_key_id: apiKeyId,
+      account_id: accountId,
+      group_id: groupId,
+      model,
+      billing_mode: billingMode,
+    });
+  }
+
+  listUsage({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    page = 1, pageSize = 20, userId, accountId, requestId = '', model = '',
+    sortBy = 'created_at', sortOrder = 'desc',
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/usage', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      page,
+      page_size: pageSize,
+      user_id: userId,
+      account_id: accountId,
+      request_id: requestId,
+      model,
+      sort_by: sortBy,
+      sort_order: sortOrder,
+      exact_total: false,
+    }, { ttlSeconds: Math.min(10, this.config.sub2apiUsageCacheTtlSeconds || 30) });
+  }
+
+  dashboardTrend({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    granularity = 'day', userId, accountId,
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/dashboard/trend', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      granularity,
+      user_id: userId,
+      account_id: accountId,
+    });
+  }
+
+  dashboardModels({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    userId, accountId, modelSource = 'requested',
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/dashboard/models', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      user_id: userId,
+      account_id: accountId,
+      model_source: modelSource,
+    });
+  }
+
+  dashboardUserBreakdown({
+    startDate = '', endDate = '', timezone = this.config.timezone,
+    userId, accountId, limit = 200, sortBy = 'actual_cost',
+  } = {}) {
+    return this.usageRequest('/api/v1/admin/dashboard/user-breakdown', {
+      start_date: startDate,
+      end_date: endDate,
+      timezone,
+      user_id: userId,
+      account_id: accountId,
+      limit: Math.min(200, Math.max(1, Number(limit) || 200)),
+      sort_by: sortBy,
+    });
+  }
+
+  accountStats(accountId, { days = 30 } = {}) {
+    return this.usageRequest(`/api/v1/admin/accounts/${Number(accountId)}/stats`, {
+      days: Math.min(365, Math.max(1, Number(days) || 30)),
+    }, {
+      cacheKey: `usage:account-stats:${Number(accountId)}:${Number(days) || 30}`,
+    });
+  }
+
+  async sourceUsageHealth() {
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: this.config.timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    return this.usageStats({ startDate: today, endDate: today });
+  }
+
+  clearUsageCache() {
+    this.invalidate('usage:');
+    for (const key of this.inflight.keys()) {
+      if (String(key).startsWith('usage:')) this.inflight.delete(key);
     }
   }
 
@@ -200,10 +396,17 @@ export class Sub2ApiReadonlyGateway {
       include_users_trend: params.includeUsersTrend === true ? 'true' : 'false',
       ...(params.startDate ? { start_date: params.startDate } : {}),
       ...(params.endDate ? { end_date: params.endDate } : {}),
+      ...(params.timezone ? { timezone: params.timezone } : {}),
+      ...(params.userId ? { user_id: String(params.userId) } : {}),
+      ...(params.apiKeyId ? { api_key_id: String(params.apiKeyId) } : {}),
+      ...(params.accountId ? { account_id: String(params.accountId) } : {}),
+      ...(params.groupId ? { group_id: String(params.groupId) } : {}),
+      ...(params.model ? { model: String(params.model) } : {}),
     });
     return this.request(`/api/v1/admin/dashboard/snapshot-v2?${search}`, {
-      cacheKey: `dashboard:${search}`,
-      ttlMs: 30_000,
+      cacheKey: `usage:dashboard:${search}`,
+      ttlMs: (this.config.sub2apiUsageCacheTtlSeconds || 30) * 1_000,
+      timeoutMs: this.config.sub2apiUsageTimeoutMs || 15_000,
     });
   }
 

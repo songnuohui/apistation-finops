@@ -8,9 +8,10 @@ if (config.demoMode) throw new Error('SOURCE_DATABASE_URL and FINOPS_DATABASE_UR
 const sourcePool = createSourcePool(config);
 const finopsPool = createFinopsPool(config);
 const sourceTableNames = [
-  'users', 'accounts', 'usage_logs', 'payment_orders', 'redeem_codes',
+  'users', 'accounts', 'payment_orders', 'redeem_codes',
   'user_affiliate_ledger', 'payment_audit_logs',
 ];
+if (config.syncUsageEnabled) sourceTableNames.push('usage_logs');
 if (config.subscriptionsEnabled) sourceTableNames.push('user_subscriptions');
 
 try {
@@ -31,8 +32,12 @@ try {
     ORDER BY c.relname`, [config.sourceSchema, sourceTableNames]);
   const ranges = await sourcePool.query(`
     SELECT
-      (SELECT MIN(created_at) FROM "${config.sourceSchema}".usage_logs) AS usage_first_at,
-      (SELECT MAX(created_at) FROM "${config.sourceSchema}".usage_logs) AS usage_last_at,
+      ${config.syncUsageEnabled
+    ? `(SELECT MIN(created_at) FROM "${config.sourceSchema}".usage_logs)`
+    : 'NULL::timestamptz'} AS usage_first_at,
+      ${config.syncUsageEnabled
+    ? `(SELECT MAX(created_at) FROM "${config.sourceSchema}".usage_logs)`
+    : 'NULL::timestamptz'} AS usage_last_at,
       (SELECT MIN(paid_at) FROM "${config.sourceSchema}".payment_orders WHERE paid_at IS NOT NULL) AS payment_first_at,
        (SELECT MAX(paid_at) FROM "${config.sourceSchema}".payment_orders WHERE paid_at IS NOT NULL) AS payment_last_at`);
   const rechargeRatios = await sourcePool.query(`

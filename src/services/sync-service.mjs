@@ -423,11 +423,13 @@ export class SyncService {
 
   async validateSourceSchema() {
     assertSourceUnitContract(this.config);
+    const requiredColumns = Object.entries(REQUIRED_SOURCE_COLUMNS)
+      .filter(([table]) => this.config.syncUsageEnabled || table !== 'usage_logs');
     const sourceColumns = this.config.subscriptionsEnabled
-      ? Object.fromEntries(Object.entries(REQUIRED_SOURCE_COLUMNS).map(([table, columns]) => [
+      ? Object.fromEntries(requiredColumns.map(([table, columns]) => [
         table, [...columns, ...(OPTIONAL_SOURCE_COLUMNS[table] || [])],
       ]).concat([['user_subscriptions', OPTIONAL_SOURCE_COLUMNS.user_subscriptions]]))
-      : REQUIRED_SOURCE_COLUMNS;
+      : Object.fromEntries(requiredColumns);
     const tables = Object.keys(sourceColumns);
     const result = await this.sourcePool.query(
       `SELECT table_name,column_name FROM information_schema.columns
@@ -517,6 +519,7 @@ export class SyncService {
   }
 
   async rebuildUsersBestEffort(userIds, sourceName) {
+    if (!this.config.syncUsageEnabled) return;
     const users = [...new Set([...userIds].map(Number).filter((userId) => Number.isSafeInteger(userId) && userId > 0))];
     for (const userId of users) {
       try {
@@ -536,10 +539,12 @@ export class SyncService {
     const started = Date.now();
     try {
       await this.syncDimensions();
-      const historicalCostSnapshotRows = await inTransaction(
-        this.finopsPool,
-        (client) => this.freezePendingUsageCostSnapshots(client, 'historical_backfill'),
-      );
+      const historicalCostSnapshotRows = this.config.syncUsageEnabled
+        ? await inTransaction(
+          this.finopsPool,
+          (client) => this.freezePendingUsageCostSnapshots(client, 'historical_backfill'),
+        )
+        : 0;
       const historicalFixedCostSnapshotRows = await inTransaction(
         this.finopsPool,
         (client) => this.captureFixedCostDailySnapshots(client, 'historical_backfill'),
@@ -552,17 +557,21 @@ export class SyncService {
       const subscriptionRows = this.config.subscriptionsEnabled
         ? await this.drain('user_subscriptions', () => this.syncSubscriptions())
         : 0;
-      const usageRows = await this.drain('usage_logs', () => this.syncUsage());
-      await this.refreshRecentUsage();
+      const usageRows = this.config.syncUsageEnabled
+        ? await this.drain('usage_logs', () => this.syncUsage())
+        : 0;
+      if (this.config.syncUsageEnabled) await this.refreshRecentUsage();
       const monitorObservationRows = await this.refreshChannelMonitorSnapshots();
       const runtimeSnapshotRows = await this.refreshRuntimeSnapshots();
-      const liveUsageSnapshotResult = await inTransaction(
-        this.finopsPool,
-        async (client) => ({
-          rows: await this.freezePendingUsageCostSnapshots(client, 'live_sync', { refreshOpenDay: true }),
-          finalized: await this.finalizeUsageCostSnapshots(client),
-        }),
-      );
+      const liveUsageSnapshotResult = this.config.syncUsageEnabled
+        ? await inTransaction(
+          this.finopsPool,
+          async (client) => ({
+            rows: await this.freezePendingUsageCostSnapshots(client, 'live_sync', { refreshOpenDay: true }),
+            finalized: await this.finalizeUsageCostSnapshots(client),
+          }),
+        )
+        : { rows: 0, finalized: 0 };
       const liveFixedCostSnapshotRows = await inTransaction(
         this.finopsPool,
         async (client) => {
@@ -572,8 +581,10 @@ export class SyncService {
         },
       );
       try {
-        await this.reconcileRecentUsage();
-        await this.reconcileWalletBalances();
+        if (this.config.syncUsageEnabled) {
+          await this.reconcileRecentUsage();
+          await this.reconcileWalletBalances();
+        }
       } catch (error) {
         await this.markSourceError('credit_reconciliation', error);
         throw error;
@@ -1150,6 +1161,7 @@ export class SyncService {
   }
 
   async refreshQueuedUsageCosts(origin = 'live_sync') {
+    if (!this.config.syncUsageEnabled) return 0;
     if (this.running) return 0;
     if (this.costRefreshPromise) return this.costRefreshPromise;
     this.costRefreshPromise = (async () => {
@@ -1300,6 +1312,7 @@ export class SyncService {
   }
 
   async syncUsage() {
+    if (!this.config.syncUsageEnabled) return 0;
     const cursor = await this.readCursor('usage_logs');
     const billingColumns = this.config.subscriptionsEnabled
       ? 'COALESCE(billing_type,0) AS billing_type,subscription_id,'
@@ -1510,6 +1523,7 @@ export class SyncService {
   }
 
   async refreshRecentUsage() {
+    if (!this.config.syncUsageEnabled) return;
     if (!this.config.syncLookbackSeconds) return;
     const since = new Date(Date.now() - this.config.syncLookbackSeconds * 1000);
     const billingColumns = this.config.subscriptionsEnabled
@@ -2039,6 +2053,7 @@ export class SyncService {
   }
 
   async reconcileRecentUsage() {
+    if (!this.config.syncUsageEnabled) return 0;
     const end = new Date();
     const start = new Date(end.getTime() - 86_400_000);
     const source = await this.sourcePool.query(`SELECT COALESCE(SUM(actual_cost),0) AS total FROM ${this.source}.usage_logs WHERE created_at >= $1 AND created_at < $2`, [start, end]);
@@ -2080,6 +2095,7 @@ export class SyncService {
   }
 
   async reconcileWalletBalances() {
+    if (!this.config.syncUsageEnabled) return 0;
     return inTransaction(this.finopsPool, async (client) => {
       const checkedAt = new Date();
       const balances = await client.query(`

@@ -16,6 +16,14 @@ function boolValue(value, fallback) {
   throw new Error(`invalid boolean value: ${value}`);
 }
 
+function enumValue(value, fallback, allowed, name) {
+  const selected = String(value || fallback).trim().toLowerCase();
+  if (!allowed.includes(selected)) {
+    throw new Error(`${name} must be one of: ${allowed.join(', ')}`);
+  }
+  return selected;
+}
+
 function schemaName(value, fallback) {
   const selected = value || fallback;
   if (!IDENTIFIER.test(selected)) throw new Error(`invalid PostgreSQL schema: ${selected}`);
@@ -151,6 +159,10 @@ export function loadConfig(env = process.env) {
     throw new Error('UPSTREAM_USD_TO_CNY_RATE is no longer supported; all FinOps accounting entries must be recorded in CNY');
   }
   const supplierCredentialsKey = env.SUPPLIER_CREDENTIALS_KEY?.trim() || '';
+  const syncUsageEnabled = sourceDatabaseUrl !== '' && boolValue(env.SYNC_USAGE_ENABLED, false);
+  if (syncUsageEnabled) {
+    throw new Error('SYNC_USAGE_ENABLED=true is no longer supported; usage must be queried from the read-only Sub2API administrator API');
+  }
   const configuredSupplierBlockedHosts = hostList(env.SUPPLIER_BLOCKED_HOSTS, 'SUPPLIER_BLOCKED_HOSTS');
   if (nodeEnv === 'production' && supplierCredentialsKey && !configuredSupplierBlockedHosts.length) {
     throw new Error('SUPPLIER_BLOCKED_HOSTS is required in production when supplier monitoring is enabled');
@@ -175,6 +187,8 @@ export function loadConfig(env = process.env) {
     sourceSchema: schemaName(env.SOURCE_SCHEMA, 'public'),
     sourceSettingsSchema: schemaName(env.SOURCE_SETTINGS_SCHEMA, 'finops_source'),
     syncEnabled: sourceDatabaseUrl !== '' && boolValue(env.SYNC_ENABLED, true),
+    syncUsageEnabled: false,
+    usageDataMode: enumValue(env.USAGE_DATA_MODE, 'source_api', ['source_api'], 'USAGE_DATA_MODE'),
     syncIntervalSeconds: intValue(env.SYNC_INTERVAL_SECONDS, 60, { min: 10, max: 3600 }),
     syncBatchSize: intValue(env.SYNC_BATCH_SIZE, 1000, { min: 100, max: 10000 }),
     syncMaxBatchesPerCycle: intValue(env.SYNC_MAX_BATCHES_PER_CYCLE, 3, { min: 1, max: 20 }),
@@ -188,6 +202,11 @@ export function loadConfig(env = process.env) {
     authDisabled,
     sub2apiAuthUrl: authDisabled ? null : httpUrl(env.SUB2API_AUTH_URL, 'SUB2API_AUTH_URL'),
     sub2apiAuthTimeoutMs: intValue(env.SUB2API_AUTH_TIMEOUT_MS, 10_000, { min: 1_000, max: 30_000 }),
+    sub2apiUsageTimeoutMs: intValue(env.SUB2API_USAGE_TIMEOUT_MS, 15_000, { min: 1_000, max: 60_000 }),
+    sub2apiUsageCacheTtlSeconds: intValue(env.SUB2API_USAGE_CACHE_TTL_SECONDS, 30, { min: 1, max: 300 }),
+    sub2apiUsageStaleTtlSeconds: intValue(env.SUB2API_USAGE_STALE_TTL_SECONDS, 300, { min: 0, max: 3_600 }),
+    sub2apiUsageMaxConcurrency: intValue(env.SUB2API_USAGE_MAX_CONCURRENCY, 2, { min: 1, max: 6 }),
+    sub2apiUsageAccountFanoutLimit: intValue(env.SUB2API_USAGE_ACCOUNT_FANOUT_LIMIT, 20, { min: 10, max: 100 }),
     sub2apiServiceAuthRefreshSeconds: intValue(env.SUB2API_SERVICE_AUTH_REFRESH_SECONDS, 300, { min: 30, max: 3600 }),
     sub2apiRuntimePageSize: intValue(env.SUB2API_RUNTIME_PAGE_SIZE, 100, { min: 10, max: 100 }),
     finopsRedisUrl: redisUrl(env.FINOPS_REDIS_URL, 'FINOPS_REDIS_URL'),

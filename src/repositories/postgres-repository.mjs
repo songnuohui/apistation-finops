@@ -156,8 +156,7 @@ export const SYNC_SOURCE_LABELS = Object.freeze({
 });
 
 export const REQUIRED_SYNC_SOURCES = Object.freeze([
-  'usage_logs', 'payment_orders', 'redeem_codes', 'user_affiliate_ledger',
-  'payment_audit_logs', 'credit_reconciliation',
+  'payment_orders', 'redeem_codes', 'user_affiliate_ledger', 'payment_audit_logs',
 ]);
 
 function pageResult(rows, page, pageSize) {

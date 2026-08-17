@@ -462,9 +462,9 @@ onUnmounted(() => window.clearTimeout(searchTimer));
   <div class="page-view account-cost-view">
     <div class="metric-grid account-cost-metrics">
       <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>{{ summary.missingCostCount || 0 }} 个账号成本未完整核算</small></div>
-      <div class="metric-card"><span>账号成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}</small></div>
-      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次筛选期间请求</small></div>
-      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>筛选期间用户消耗减账号成本</small></div>
+      <div class="metric-card"><span>账号成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}<template v-if="summary.partialUsageSummary"> · 当前 {{ summary.summarizedAccountCount || rows.length }} 个账号</template></small></div>
+      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次请求<template v-if="summary.partialUsageSummary"> · 当前页按需统计</template></small></div>
+      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>{{ summary.partialUsageSummary ? '当前页用户消耗减账号成本' : '筛选期间用户消耗减账号成本' }}</small></div>
     </div>
 
     <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
@@ -475,49 +475,49 @@ onUnmounted(() => window.clearTimeout(searchTimer));
       <FilterSelect
         v-model="filters.platform"
         :options="platformOptions"
-        aria-label="平台"
+        ariaLabel="平台"
         search-placeholder="搜索平台..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.accountType"
         :options="accountTypeOptions"
-        aria-label="账号类型"
+        ariaLabel="账号类型"
         search-placeholder="搜索账号类型..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.status"
         :options="statusOptions"
-        aria-label="账号状态"
+        ariaLabel="账号状态"
         search-placeholder="搜索账号状态..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.privacyMode"
         :options="privacyOptions"
-        aria-label="Privacy状态"
+        ariaLabel="Privacy状态"
         search-placeholder="搜索Privacy状态..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.groupId"
         :options="groupOptions"
-        aria-label="分组"
+        ariaLabel="分组"
         search-placeholder="搜索分组..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.costMode"
         :options="costTypeOptions"
-        aria-label="成本类型"
+        ariaLabel="成本类型"
         search-placeholder="搜索成本类型..."
         @change="applyFilters"
       />
       <FilterSelect
         v-model="filters.supplier"
         :options="supplierOptions"
-        aria-label="供应商"
+        ariaLabel="供应商"
         search-placeholder="搜索供应商..."
         @change="applyFilters"
       />

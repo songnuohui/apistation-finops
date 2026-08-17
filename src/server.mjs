@@ -33,6 +33,7 @@ import { PendingLoginStore } from './services/pending-login-store.mjs';
 import { ResponseCacheService } from './services/response-cache-service.mjs';
 import { Sub2ApiRedisRuntimeReader } from './services/sub2api-redis-runtime-reader.mjs';
 import { Sub2ApiReadonlyGateway } from './services/sub2api-readonly-gateway.mjs';
+import { SourceUsageService } from './services/source-usage-service.mjs';
 import { AccountProfitGuardService } from './services/account-profit-guard-service.mjs';
 import { SupplierDeletionService } from './services/supplier-deletion-service.mjs';
 import { Sub2ApiServiceAuthService } from './services/sub2api-service-auth-service.mjs';
@@ -67,6 +68,7 @@ const qqAlertNotificationService=new QqAlertNotificationService(repository,confi
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
+const sourceUsageService=config.demoMode?repository:new SourceUsageService(repository,sub2ApiReadonlyGateway,config);
 const sub2ApiServiceAuthService=new Sub2ApiServiceAuthService(repository,config);
 const oauthSupplyAuthService=new OAuthSupplyAuthService(repository,config);
 const oauthSupplyClient=new OAuthSupplyClient(config);
@@ -331,24 +333,24 @@ async function api(request,res,url){
     if(!ids.length||ids.length>100)return json(res,400,{error:'accountIds must contain 1 to 100 ids'});
     return json(res,200,await sub2ApiReadonlyGateway.accountTodayStats(ids));
   }
-  if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>repository.getSummary(range())));
-  if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>repository.getOverviewDashboard(range())));
-  if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>repository.getTrend(range())));
-  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>repository.getUsageBreakdown({...range(),...page(),...usageSort(url.searchParams)})));
-  if(request.method==='GET'&&url.pathname==='/api/usage/users')return json(res,200,await cached('usage-users',config.listCacheTtlSeconds,()=>repository.listUsers({
+  if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getSummary(range())));
+  if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getOverviewDashboard(range())));
+  if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getTrend(range())));
+  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>sourceUsageService.getUsageBreakdown({...range(),...page(),...usageSort(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/users')return json(res,200,await cached('usage-users',config.listCacheTtlSeconds,()=>sourceUsageService.listUsers({
     ...range(),...page(),...userSort(url.searchParams),consumptionOnly:true,
   })));
-  if(request.method==='GET'&&url.pathname==='/api/usage/events')return json(res,200,await cached('usage-events',config.listCacheTtlSeconds,()=>repository.listUsageEvents({...range(),...page(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/events')return json(res,200,await cached('usage-events',config.listCacheTtlSeconds,()=>sourceUsageService.listUsageEvents({...range(),...page(),search:searchTerm(url.searchParams)})));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);
   if(request.method==='GET'&&userDetails){
     const userId=Number(userDetails[1]);
-    return json(res,200,await cached('user-details',config.listCacheTtlSeconds,()=>repository.getUserDetails({
+    return json(res,200,await cached('user-details',config.listCacheTtlSeconds,()=>sourceUsageService.getUserDetails({
       ...range(),userId,recharge:detailPagination(url.searchParams,'recharge'),
       usage:detailPagination(url.searchParams,'usage'),
     })));
   }
   if(request.method==='GET'&&url.pathname==='/api/users'){
-    return json(res,200,await cached('users',config.listCacheTtlSeconds,()=>repository.listUsers({
+    return json(res,200,await cached('users',config.listCacheTtlSeconds,()=>sourceUsageService.listUsers({
       ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),balanceScope:userBalanceScope(url.searchParams),
     })));
   }
@@ -392,7 +394,7 @@ async function api(request,res,url){
     const accountIds=groupId&&!config.demoMode
       ? await sub2ApiReadonlyGateway.listAccountIds({group:groupId,status:''})
       : null;
-    return repository.listAccounts({
+    return sourceUsageService.listAccounts({
       ...range(),...page(),search:searchTerm(url.searchParams),scope:accountScope(url.searchParams),
       ...listSort(url.searchParams,[
         'createdAt','name','acquisitionCostCny','userChargeCny','profitCny',
@@ -409,7 +411,7 @@ async function api(request,res,url){
     });
   }));
   if(request.method==='GET'&&url.pathname==='/api/purchase-catalog')return json(res,200,await cached('purchase-catalog',config.listCacheTtlSeconds,()=>repository.listPurchaseCatalog()));
-  if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>repository.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/suppliers')return json(res,200,await cached('suppliers',config.listCacheTtlSeconds,()=>sourceUsageService.getSupplierOverview({...range(),search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-connections')return json(res,200,await cached('supplier-connections',config.listCacheTtlSeconds,()=>repository.listSupplierConnections({search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/supplier-groups'){
     return json(res,200,await cached('supplier-groups',Math.min(10,config.listCacheTtlSeconds),async()=>{
@@ -1064,7 +1066,7 @@ const server=http.createServer(async(request,res)=>{
   res.finopsAcceptEncoding=request.headers['accept-encoding']||'';
   try{
     const url=new URL(request.url,`http://${request.headers.host||'localhost'}`);
-    if(url.pathname==='/health')return json(res,200,{status:'ok',mode:config.demoMode?'demo':'database',uptimeSeconds:Math.round(process.uptime()),cache:responseCache.status()});
+    if(url.pathname==='/health')return json(res,200,{status:'ok',mode:config.demoMode?'demo':config.usageDataMode,uptimeSeconds:Math.round(process.uptime()),cache:responseCache.status()});
     if(url.pathname==='/ready'){
       try{return json(res,200,await readiness());}
       catch(error){console.error('[ready]',error);return json(res,503,{status:'not_ready'});}
