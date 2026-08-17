@@ -1,6 +1,18 @@
 -- ApiStation FinOps v0.55: retain multiplier transitions instead of polling snapshots.
 -- This migration changes only the isolated FinOps database.
 
+CREATE INDEX IF NOT EXISTS idx_finops_account_daily_rate_observation
+  ON {{FINOPS_SCHEMA}}.account_daily_snapshots (rate_observation_id)
+  WHERE rate_observation_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_finops_account_daily_first_rate_observation
+  ON {{FINOPS_SCHEMA}}.account_daily_snapshots (first_rate_observation_id)
+  WHERE first_rate_observation_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_finops_usage_cost_rate_observation
+  ON {{FINOPS_SCHEMA}}.fact_usage_cost_snapshots (rate_observation_id)
+  WHERE rate_observation_id IS NOT NULL;
+
 DELETE FROM {{FINOPS_SCHEMA}}.supplier_key_observations
 WHERE change_type IN ('snapshot', 'quota_changed');
 
