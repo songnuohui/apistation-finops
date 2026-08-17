@@ -545,10 +545,12 @@ export class SyncService {
           (client) => this.freezePendingUsageCostSnapshots(client, 'historical_backfill'),
         )
         : 0;
-      const historicalFixedCostSnapshotRows = await inTransaction(
-        this.finopsPool,
-        (client) => this.captureFixedCostDailySnapshots(client, 'historical_backfill'),
-      );
+      const historicalFixedCostSnapshotRows = this.config.syncUsageEnabled
+        ? await inTransaction(
+          this.finopsPool,
+          (client) => this.captureFixedCostDailySnapshots(client, 'historical_backfill'),
+        )
+        : 0;
       const paymentRows = await this.drain('payment_orders', () => this.syncPayments());
       const recentPaymentRows = await this.refreshRecentPayments();
       const redeemRows = await this.drain('redeem_codes', () => this.syncRedeemCodes());
@@ -572,14 +574,16 @@ export class SyncService {
           }),
         )
         : { rows: 0, finalized: 0 };
-      const liveFixedCostSnapshotRows = await inTransaction(
-        this.finopsPool,
-        async (client) => {
-          const rows = await this.captureFixedCostDailySnapshots(client, 'live_sync');
-          await this.finalizeCostDailySnapshots(client);
-          return rows;
-        },
-      );
+      const liveFixedCostSnapshotRows = this.config.syncUsageEnabled
+        ? await inTransaction(
+          this.finopsPool,
+          async (client) => {
+            const rows = await this.captureFixedCostDailySnapshots(client, 'live_sync');
+            await this.finalizeCostDailySnapshots(client);
+            return rows;
+          },
+        )
+        : 0;
       try {
         if (this.config.syncUsageEnabled) {
           await this.reconcileRecentUsage();
