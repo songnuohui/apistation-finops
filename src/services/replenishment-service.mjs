@@ -6,8 +6,15 @@ function errorWithStatus(message, statusCode = 502) {
   return Object.assign(new Error(message), { statusCode });
 }
 
-function isNotFound(error) {
-  return Number(error?.statusCode ?? error?.httpStatus) === 404;
+function isMissingSub2ApiAccount(error) {
+  if (Number(error?.statusCode ?? error?.httpStatus) !== 404) return false;
+  const message = String(error?.message || '').toLowerCase();
+  return /(?:account|账号).*(?:not found|不存在)|(?:not found|不存在).*(?:account|账号)/i.test(message);
+}
+
+function isBlockedRecoveryConfiguration(error) {
+  return Number(error?.statusCode ?? error?.httpStatus) === 409
+    && /^自动修复配置包含不可用的 Sub2API 分组：/.test(String(error?.message || ''));
 }
 
 function payloadOf(response) {
@@ -446,6 +453,23 @@ export class ReplenishmentService {
     this.timer = null;
   }
 
+  async assertActiveTargetGroups(rule) {
+    const targetGroupIds = [...new Set((rule?.targetGroupIds || []).map(Number))]
+      .filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (!rule || !targetGroupIds.length) {
+      throw errorWithStatus('自动修复配置包含不可用的 Sub2API 分组：未配置正式分组', 409);
+    }
+    const catalog = await this.sub2ApiGateway.listGroups({ includeInactive: true });
+    const groupsById = new Map(catalog.map((group) => [Number(group.id), group]));
+    const unavailable = targetGroupIds.filter((id) => {
+      const group = groupsById.get(id);
+      return !group || String(group.status || '').toLowerCase() !== 'active';
+    });
+    if (unavailable.length) {
+      throw errorWithStatus(`自动修复配置包含不可用的 Sub2API 分组：${unavailable.join(', ')}`, 409);
+    }
+  }
+
   async customerSettings() {
     await this.oauthSupplyAuthService.loadSettings();
     const settings = this.oauthSupplyAuthService.status();
@@ -618,6 +642,7 @@ export class ReplenishmentService {
         prompt: item.rule.verificationPrompt,
         modelWhitelist: item.rule.modelWhitelist,
       };
+      await this.assertActiveTargetGroups(item.rule);
       const importAccount = () => this.sub2ApiGateway.importAndVerify({
         name: item.accountName,
         platform: item.rule.platform,
@@ -641,7 +666,7 @@ export class ReplenishmentService {
             ...configuration,
           });
         } catch (error) {
-          if (!isNotFound(error)) throw error;
+          if (!isMissingSub2ApiAccount(error)) throw error;
           account = await importAccount();
           await this.repository.addEvent({
             ruleId: item.order.ruleId, runId: item.order.runId, orderId: item.order.id, itemId: item.id,
@@ -678,7 +703,8 @@ export class ReplenishmentService {
       }
       const attempts = Number(item.importAttemptCount || 0) + 1;
       const retryLimit = policy?.retryLimit === null || policy?.retryLimit === undefined ? null : Number(policy.retryLimit);
-      const exhausted = retryLimit !== null && attempts > retryLimit;
+      const exhausted = isBlockedRecoveryConfiguration(error)
+        || (retryLimit !== null && attempts > retryLimit);
       await this.repository.updateOrderItem(item.id, {
         status: exhausted ? 'manual_required' : 'retry_wait', verificationStatus: 'failed',
         importAttemptCount: attempts,
@@ -938,6 +964,7 @@ export class ReplenishmentService {
       job = await this.repository.upsertRecovery({ ...job, status: 'updating_sub2api', lastError: '' });
       const orderItem = await this.repository.getOrderItem(job.orderItemId);
       const rule = await this.repository.getRule(job.ruleId);
+      await this.assertActiveTargetGroups(rule);
       let targetAccountId = job.sub2apiAccountId;
       try {
         await this.sub2ApiGateway.applyOAuthCredentials(targetAccountId, credentials, rule?.modelWhitelist);
@@ -955,7 +982,7 @@ export class ReplenishmentService {
           prompt: job.verificationPrompt || rule.verificationPrompt || 'Reply with a short success marker.',
         });
       } catch (error) {
-        if (!isNotFound(error) || !orderItem || !rule) throw error;
+        if (!isMissingSub2ApiAccount(error) || !orderItem || !rule) throw error;
         const account = await this.sub2ApiGateway.importAndVerify({
           name: orderItem.accountName || job.accountName || job.accountKey,
           platform: rule.platform,
@@ -1077,7 +1104,8 @@ export class ReplenishmentService {
       const attempts = Number(job.attemptCount || 0) + 1;
       const retryLimit = job.recoveryRetryLimit === null || job.recoveryRetryLimit === undefined
         ? null : Number(job.recoveryRetryLimit);
-      const exhausted = retryLimit !== null && attempts > retryLimit;
+      const exhausted = isBlockedRecoveryConfiguration(error)
+        || (retryLimit !== null && attempts > retryLimit);
       await this.repository.upsertRecovery({
         ...job,
         status: exhausted ? 'manual_required' : 'retry_wait',

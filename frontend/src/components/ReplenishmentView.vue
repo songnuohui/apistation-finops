@@ -910,7 +910,7 @@ async function toggleRule(rule: any) {
   }
 }
 async function removeRule(rule: any) {
-  if (!window.confirm(`确定删除补号策略“${rule.name}”吗？\n历史订单、成本和修复记录会保留，此操作不可撤销。`)) return;
+  if (!window.confirm(`确定删除补号策略“${rule.name}”吗？\n自动修复和导入重试会停止；历史订单、成本和修复记录会保留。`)) return;
   actioningId.value = `rule-${rule.id}`;
   try {
     await send(`/replenishment/rules/${rule.id}`, 'DELETE', {});
@@ -923,7 +923,7 @@ async function removeRule(rule: any) {
   }
 }
 async function removeMapping(mapping: any) {
-  if (!window.confirm(`确定删除商品映射“${mapping.product} · ${platformText(mapping.platform)}”吗？\n仍被策略使用的映射无法删除。`)) return;
+  if (!window.confirm(`确定删除商品映射“${mapping.product} · ${platformText(mapping.platform)}”吗？\n关联补号策略及其自动修复会一并停止并软删除；历史记录会保留。`)) return;
   actioningId.value = `mapping-${mapping.id}`;
   try {
     await send(`/replenishment/mappings/${mapping.id}`, 'DELETE', {});

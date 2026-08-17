@@ -756,16 +756,33 @@ export class ReplenishmentRepository {
 
   async deleteRule(id) {
     const ruleId = Number(id);
-    const activeRecoveryStatuses = new Set([
-      'detected', 'waiting_supplier', 'claimable', 'credentials_saved',
-      'updating_sub2api', 'verifying', 'retry_wait',
-    ]);
+    const stoppedMessage = '补号策略已删除，已停止自动修复和导入重试';
     if (this.demo) {
       const index = this.rules.findIndex((entry) => entry.id === ruleId);
       if (index < 0) throw notFound('补号策略不存在或已删除');
       if (await this.hasActiveOrder(ruleId)) throw conflict('策略存在进行中订单，请等待订单完成后再删除');
-      if (this.recoveries.some((entry) => entry.ruleId === ruleId && activeRecoveryStatuses.has(entry.status))) {
-        throw conflict('策略存在进行中的账号修复任务，请等待修复完成后再删除');
+      const policy = this.recoveryPolicies.find((entry) => entry.ruleId === ruleId);
+      if (policy) policy.enabled = false;
+      for (const recovery of this.recoveries.filter((entry) => entry.ruleId === ruleId
+        && ['detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+          'updating_sub2api', 'verifying', 'retry_wait'].includes(entry.status))) {
+        Object.assign(recovery, {
+          status: 'manual_required',
+          nextRetryAt: null,
+          lastError: stoppedMessage,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      for (const item of this.items.filter((entry) => {
+        const order = this.orders.find((candidate) => candidate.id === entry.orderId);
+        return order?.ruleId === ruleId && entry.status === 'retry_wait';
+      })) {
+        Object.assign(item, {
+          status: 'manual_required',
+          nextImportRetryAt: null,
+          errorMessage: stoppedMessage,
+          updatedAt: new Date().toISOString(),
+        });
       }
       this.rules.splice(index, 1);
       return { deleted: true, id: ruleId };
@@ -777,44 +794,111 @@ export class ReplenishmentRepository {
       LIMIT 1`,
     [ruleId, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
     if (activeOrder.rowCount) throw conflict('策略存在进行中订单，请等待订单完成后再删除');
-    const activeRecovery = await this.pool.query(`
-      SELECT 1 FROM ${this.schema}.replenishment_recoveries
-      WHERE rule_id=$1
-        AND status=ANY($2::text[])
-      LIMIT 1`, [ruleId, [...activeRecoveryStatuses]]);
-    if (activeRecovery.rowCount) throw conflict('策略存在进行中的账号修复任务，请等待修复完成后再删除');
-    const result = await this.pool.query(`
-      UPDATE ${this.schema}.replenishment_rules SET
-        enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
-      WHERE id=$1 AND deleted_at IS NULL
-      RETURNING id`, [ruleId]);
-    if (!result.rowCount) throw notFound('补号策略不存在或已删除');
+    const client = await this.pool.connect();
+    let result;
+    try {
+      await client.query('BEGIN');
+      await this.stopRuleRecoveryAutomation(client, [ruleId], stoppedMessage);
+      result = await client.query(`
+        UPDATE ${this.schema}.replenishment_rules SET
+          enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
+        WHERE id=$1 AND deleted_at IS NULL
+        RETURNING id`, [ruleId]);
+      if (!result.rowCount) throw notFound('补号策略不存在或已删除');
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
     return { deleted: true, id: ruleId };
   }
 
   async deleteMapping(id) {
     const mappingId = Number(id);
+    const stoppedMessage = '商品映射已删除，已停止关联策略的自动修复和导入重试';
     if (this.demo) {
       const index = this.mappings.findIndex((entry) => entry.id === mappingId);
       if (index < 0) throw notFound('商品映射不存在或已删除');
-      if (this.rules.some((entry) => entry.productMappingId === mappingId)) {
-        throw conflict('商品映射仍被补号策略使用，请先删除关联策略');
+      const ruleIds = this.rules.filter((entry) => entry.productMappingId === mappingId).map((entry) => entry.id);
+      for (const ruleId of ruleIds) {
+        const policy = this.recoveryPolicies.find((entry) => entry.ruleId === ruleId);
+        if (policy) policy.enabled = false;
+        for (const recovery of this.recoveries.filter((entry) => entry.ruleId === ruleId
+          && ['detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+            'updating_sub2api', 'verifying', 'retry_wait'].includes(entry.status))) {
+          Object.assign(recovery, {
+            status: 'manual_required',
+            nextRetryAt: null,
+            lastError: stoppedMessage,
+            updatedAt: new Date().toISOString(),
+          });
+        }
       }
+      this.rules = this.rules.filter((entry) => entry.productMappingId !== mappingId);
       this.mappings.splice(index, 1);
-      return { deleted: true, id: mappingId };
+      return { deleted: true, id: mappingId, deletedRuleCount: ruleIds.length };
     }
-    const referenced = await this.pool.query(`
-      SELECT 1 FROM ${this.schema}.replenishment_rules
-      WHERE product_mapping_id=$1 AND deleted_at IS NULL
-      LIMIT 1`, [mappingId]);
-    if (referenced.rowCount) throw conflict('商品映射仍被补号策略使用，请先删除关联策略');
-    const result = await this.pool.query(`
-      UPDATE ${this.schema}.oauth_supply_product_mappings SET
-        enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
-      WHERE id=$1 AND deleted_at IS NULL
-      RETURNING id`, [mappingId]);
-    if (!result.rowCount) throw notFound('商品映射不存在或已删除');
-    return { deleted: true, id: mappingId };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const linkedRules = await client.query(`
+        SELECT id FROM ${this.schema}.replenishment_rules
+        WHERE product_mapping_id=$1 AND deleted_at IS NULL
+        FOR UPDATE`, [mappingId]);
+      const ruleIds = linkedRules.rows.map((row) => Number(row.id));
+      const activeOrder = await client.query(`
+        SELECT 1 FROM ${this.schema}.oauth_supply_orders
+        WHERE rule_id=ANY($1::bigint[])
+          AND status=ANY($2::text[])
+        LIMIT 1`,
+      [ruleIds, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
+      if (activeOrder.rowCount) throw conflict('商品映射关联策略存在进行中订单，请等待订单完成后再删除');
+      await this.stopRuleRecoveryAutomation(client, ruleIds, stoppedMessage);
+      if (ruleIds.length) {
+        await client.query(`
+          UPDATE ${this.schema}.replenishment_rules
+          SET enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
+          WHERE id=ANY($1::bigint[]) AND deleted_at IS NULL`, [ruleIds]);
+      }
+      const result = await client.query(`
+        UPDATE ${this.schema}.oauth_supply_product_mappings SET
+          enabled=FALSE,deleted_at=NOW(),updated_at=NOW()
+        WHERE id=$1 AND deleted_at IS NULL
+        RETURNING id`, [mappingId]);
+      if (!result.rowCount) throw notFound('商品映射不存在或已删除');
+      await client.query('COMMIT');
+      return { deleted: true, id: mappingId, deletedRuleCount: ruleIds.length };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async stopRuleRecoveryAutomation(client, ruleIds, message) {
+    if (!ruleIds.length) return;
+    await client.query(`
+      UPDATE ${this.schema}.replenishment_recovery_policies
+      SET enabled=FALSE,updated_at=NOW()
+      WHERE rule_id=ANY($1::bigint[])`, [ruleIds]);
+    await client.query(`
+      UPDATE ${this.schema}.replenishment_recoveries
+      SET status='manual_required',next_retry_at=NULL,last_error=$2,updated_at=NOW()
+      WHERE rule_id=ANY($1::bigint[])
+        AND status=ANY($3::text[])`,
+    [ruleIds, message, ['detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+      'updating_sub2api', 'verifying', 'retry_wait']]);
+    await client.query(`
+      UPDATE ${this.schema}.oauth_supply_order_items item
+      SET status='manual_required',next_import_retry_at=NULL,error_message=$2,updated_at=NOW()
+      FROM ${this.schema}.oauth_supply_orders replenishment_order
+      WHERE item.order_id=replenishment_order.id
+        AND replenishment_order.rule_id=ANY($1::bigint[])
+        AND item.status='retry_wait'`,
+    [ruleIds, message]);
   }
 
   async markRuleInventory(id, { error = '' } = {}) {
