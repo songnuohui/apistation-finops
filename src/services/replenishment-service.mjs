@@ -1147,10 +1147,16 @@ export class ReplenishmentService {
       let usage = null;
       let readError = '';
       try {
-        [account, usage] = await Promise.all([
-          this.sub2ApiGateway.getAccount(tracked.sub2apiAccountId),
-          this.sub2ApiGateway.getAccountUsage(tracked.sub2apiAccountId, { source: 'passive' }).catch(() => null),
-        ]);
+        account = await this.sub2ApiGateway.getAccount(tracked.sub2apiAccountId);
+        const platform = String(account?.platform || '').trim().toLowerCase();
+        const accountType = String(account?.type || account?.account_type || '').trim().toLowerCase();
+        const passiveUsageSupported = platform === 'anthropic'
+          && ['oauth', 'setup-token', 'setup_token'].includes(accountType);
+        if (passiveUsageSupported) {
+          usage = await this.sub2ApiGateway
+            .getAccountUsage(tracked.sub2apiAccountId, { source: 'passive' })
+            .catch(() => null);
+        }
       } catch (error) {
         readError = String(error?.message || error);
       }

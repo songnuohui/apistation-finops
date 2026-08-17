@@ -854,21 +854,40 @@ export class SyncService {
   async freezePendingUsageCostSnapshots(client, origin, { refreshOpenDay = false, maxBatches = Number.POSITIVE_INFINITY } = {}) {
     let total = 0;
     for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
+      // Finalized snapshots are immutable. Remove stale reprice entries first so
+      // the queue remains a bounded source of actionable work.
+      await client.query(`
+        DELETE FROM ${this.schema}.usage_cost_reprice_queue reprice
+        USING ${this.schema}.fact_usage_cost_snapshots snapshot
+        WHERE snapshot.source_usage_id=reprice.source_usage_id
+          AND snapshot.finalized=TRUE`);
       const pending = await client.query(`
-        WITH pending_usage AS MATERIALIZED (
+        WITH queued_usage AS MATERIALIZED (
+          SELECT f.*
+          FROM ${this.schema}.usage_cost_reprice_queue reprice
+          JOIN ${this.schema}.fact_usage_events f
+            ON f.source_usage_id=reprice.source_usage_id
+          LEFT JOIN ${this.schema}.fact_usage_cost_snapshots current_snapshot
+            ON current_snapshot.source_usage_id=f.source_usage_id
+          WHERE current_snapshot.source_usage_id IS NULL
+             OR (
+               $2::boolean
+               AND current_snapshot.finalized=FALSE
+             )
+          ORDER BY reprice.queued_at,reprice.source_usage_id
+          LIMIT $1
+        ),
+        pending_usage AS MATERIALIZED (
+          SELECT queued_usage.*
+          FROM queued_usage
+          UNION ALL
           SELECT f.*
           FROM ${this.schema}.fact_usage_events f
           LEFT JOIN ${this.schema}.fact_usage_cost_snapshots current_snapshot
             ON current_snapshot.source_usage_id=f.source_usage_id
-          LEFT JOIN ${this.schema}.usage_cost_reprice_queue reprice
-            ON reprice.source_usage_id=f.source_usage_id
-          WHERE current_snapshot.source_usage_id IS NULL
-            OR (
-              $2::boolean
-              AND current_snapshot.finalized=FALSE
-              AND reprice.source_usage_id IS NOT NULL
-            )
-          ORDER BY f.occurred_at,f.source_usage_id
+          WHERE NOT EXISTS (SELECT 1 FROM queued_usage)
+            AND current_snapshot.source_usage_id IS NULL
+          ORDER BY occurred_at,source_usage_id
           LIMIT $1
         )
         SELECT
