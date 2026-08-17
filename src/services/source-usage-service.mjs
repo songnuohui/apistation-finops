@@ -13,24 +13,46 @@ function pageResult(items, total, page, pageSize) {
 }
 
 function financialFields(revenue, cost) {
-  const profit = revenue - cost;
+  const normalizedRevenue = number(revenue);
+  const normalizedCost = nullableNumber(cost);
+  if (normalizedCost === null) {
+    return {
+      revenue: normalizedRevenue,
+      revenueCny: normalizedRevenue,
+      recognizedRevenueCny: normalizedRevenue,
+      userChargeCny: normalizedRevenue,
+      effectiveCostCny: null,
+      fullyLoadedCostCny: null,
+      bookedCostCny: null,
+      cost: null,
+      costCny: null,
+      profit: null,
+      profitCny: null,
+      grossProfit: null,
+      grossProfitCny: null,
+      bookedProfitCny: null,
+      margin: null,
+      grossMargin: null,
+    };
+  }
+  const profit = normalizedRevenue - normalizedCost;
   return {
-    revenue,
-    revenueCny: revenue,
-    recognizedRevenueCny: revenue,
-    userChargeCny: revenue,
-    effectiveCostCny: cost,
-    fullyLoadedCostCny: cost,
-    bookedCostCny: cost,
-    cost,
-    costCny: cost,
+    revenue: normalizedRevenue,
+    revenueCny: normalizedRevenue,
+    recognizedRevenueCny: normalizedRevenue,
+    userChargeCny: normalizedRevenue,
+    effectiveCostCny: normalizedCost,
+    fullyLoadedCostCny: normalizedCost,
+    bookedCostCny: normalizedCost,
+    cost: normalizedCost,
+    costCny: normalizedCost,
     profit,
     profitCny: profit,
     grossProfit: profit,
     grossProfitCny: profit,
     bookedProfitCny: profit,
-    margin: revenue ? profit / revenue : null,
-    grossMargin: revenue ? profit / revenue : null,
+    margin: normalizedRevenue ? profit / normalizedRevenue : null,
+    grossMargin: normalizedRevenue ? profit / normalizedRevenue : null,
   };
 }
 
@@ -439,25 +461,35 @@ export class SourceUsageService {
   calculateAccountCost(account, stats) {
     const mode = String(account.costMode || account.costType || 'unconfigured');
     const fixedCost = number(account.fixedAcquisitionCostCny);
-    if (mode === 'fixed_purchase') return { cost: fixedCost, fixedCost, multiplierCost: 0 };
-    if (mode === 'free') return { cost: 0, fixedCost: 0, multiplierCost: 0 };
+    if (mode === 'fixed_purchase') {
+      const hasFixedCost = Boolean(
+        account.hasCostRecord
+        || account.currentCostPeriodId
+        || fixedCost > 0,
+      );
+      return hasFixedCost
+        ? { cost: fixedCost, fixedCost, multiplierCost: 0, costKnown: true }
+        : { cost: null, fixedCost: null, multiplierCost: null, costKnown: false };
+    }
+    if (mode === 'free') {
+      return { cost: 0, fixedCost: 0, multiplierCost: 0, costKnown: true };
+    }
     if (['probe_multiplier', 'manual_multiplier'].includes(mode)) {
       const upstream = nullableNumber(account.upstreamMultiplier);
-      const sourceFallback = number(stats.total_account_cost);
       if (upstream === null || upstream < 0) {
-        return { cost: sourceFallback, fixedCost: 0, multiplierCost: sourceFallback };
+        return { cost: null, fixedCost: 0, multiplierCost: null, costKnown: false };
       }
       const reference = number(stats.total_cost);
       const basis = account.basisMode === 'reference_cny'
         ? nullableNumber(account.cnyPerReferenceUnit)
         : 1;
       if (basis === null || basis <= 0) {
-        return { cost: sourceFallback, fixedCost: 0, multiplierCost: sourceFallback };
+        return { cost: null, fixedCost: 0, multiplierCost: null, costKnown: false };
       }
       const cost = reference * upstream * basis;
-      return { cost, fixedCost: 0, multiplierCost: cost };
+      return { cost, fixedCost: 0, multiplierCost: cost, costKnown: true };
     }
-    return { cost: 0, fixedCost: 0, multiplierCost: 0 };
+    return { cost: null, fixedCost: null, multiplierCost: null, costKnown: false };
   }
 
   enrichAccount(account, stats) {
@@ -465,7 +497,7 @@ export class SourceUsageService {
     const calculated = this.calculateAccountCost(account, stats);
     const requests = number(stats.total_requests);
     const mode = String(account.costMode || account.costType || 'unconfigured');
-    const missing = requests > 0 && mode === 'unconfigured';
+    const missing = !calculated.costKnown;
     return {
       ...account,
       acquisitionCostCny: calculated.cost,
@@ -478,12 +510,16 @@ export class SourceUsageService {
       tokenListValueUsd: number(stats.total_cost),
       requests,
       tokens: number(stats.total_tokens),
-      costCoverageStatus: missing ? 'missing' : requests ? 'complete' : 'pending',
-      hasCostRecord: mode !== 'unconfigured',
+      costCoverageStatus: missing ? 'missing' : requests ? 'complete' : 'configured',
+      hasCostRecord: calculated.costKnown,
+      pricedUserChargeCny: missing ? 0 : revenue,
       unpricedUserChargeCny: missing ? revenue : 0,
       pricedUsageCount: missing ? 0 : requests,
       unpricedUsageCount: missing ? requests : 0,
-      multiplierCostSource: calculated.multiplierCost ? 'source_api_aggregate' : '',
+      multiplierCostSource: (
+        calculated.costKnown
+        && ['probe_multiplier', 'manual_multiplier'].includes(mode)
+      ) ? 'source_api_aggregate' : '',
       ...financialFields(revenue, calculated.cost),
     };
   }
@@ -498,28 +534,38 @@ export class SourceUsageService {
 
   accountSummary(items, total, partialUsageSummary = false) {
     const summary = items.reduce((result, item) => {
-      result.accountCostCny += number(item.accountCostCny);
-      result.fixedAcquisitionCostCny += number(item.fixedAcquisitionCostCny);
-      result.multiplierCostCny += number(item.multiplierCostCny);
       result.userChargeCny += number(item.userChargeCny);
-      result.profitCny += number(item.profitCny);
       result.requests += number(item.requests);
-      if (['missing', 'partial'].includes(String(item.costCoverageStatus))) result.missingCostCount += 1;
+      result.unpricedUserChargeCny += number(item.unpricedUserChargeCny);
+      if (['missing', 'partial'].includes(String(item.costCoverageStatus))) {
+        result.missingCostCount += 1;
+      } else {
+        result.accountCostCny += number(item.accountCostCny);
+        result.fixedAcquisitionCostCny += number(item.fixedAcquisitionCostCny);
+        result.multiplierCostCny += number(item.multiplierCostCny);
+        result.pricedUserChargeCny += number(item.userChargeCny);
+        result.profitCny += number(item.profitCny);
+        result.pricedAccountCount += 1;
+      }
       return result;
     }, {
       accountCount: total,
       summarizedAccountCount: items.length,
+      pricedAccountCount: 0,
       acquisitionCostCny: 0,
       accountCostCny: 0,
       fixedAcquisitionCostCny: 0,
       multiplierCostCny: 0,
       userChargeCny: 0,
+      pricedUserChargeCny: 0,
+      unpricedUserChargeCny: 0,
       profitCny: 0,
       requests: 0,
       missingCostCount: 0,
       partialUsageSummary,
     });
     summary.acquisitionCostCny = summary.accountCostCny;
+    summary.costCoverageStatus = summary.missingCostCount ? 'partial' : 'complete';
     return summary;
   }
 

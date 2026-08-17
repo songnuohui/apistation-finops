@@ -46,6 +46,7 @@ let searchTimer: number | undefined;
 const rows = computed(() => accounts.value.items || []);
 const summary = computed(() => accounts.value.summary || {});
 const pages = computed(() => Math.max(1, Math.ceil(Number(accounts.value.total || 0) / pageSize.value)));
+const metricScope = computed(() => summary.value.partialUsageSummary ? '当前页' : '筛选结果');
 const suppliers = computed(() => [...new Set(
   catalog.value.filterSuppliers || catalog.value.suppliers || [],
 )].sort((left, right) => String(left).localeCompare(String(right), 'zh-CN')));
@@ -137,6 +138,11 @@ function notify(message: string) { emit('toast', message); }
 function money(value: any) {
   return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
 }
+function moneyOrDash(value: any) {
+  if (value === null || value === undefined || value === '') return '--';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? money(parsed) : '--';
+}
 function compact(value: any) {
   return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(Number(value || 0));
 }
@@ -184,7 +190,8 @@ function accountStatusClass(account: AnyRecord) {
   return label === '可调度' ? 'success' : ['异常', '已过期', '已删除'].includes(label) ? 'danger' : 'warning';
 }
 function profitClass(value: any) {
-  return Number(value || 0) >= 0 ? 'positive' : 'negative';
+  if (value === null || value === undefined || value === '') return '';
+  return Number(value) >= 0 ? 'positive' : 'negative';
 }
 function multiplierRange(account: AnyRecord, prefix: 'upstream' | 'selling') {
   const label = prefix === 'upstream' ? 'Upstream' : 'Selling';
@@ -461,10 +468,10 @@ onUnmounted(() => window.clearTimeout(searchTimer));
 <template>
   <div class="page-view account-cost-view">
     <div class="metric-grid account-cost-metrics">
-      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small>{{ summary.missingCostCount || 0 }} 个账号成本未完整核算</small></div>
-      <div class="metric-card"><span>账号成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}<template v-if="summary.partialUsageSummary"> · 当前 {{ summary.summarizedAccountCount || rows.length }} 个账号</template></small></div>
-      <div class="metric-card"><span>用户消耗</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次请求<template v-if="summary.partialUsageSummary"> · 当前页按需统计</template></small></div>
-      <div class="metric-card good"><span>账号收益</span><strong>{{ money(summary.profitCny) }}</strong><small>{{ summary.partialUsageSummary ? '当前页用户消耗减账号成本' : '筛选期间用户消耗减账号成本' }}</small></div>
+      <div class="metric-card"><span>账号数量</span><strong>{{ summary.accountCount || 0 }}</strong><small><template v-if="summary.partialUsageSummary">当前页核算 {{ summary.summarizedAccountCount || rows.length }} 个 · </template>{{ summary.missingCostCount || 0 }} 个成本待核算</small></div>
+      <div class="metric-card"><span>{{ metricScope }}已核算成本</span><strong>{{ money(summary.accountCostCny ?? summary.acquisitionCostCny) }}</strong><small>固定采购 {{ money(summary.fixedAcquisitionCostCny) }} · 倍率成本 {{ money(summary.multiplierCostCny) }}</small></div>
+      <div class="metric-card"><span>{{ metricScope }}销售额</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次请求<template v-if="summary.unpricedUserChargeCny"> · 待核算销售额 {{ money(summary.unpricedUserChargeCny) }}</template></small></div>
+      <div class="metric-card good"><span>{{ metricScope }}已核算收益</span><strong>{{ money(summary.profitCny) }}</strong><small>仅包含成本完整账号<template v-if="summary.unpricedUserChargeCny"> · {{ money(summary.unpricedUserChargeCny) }} 待核算</template></small></div>
     </div>
 
     <form class="panel account-cost-filterbar" @submit.prevent="applyFilters">
@@ -546,9 +553,9 @@ onUnmounted(() => window.clearTimeout(searchTimer));
           <td><strong>{{ account.externalAccountKey || account.name }}</strong><small>{{ account.name }}</small><small>Sub2API #{{ account.id }}</small></td>
           <td><span class="status-pill" :class="statusClass(account.costMode)">{{ accountTypeLabel(account) }}</span><small>{{ account.platform }}</small><span class="status-pill account-state" :class="accountStatusClass(account)">{{ accountStatusLabel(account) }}</span></td>
           <td><strong>{{ account.supplier || account.linkedSupplierName || '未关联供应商' }}</strong><small>{{ account.externalOrderId ? `OAuth #${account.externalOrderId}` : account.purchaseBatch || '未关联采购批次' }}</small><small v-if="account.repairCompletionSource">修复来源 {{ account.repairCompletionSource === 'system' ? '系统自动' : account.repairCompletionSource }}</small></td>
-          <td class="number"><strong>{{ money(account.accountCostCny ?? account.acquisitionCostCny) }}</strong><small>{{ costBasisLabel(account) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.originalPriceCny != null">原价 {{ money(account.originalPriceCny) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.releasedCostCny">优惠 / 释放 {{ money(account.releasedCostCny) }}</small><small v-if="['missing','partial'].includes(account.costCoverageStatus)" class="error-text">{{ coverageLabel(account) }}<template v-if="account.unpricedUserChargeCny"> {{ money(account.unpricedUserChargeCny) }}</template></small><small v-else-if="account.costCoverageStatus === 'configured'" class="success-text">{{ coverageLabel(account) }}</small></td>
+          <td class="number"><strong>{{ moneyOrDash(account.accountCostCny ?? account.acquisitionCostCny) }}</strong><small>{{ costBasisLabel(account) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.originalPriceCny != null">原价 {{ money(account.originalPriceCny) }}</small><small v-if="account.costMode === 'fixed_purchase' && account.releasedCostCny">优惠 / 释放 {{ money(account.releasedCostCny) }}</small><small v-if="['missing','partial'].includes(account.costCoverageStatus)" class="error-text">{{ coverageLabel(account) }}<template v-if="account.unpricedUserChargeCny"> {{ money(account.unpricedUserChargeCny) }}</template></small><small v-else-if="account.costCoverageStatus === 'configured'" class="success-text">{{ coverageLabel(account) }}</small></td>
           <td class="number"><strong>{{ money(account.userChargeCny) }}</strong><small>筛选期间实际扣费</small></td>
-          <td class="number" :class="profitClass(account.profitCny)"><strong>{{ money(account.profitCny) }}</strong><small>{{ account.userChargeCny ? `${(Number(account.profitCny || 0) / Number(account.userChargeCny) * 100).toFixed(1)}%` : '--' }}</small></td>
+          <td class="number" :class="profitClass(account.profitCny)"><strong>{{ moneyOrDash(account.profitCny) }}</strong><small>{{ account.grossMargin == null ? coverageLabel(account) : `${(Number(account.grossMargin) * 100).toFixed(1)}%` }}</small></td>
           <td class="number"><strong>{{ compact(account.tokens) }}</strong><small>{{ compact(account.requests) }} 次</small></td>
           <td>{{ dateTime(account.acquiredAt || account.createdAt) }}<small>{{ account.product || modeLabel(account.costMode) }}</small></td>
           <td>{{ dateTime(account.expiresAt) }}<small v-if="account.lastHealthAt">检查 {{ dateTime(account.lastHealthAt) }}</small><small v-else>未上报到期时间</small></td>
