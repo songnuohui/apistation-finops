@@ -1372,44 +1372,75 @@ export class ReplenishmentService {
       }
       const inventoryStrategy = triggerStrategy === 'inventory_threshold';
       const snapshot = inventoryStrategy ? await this.inspectRuleInventory(rule) : null;
-      if (await this.repository.hasActiveOrder(rule.id)) {
+      const hasActiveOrder = await this.repository.hasActiveOrder(rule.id);
+      if (!inventoryStrategy && hasActiveOrder) {
         await recordDecision('order_skipped', '已有进行中的补号订单，本轮不重复下单', {
-          reason: 'already_active', ...(snapshot ? { inventory: snapshot } : {}),
+          reason: 'already_active',
         });
-        return { status: 'already_active', ...(snapshot ? { inventory: snapshot } : {}) };
+        return { status: 'already_active' };
       }
       let quantity;
       if (inventoryStrategy) {
-        const projectedInventory = snapshot.effectiveAccounts
-          + snapshot.graceRepairingAccounts
-          + snapshot.pendingAccounts;
-        if (!force && projectedInventory >= rule.minAvailableAccounts) {
-          const heldByRepairGrace = snapshot.effectiveAccounts < rule.minAvailableAccounts
-            && snapshot.effectiveAccounts + snapshot.graceRepairingAccounts >= rule.minAvailableAccounts;
+        const effectiveAccounts = Number(snapshot.effectiveAccounts || 0);
+        const pendingAccounts = Number(snapshot.pendingAccounts || 0);
+        const graceRepairingAccounts = Number(snapshot.graceRepairingAccounts || 0);
+        const projectedInventory = effectiveAccounts + graceRepairingAccounts + pendingAccounts;
+        const targetAvailableAccounts = Number(rule.targetAvailableAccounts || 0);
+        const coverage = {
+          effectiveAccounts,
+          pendingAccounts,
+          graceRepairingAccounts,
+          projectedInventory,
+          targetAvailableAccounts,
+        };
+        if (hasActiveOrder && projectedInventory >= targetAvailableAccounts) {
+          await recordDecision(
+            'order_skipped',
+            `库存检查完成：有效 ${effectiveAccounts}、进行中订单待补 ${pendingAccounts}、修复等待 ${graceRepairingAccounts}，投影库存 ${projectedInventory} 已达到目标 ${targetAvailableAccounts}，无需追加补号`,
+            { reason: 'active_order_covers_target', ...coverage, inventory: snapshot },
+          );
+          return {
+            status: 'already_active',
+            available: effectiveAccounts,
+            pending: pendingAccounts,
+            projectedInventory,
+            target: targetAvailableAccounts,
+            inventory: snapshot,
+          };
+        }
+        if (!force && !hasActiveOrder && projectedInventory >= rule.minAvailableAccounts) {
+          const heldByRepairGrace = effectiveAccounts < rule.minAvailableAccounts
+            && effectiveAccounts + graceRepairingAccounts >= rule.minAvailableAccounts;
           const eventType = heldByRepairGrace ? 'order_skipped' : 'inventory_healthy';
           const status = heldByRepairGrace ? 'repair_grace' : 'healthy';
           const message = heldByRepairGrace
             ? '账号仍在修复等待期并占用库存，本轮暂不补号'
-            : `库存检查完成：投影库存 ${projectedInventory}，无需补号`;
+            : `库存检查完成：有效 ${effectiveAccounts}、进行中订单待补 ${pendingAccounts}、修复等待 ${graceRepairingAccounts}，投影库存 ${projectedInventory}，无需补号`;
           await recordDecision(eventType, message, {
             reason: heldByRepairGrace ? 'repair_grace' : 'projected_inventory_healthy',
-            projectedInventory,
+            ...coverage,
             inventory: snapshot,
           });
           return {
             status,
-            available: snapshot.effectiveAccounts,
+            available: effectiveAccounts,
+            pending: pendingAccounts,
             projectedInventory,
             inventory: snapshot,
           };
         }
-        const desired = Math.max(0, Number(rule.targetAvailableAccounts) - projectedInventory);
+        const desired = Math.max(0, targetAvailableAccounts - projectedInventory);
         if (!desired) {
-          await recordDecision('inventory_healthy', `库存检查完成：投影库存 ${projectedInventory}，无需补号`, {
-            projectedInventory, inventory: snapshot,
+          await recordDecision('inventory_healthy', `库存检查完成：有效 ${effectiveAccounts}、进行中订单待补 ${pendingAccounts}、修复等待 ${graceRepairingAccounts}，投影库存 ${projectedInventory}，无需补号`, {
+            ...coverage, inventory: snapshot,
           });
           return {
-            status: 'healthy', available: snapshot.effectiveAccounts, projectedInventory, inventory: snapshot,
+            status: 'healthy',
+            available: effectiveAccounts,
+            pending: pendingAccounts,
+            projectedInventory,
+            target: targetAvailableAccounts,
+            inventory: snapshot,
           };
         }
         quantity = Math.max(1, Math.min(desired, rule.replenishQuantity, 1000));
@@ -1469,11 +1500,22 @@ export class ReplenishmentService {
         return { status: 'blocked_daily_cost', dailySpend, quotedCny };
       }
       if (rule.mode === 'observe') {
-        const message = `观察模式：建议购买 ${quantity} 个账号，未创建订单`;
+        const message = inventoryStrategy
+          ? `观察模式：有效 ${snapshot.effectiveAccounts}、进行中订单待补 ${snapshot.pendingAccounts}、修复等待 ${snapshot.graceRepairingAccounts}，投影库存 ${snapshot.effectiveAccounts + snapshot.graceRepairingAccounts + snapshot.pendingAccounts}，计划补充 ${quantity} 个账号，未创建订单`
+          : `观察模式：建议购买 ${quantity} 个账号，未创建订单`;
         if (snapshot) await this.repository.saveInventorySnapshot(rule.id, snapshot, { error: message });
         else await this.repository.markRuleError(rule.id, message);
         await recordDecision('observed_replenishment', message, {
           available: snapshot?.effectiveAccounts ?? null,
+          ...(inventoryStrategy ? {
+            effectiveAccounts: snapshot.effectiveAccounts,
+            pendingAccounts: snapshot.pendingAccounts,
+            graceRepairingAccounts: snapshot.graceRepairingAccounts,
+            projectedInventory: snapshot.effectiveAccounts
+              + snapshot.graceRepairingAccounts
+              + snapshot.pendingAccounts,
+            targetAvailableAccounts: Number(rule.targetAvailableAccounts || 0),
+          } : {}),
           quotedCny,
           quantity,
           ...(snapshot ? { inventory: snapshot } : {}),
@@ -1528,6 +1570,15 @@ export class ReplenishmentService {
         message: rule.mode === 'approval' ? '订单等待审批' : '订单开始创建',
         details: {
           available: snapshot?.effectiveAccounts ?? null,
+          ...(inventoryStrategy ? {
+            effectiveAccounts: snapshot.effectiveAccounts,
+            pendingAccounts: snapshot.pendingAccounts,
+            graceRepairingAccounts: snapshot.graceRepairingAccounts,
+            projectedInventory: snapshot.effectiveAccounts
+              + snapshot.graceRepairingAccounts
+              + snapshot.pendingAccounts,
+            targetAvailableAccounts: Number(rule.targetAvailableAccounts || 0),
+          } : {}),
           quantity,
           quotedCny,
           trigger,
