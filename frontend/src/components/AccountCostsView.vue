@@ -26,6 +26,7 @@ const history = ref<AnyRecord | null>(null);
 const saving = ref(false);
 const emptyFilters = () => ({
   search: '',
+  scope: 'all',
   platform: '',
   accountType: '',
   status: '',
@@ -92,6 +93,11 @@ const statusOptions = [
   { value: 'rate_limited', label: '限流中' },
   { value: 'temp_unschedulable', label: '临时不可调度' },
   { value: 'unschedulable', label: '不可调度' },
+];
+const lifecycleOptions = [
+  { value: 'all', label: '全部账号（含已删除）' },
+  { value: 'current', label: '仅当前账号' },
+  { value: 'deleted', label: '仅已删除账号' },
 ];
 const privacyOptions = [
   { value: '', label: '全部Privacy状态' },
@@ -264,6 +270,7 @@ async function load() {
       page: page.value,
       page_size: pageSize.value,
       search: appliedFilters.value.search,
+      scope: appliedFilters.value.scope,
       platform: appliedFilters.value.platform,
       account_type: appliedFilters.value.accountType,
       status: appliedFilters.value.status,
@@ -494,6 +501,13 @@ onUnmounted(() => window.clearTimeout(searchTimer));
         <Search :size="17" />
         <input v-model="filters.search" placeholder="搜索账号..." aria-label="搜索账号" @input="scheduleSearch" />
       </div>
+      <FilterSelect
+        v-model="filters.scope"
+        :options="lifecycleOptions"
+        ariaLabel="账号生命周期"
+        search-placeholder="搜索账号生命周期..."
+        @change="applyFilters"
+      />
       <FilterSelect
         v-model="filters.platform"
         :options="platformOptions"
