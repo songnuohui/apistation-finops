@@ -608,7 +608,11 @@ export class SourceUsageService {
       .map(Number)
       .filter((value) => Number.isSafeInteger(value) && value > 0))];
     const [accounts, timelines] = await Promise.all([
-      this.repository.getAccountCostingProfiles({ accountIds: ids }),
+      this.repository.getAccountCostingProfiles({
+        accountIds: ids,
+        start: input.start,
+        end: input.end,
+      }),
       this.repository.getAccountCostRateTimelines({
         accountIds: ids,
         start: input.start,
@@ -881,7 +885,11 @@ export class SourceUsageService {
     });
     const accountIds = [...new Set(rows.map((row) => number(row.accountId)).filter((id) => id > 0))];
     const [accounts, timelines] = await Promise.all([
-      this.repository.getAccountCostingProfiles({ accountIds }),
+      this.repository.getAccountCostingProfiles({
+        accountIds,
+        start: input.start,
+        end: input.end,
+      }),
       this.repository.getAccountCostRateTimelines({
         accountIds,
         start: input.start,
@@ -1129,7 +1137,11 @@ export class SourceUsageService {
     const dailyByAccount = this.dailyAccountStats(rows);
     const accountIds = [...dailyByAccount.keys()].filter((id) => id > 0);
     const [accounts, timelines] = await Promise.all([
-      this.repository.getAccountCostingProfiles({ accountIds }),
+      this.repository.getAccountCostingProfiles({
+        accountIds,
+        start: input.start,
+        end: input.end,
+      }),
       this.repository.getAccountCostRateTimelines({
         accountIds,
         start: input.start,
@@ -1268,10 +1280,11 @@ export class SourceUsageService {
     const mode = String(account.costMode || account.costType || 'unconfigured');
     const missing = !calculated.costKnown;
     const unpricedRevenue = calculated.unpricedRevenue ?? (missing ? revenue : 0);
+    const hasUsage = requests > 0 || revenue > 0;
     const coverageStatus = calculated.partial
       ? 'partial'
       : missing
-        ? 'missing'
+        ? hasUsage ? 'missing' : 'pending'
         : requests
           ? 'complete'
           : 'configured';
@@ -1351,7 +1364,8 @@ export class SourceUsageService {
       result.userChargeCny += number(item.userChargeCny);
       result.requests += number(item.requests);
       result.unpricedUserChargeCny += number(item.unpricedUserChargeCny);
-      if (['missing', 'partial'].includes(String(item.costCoverageStatus))) {
+      const hasUsage = number(item.requests) > 0 || number(item.userChargeCny) > 0;
+      if (hasUsage && ['missing', 'partial'].includes(String(item.costCoverageStatus))) {
         result.missingCostCount += 1;
       } else {
         result.pricedAccountCount += 1;

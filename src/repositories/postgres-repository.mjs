@@ -1170,7 +1170,11 @@ export class PostgresRepository {
     return timelines;
   }
 
-  async getAccountCostingProfiles({ accountIds }) {
+  async getAccountCostingProfiles({
+    accountIds,
+    start = '1970-01-01T00:00:00.000Z',
+    end = '9999-12-31T23:59:59.999Z',
+  }) {
     const ids = [...new Set((accountIds || [])
       .map(Number)
       .filter((value) => Number.isSafeInteger(value) && value > 0))];
@@ -1180,7 +1184,8 @@ export class PostgresRepository {
         SELECT p.source_account_id,
                COALESCE(SUM(
                  COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount)
-               ),0) AS acquisition_cost_cny,
+               ) FILTER (WHERE p.effective_from >= $2 AND p.effective_from < $3),0)
+                 AS acquisition_cost_cny,
                COUNT(*)::int AS cost_record_count
         FROM ${this.schema}.account_cost_periods p
         WHERE p.status='active' AND p.source_account_id=ANY($1::bigint[])
@@ -1220,7 +1225,7 @@ export class PostgresRepository {
         ON linked_key.id=supplier_link.supplier_key_id
         AND linked_key.removed_at IS NULL
       WHERE a.source_account_id=ANY($1::bigint[])
-    `, [ids]);
+    `, [ids, start, end]);
     return result.rows.map((row) => ({
       id: number(row.id),
       costMode: row.cost_type || 'unconfigured',
@@ -1259,7 +1264,11 @@ export class PostgresRepository {
     const result = await this.pool.query(`
       WITH cost_ledger AS (
         SELECT p.source_account_id,
-               SUM(COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount)) AS acquisition_cost_cny,
+               SUM(COALESCE(
+                 p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount
+               )) FILTER (
+                 WHERE p.effective_from >= $1 AND p.effective_from < $2
+               ) AS acquisition_cost_cny,
                MIN(p.effective_from) AS first_acquired_at,
                MAX(p.effective_to) AS latest_coverage_end,
                COUNT(*)::int AS cost_record_count
@@ -1382,8 +1391,7 @@ export class PostgresRepository {
       ), filtered_accounts AS MATERIALIZED (
         SELECT *
         FROM base_accounts
-        WHERE acquired_at >= $1 AND acquired_at < $2
-          AND ($3='' OR name ILIKE '%'||$3||'%' OR id::text=$3
+        WHERE ($3='' OR name ILIKE '%'||$3||'%' OR id::text=$3
             OR external_account_key ILIKE '%'||$3||'%'
             OR external_order_id ILIKE '%'||$3||'%'
             OR resolved_purchase_batch ILIKE '%'||$3||'%')
