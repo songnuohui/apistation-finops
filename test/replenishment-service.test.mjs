@@ -105,7 +105,7 @@ test('replenishment trigger strategy is validated and stored', async () => {
   );
 });
 
-test('smart replenishment normalizes user-entered forecast controls to adaptive defaults', async () => {
+test('smart replenishment keeps the configured polling interval while normalizing forecast controls', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const current = await repository.getRule(1);
 
@@ -125,7 +125,7 @@ test('smart replenishment normalizes user-entered forecast controls to adaptive 
 
   assert.equal(saved.targetAvailableAccounts, 3);
   assert.equal(saved.repairGraceSeconds, 0);
-  assert.equal(saved.scheduleIntervalSeconds, 300);
+  assert.equal(saved.scheduleIntervalSeconds, 30);
   assert.equal(saved.forecastLookbackHours, 168);
   assert.equal(saved.forecastDefaultAccountCapacity, null);
 });
@@ -194,7 +194,7 @@ test('smart replenishment forecasts finite quota demand without creating an orde
   assert.ok(result.forecast.recommendedQuantity > 0);
   assert.equal(result.forecast.parameterMode, 'adaptive');
   assert.ok([24, 72, 168].includes(result.forecast.lookbackHours));
-  assert.ok([300, 600, 900, 1800].includes(result.forecast.nextCheckSeconds));
+  assert.equal(result.forecast.nextCheckSeconds, 300);
   assert.equal((await repository.listOrders()).length, 0);
 });
 

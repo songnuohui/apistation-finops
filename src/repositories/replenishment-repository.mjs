@@ -451,7 +451,6 @@ function normalizeRuleInput(input) {
     values.quotaWindow = 'long';
     values.targetAvailableAccounts = values.minAvailableAccounts;
     values.repairGraceSeconds = 0;
-    values.scheduleIntervalSeconds = 300;
     values.forecastLookbackHours = 168;
     values.forecastCoverageHours = 24;
     values.forecastSafetyFactor = 1.2;

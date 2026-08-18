@@ -198,7 +198,7 @@
                 </template>
                 <span v-else>每次固定购买 {{ rule.replenishQuantity }}</span>
                 <span>补号时段 {{ rule.scheduleStartTime }}-{{ rule.scheduleEndTime }}</span>
-                <span v-if="rule.triggerStrategy === 'smart_forecast'">动态检查 {{ duration(rule.lastForecastSnapshot?.nextCheckSeconds || 600) }}</span>
+                <span v-if="rule.triggerStrategy === 'smart_forecast'">检查间隔 {{ duration(rule.scheduleIntervalSeconds || 300) }}</span>
                 <span v-else>补号间隔 {{ duration(rule.scheduleIntervalSeconds) }}</span>
                 <span>修复策略 {{ recoveryPolicyFor(rule).enabled ? (recoveryPolicyFor(rule).mode === 'auto' ? '自动' : '手动') : '停用' }}</span>
               </div>
@@ -448,7 +448,7 @@
           <label v-if="editor.triggerStrategy === 'inventory_threshold'">修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
           <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
           <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
-          <label v-if="editor.triggerStrategy !== 'smart_forecast'">自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" /></label>
+          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" step="1" /><small class="field-hint">智能预测也按此间隔重新读取实时额度、用量和供应商库存，最短 3 秒。</small></label>
           <label class="full-field">独立修复策略
             <span class="policy-editor">
               <select v-model="recoveryEditor.mode"><option value="manual">手动修复</option><option value="auto">自动修复</option></select>
@@ -1132,9 +1132,7 @@ function editRule(rule: any) {
     forecastSafetyFactor: rule.forecastSafetyFactor ?? 1.2,
     forecastFallbackLeadTimeHours: rule.forecastFallbackLeadTimeHours ?? 2,
     forecastDefaultAccountCapacity: rule.forecastDefaultAccountCapacity ?? null,
-    scheduleIntervalSeconds: rule.triggerStrategy === 'smart_forecast'
-      ? Math.max(300, Number(rule.scheduleIntervalSeconds || 300))
-      : rule.scheduleIntervalSeconds,
+    scheduleIntervalSeconds: Math.max(3, Number(rule.scheduleIntervalSeconds || 300)),
     loadFactor: rule.loadFactor ?? null,
     proxyId: rule.proxyId ?? null,
     rateMultiplier: rule.rateMultiplier ?? 1,
@@ -1152,7 +1150,6 @@ function onTriggerStrategyChange() {
   editor.value.quotaWindow = 'long';
   editor.value.targetAvailableAccounts = Number(editor.value.minAvailableAccounts || 1);
   editor.value.repairGraceSeconds = 0;
-  editor.value.scheduleIntervalSeconds = 300;
 }
 
 function validateEditor() {
@@ -1173,6 +1170,11 @@ function validateEditor() {
   if (!Number.isInteger(Number(editor.value.replenishQuantity))
     || Number(editor.value.replenishQuantity) < 1 || Number(editor.value.replenishQuantity) > 1000) {
     return '购买数量必须在 1 到 1000 之间。';
+  }
+  if (!Number.isInteger(Number(editor.value.scheduleIntervalSeconds))
+    || Number(editor.value.scheduleIntervalSeconds) < 3
+    || Number(editor.value.scheduleIntervalSeconds) > 86400) {
+    return '自动补号轮询间隔必须是 3 到 86400 秒之间的整数。';
   }
   const loadFactor = editor.value.loadFactor;
   if (loadFactor !== null && loadFactor !== undefined && loadFactor !== ''

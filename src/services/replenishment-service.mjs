@@ -1806,8 +1806,8 @@ export class ReplenishmentService {
         ? 0.8
         : bounded(planning.historicalSuccessRate, 0.1, 1);
       const checkIntervalSeconds = Math.max(
-        300,
-        Number(rule.lastForecastSnapshot?.nextCheckSeconds || rule.scheduleIntervalSeconds || 600),
+        3,
+        Number(rule.scheduleIntervalSeconds || 300),
       );
       const protection = deriveRealtimeProtection({
         volatility: realtimeUsage.pool.volatility,
@@ -1874,13 +1874,7 @@ export class ReplenishmentService {
             : currentHourlyRate <= 0
               ? 'idle'
               : 'capacity_healthy';
-      const nextCheckSeconds = recommendedQuantity > 0 || !predictiveDataReady
-        ? 300
-        : runwayHours !== null && runwayHours <= Number(protection.protectionHours || 0) + 2
-          ? 300
-          : runwayHours !== null && runwayHours <= Number(protection.protectionHours || 0) * 2
-            ? 600
-            : 1800;
+      const nextCheckSeconds = Math.max(3, Number(rule.scheduleIntervalSeconds || 300));
       const decisionReasons = [
         !demandDataReady
           ? runtimeUsageError
@@ -2068,7 +2062,7 @@ export class ReplenishmentService {
     if (!rule?.enabled && !force) return { status: 'disabled' };
     const triggerStrategy = rule.triggerStrategy || 'inventory_threshold';
     const configuredIntervalSeconds = triggerStrategy === 'smart_forecast'
-      ? Math.max(300, Number(rule.lastForecastSnapshot?.nextCheckSeconds || 600))
+      ? Math.max(3, Number(rule.scheduleIntervalSeconds || 300))
       : Math.max(1, Number(rule.scheduleIntervalSeconds || 300));
     const intervalMs = configuredIntervalSeconds * 1000;
     const slotMs = Math.floor(this.now() / intervalMs) * intervalMs;
@@ -2111,7 +2105,7 @@ export class ReplenishmentService {
             status: 'read_failed',
             parameterMode: 'realtime_adaptive',
             recommendedQuantity: 0,
-            nextCheckSeconds: 300,
+            nextCheckSeconds: Math.max(3, Number(rule.scheduleIntervalSeconds || 300)),
             error: smartForecastError,
           };
           await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
@@ -2800,7 +2794,7 @@ export class ReplenishmentService {
       for (const rule of await this.repository.listRules({ enabledOnly: true })) {
         const nowMs = this.now();
         const scheduleIntervalSeconds = (rule.triggerStrategy || 'inventory_threshold') === 'smart_forecast'
-          ? Math.max(300, Number(rule.lastForecastSnapshot?.nextCheckSeconds || 600))
+          ? Math.max(3, Number(rule.scheduleIntervalSeconds || 300))
           : Number(rule.scheduleIntervalSeconds || 300);
         if (!insideSchedule(rule, nowMs, this.config.timezone)
           || !intervalElapsed(rule.lastScheduledAt, scheduleIntervalSeconds, nowMs)) continue;
