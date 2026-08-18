@@ -1,5 +1,6 @@
 import { SupplierCredentialVault } from './supplier-credentials.mjs';
 import {
+  deriveAdaptiveForecastParameters,
   estimateFiniteQuotaCapacity,
   forecastHourlyDemand,
 } from './replenishment-forecast.mjs';
@@ -1449,10 +1450,10 @@ export class ReplenishmentService {
       });
     }
 
-    const lookbackHours = Number(rule.forecastLookbackHours || 168);
+    const maximumLookbackHours = 168;
     const completedEndMs = Math.floor(this.now() / 3_600_000) * 3_600_000;
     const usageRows = await this.sourceUsageRepository.getHourlyAccountStats({
-      start: new Date(completedEndMs - lookbackHours * 3_600_000),
+      start: new Date(completedEndMs - maximumLookbackHours * 3_600_000),
       end: new Date(completedEndMs),
       accountIds: [...sourceIds],
     });
@@ -1460,22 +1461,26 @@ export class ReplenishmentService {
       || planning.historicalSuccessRate === undefined
       ? 0.8
       : bounded(planning.historicalSuccessRate, 0.1, 1);
-    const leadTimeHours = Number(planning.leadTimeHoursP90) > 0
-      ? Number(planning.leadTimeHoursP90)
-      : Number(rule.forecastFallbackLeadTimeHours || 2);
-    const coverageHours = Number(rule.forecastCoverageHours || 24);
+    const adaptive = deriveAdaptiveForecastParameters(usageRows, {
+      nowMs: this.now(),
+      maximumLookbackHours,
+      leadTimeHoursP50: planning.leadTimeHoursP50,
+      leadTimeHoursP90: planning.leadTimeHoursP90,
+      historicalSuccessRate,
+    });
+    const leadTimeHours = adaptive.leadTimeHoursP90;
+    const coverageHours = adaptive.coverageHours;
     const horizonHours = Math.max(1, Math.ceil(leadTimeHours + coverageHours));
     const demand = forecastHourlyDemand(usageRows, {
       nowMs: this.now(),
-      lookbackHours,
+      lookbackHours: adaptive.lookbackHours,
       horizonHours,
-      safetyFactor: Number(rule.forecastSafetyFactor || 1.2),
+      safetyFactor: adaptive.safetyFactor,
       timezone: this.config.timezone,
     });
     const capacity = estimateFiniteQuotaCapacity({
       accountStates,
       usageRows,
-      defaultAccountCapacity: rule.forecastDefaultAccountCapacity,
       minimumSamples: 3,
     });
     const accountCapacity = capacity.conservativeAccountCapacity;
@@ -1496,9 +1501,10 @@ export class ReplenishmentService {
       : 0;
     const projectedEffectiveAccounts = capacity.effectiveAccounts
       + Math.floor(pendingAccounts * historicalSuccessRate);
-    const emergencyQuantity = capacity.effectiveAccounts < Number(rule.minAvailableAccounts || 0)
-      ? Math.max(0, Number(rule.targetAvailableAccounts || 0) - projectedEffectiveAccounts)
-      : 0;
+    const emergencyQuantity = Math.max(
+      0,
+      Number(rule.minAvailableAccounts || 0) - projectedEffectiveAccounts,
+    );
     const uncappedRecommendedQuantity = Math.max(predictedQuantity, emergencyQuantity);
     const recommendedQuantity = Math.max(
       0,
@@ -1512,14 +1518,51 @@ export class ReplenishmentService {
       : insufficient
         ? 'insufficient_data'
         : 'capacity_healthy';
+    const protectedCapacity = Number(capacity.currentRemainingCapacity || 0) + inFlightCapacity;
+    const protectedHourlyRate = Math.max(
+      Number(demand.recentHourlyRate || 0) * Number(demand.safetyFactor || 1),
+      Number(demand.forecastUsage || 0) / Math.max(1, horizonHours),
+    );
+    const runwayHours = protectedHourlyRate > 0
+      ? protectedCapacity / protectedHourlyRate
+      : null;
+    const nextCheckSeconds = recommendedQuantity > 0
+      ? 300
+      : runwayHours !== null && runwayHours <= leadTimeHours + 6
+        ? 600
+        : runwayHours !== null && runwayHours <= leadTimeHours + coverageHours
+          ? 900
+          : insufficient
+            ? 900
+            : 1800;
+    const lookbackReasons = {
+      recent_shift: '近期用量明显变化，采用24小时数据',
+      trend: '近期用量存在趋势，采用72小时数据',
+      sparse: '用量样本稀疏，采用168小时数据',
+      insufficient: '暂无有效用量，保留168小时观察窗口',
+      stable: '用量稳定，采用168小时数据',
+    };
+    const decisionReasons = [
+      lookbackReasons[adaptive.lookbackReason] || lookbackReasons.stable,
+      `波动系数 ${adaptive.volatility}，安全余量 ${rounded((adaptive.safetyFactor - 1) * 100, 1)}%`,
+      `采购提前期 P50 ${adaptive.leadTimeHoursP50} 小时 / P90 ${adaptive.leadTimeHoursP90} 小时`,
+      runwayHours === null
+        ? `每 ${nextCheckSeconds / 60} 分钟重新评估`
+        : `库存预计续航 ${rounded(runwayHours, 1)} 小时`,
+    ];
     const snapshot = {
       capturedAt: new Date(this.now()).toISOString(),
       status,
+      parameterMode: adaptive.parameterMode,
       lookbackHours: demand.lookbackHours,
       horizonHours: demand.horizonHours,
       leadTimeHours: rounded(leadTimeHours, 3),
+      leadTimeHoursP50: adaptive.leadTimeHoursP50,
+      leadTimeHoursP90: adaptive.leadTimeHoursP90,
       coverageHours,
       safetyFactor: demand.safetyFactor,
+      volatility: adaptive.volatility,
+      recentDemandChange: adaptive.recentDemandChange,
       observedUsage1h: demand.observedUsage1h,
       observedUsage6h: demand.observedUsage6h,
       observedUsage24h: demand.observedUsage24h,
@@ -1543,6 +1586,9 @@ export class ReplenishmentService {
       predictedQuantity,
       uncappedRecommendedQuantity,
       recommendedQuantity,
+      runwayHours: rounded(runwayHours, 3),
+      nextCheckSeconds,
+      decisionReasons,
       sourceAccountCount: poolAccounts.length,
       trackedAccountCount: trackedItems.length,
     };
@@ -1555,10 +1601,10 @@ export class ReplenishmentService {
   } = {}) {
     if (!rule?.enabled && !force) return { status: 'disabled' };
     const triggerStrategy = rule.triggerStrategy || 'inventory_threshold';
-    const configuredIntervalSeconds = Math.max(1, Number(rule.scheduleIntervalSeconds || 300));
-    const intervalMs = (triggerStrategy === 'smart_forecast'
-      ? Math.max(300, configuredIntervalSeconds)
-      : configuredIntervalSeconds) * 1000;
+    const configuredIntervalSeconds = triggerStrategy === 'smart_forecast'
+      ? Math.max(300, Number(rule.lastForecastSnapshot?.nextCheckSeconds || 600))
+      : Math.max(1, Number(rule.scheduleIntervalSeconds || 300));
+    const intervalMs = configuredIntervalSeconds * 1000;
     const slotMs = Math.floor(this.now() / intervalMs) * intervalMs;
     const effectiveScheduledFor = trigger === 'scheduled'
       ? scheduledFor || new Date(slotMs).toISOString()
@@ -1597,9 +1643,11 @@ export class ReplenishmentService {
           smartForecast = {
             capturedAt: new Date(this.now()).toISOString(),
             status: 'read_failed',
+            parameterMode: 'adaptive',
             recommendedQuantity: 0,
             effectiveAccounts: Number(snapshot?.effectiveAccounts || 0),
             pendingAccounts: Number(snapshot?.pendingAccounts || 0),
+            nextCheckSeconds: 300,
             error: smartForecastError,
           };
           await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
@@ -1698,9 +1746,10 @@ export class ReplenishmentService {
           const effectiveAccounts = Number(snapshot?.effectiveAccounts || 0);
           const pendingAccounts = Number(snapshot?.pendingAccounts || 0);
           const projectedInventory = effectiveAccounts + pendingAccounts;
-          const emergencyQuantity = effectiveAccounts < Number(rule.minAvailableAccounts || 0)
-            ? Math.max(0, Number(rule.targetAvailableAccounts || 0) - projectedInventory)
-            : 0;
+          const emergencyQuantity = Math.max(
+            0,
+            Number(rule.minAvailableAccounts || 0) - projectedInventory,
+          );
           if (!emergencyQuantity) {
             await recordDecision('forecast_insufficient', '智能预测数据读取失败，当前库存未触发紧急兜底，本轮不下单', {
               reason: 'forecast_read_failed',
@@ -1720,6 +1769,7 @@ export class ReplenishmentService {
             status: 'emergency_fallback',
             emergencyQuantity,
             recommendedQuantity: quantity,
+            nextCheckSeconds: 300,
           };
           await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
             error: `智能预测读取失败，已按最低库存兜底：${smartForecastError}`,
@@ -2306,7 +2356,7 @@ export class ReplenishmentService {
       for (const rule of await this.repository.listRules({ enabledOnly: true })) {
         const nowMs = this.now();
         const scheduleIntervalSeconds = (rule.triggerStrategy || 'inventory_threshold') === 'smart_forecast'
-          ? Math.max(300, Number(rule.scheduleIntervalSeconds || 300))
+          ? Math.max(300, Number(rule.lastForecastSnapshot?.nextCheckSeconds || 600))
           : Number(rule.scheduleIntervalSeconds || 300);
         if (!insideSchedule(rule, nowMs, this.config.timezone)
           || !intervalElapsed(rule.lastScheduledAt, scheduleIntervalSeconds, nowMs)) continue;

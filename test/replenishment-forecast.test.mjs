@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  deriveAdaptiveForecastParameters,
   estimateFiniteQuotaCapacity,
   forecastHourlyDemand,
 } from '../src/services/replenishment-forecast.mjs';
@@ -74,4 +75,51 @@ test('capacity estimation ignores usage from a previous repaired credential gene
 
   assert.equal(result.conservativeAccountCapacity, 100);
   assert.equal(result.currentRemainingCapacity, 50);
+});
+
+test('adaptive forecast keeps a long window for stable demand', () => {
+  const nowMs = Date.parse('2026-08-18T12:30:00.000Z');
+  const rows = Array.from({ length: 168 }, (_, index) => ({
+    accountId: 1,
+    hour: new Date(Math.floor(nowMs / 3_600_000) * 3_600_000 - (index + 1) * 3_600_000).toISOString(),
+    cost: 10,
+  }));
+
+  const result = deriveAdaptiveForecastParameters(rows, {
+    nowMs,
+    leadTimeHoursP50: 1,
+    leadTimeHoursP90: 3,
+    historicalSuccessRate: 0.95,
+  });
+
+  assert.equal(result.parameterMode, 'adaptive');
+  assert.equal(result.lookbackHours, 168);
+  assert.equal(result.lookbackReason, 'stable');
+  assert.ok(result.safetyFactor >= 1.08 && result.safetyFactor <= 1.6);
+  assert.ok(result.coverageHours >= 18 && result.coverageHours <= 42);
+});
+
+test('adaptive forecast shortens the window and raises protection after a demand surge', () => {
+  const nowMs = Date.parse('2026-08-18T12:30:00.000Z');
+  const completedEndMs = Math.floor(nowMs / 3_600_000) * 3_600_000;
+  const rows = Array.from({ length: 168 }, (_, index) => {
+    const offset = index + 1;
+    return {
+      accountId: 1,
+      hour: new Date(completedEndMs - offset * 3_600_000).toISOString(),
+      cost: offset <= 24 ? 20 : 5,
+    };
+  });
+
+  const result = deriveAdaptiveForecastParameters(rows, {
+    nowMs,
+    leadTimeHoursP50: 1,
+    leadTimeHoursP90: 4,
+    historicalSuccessRate: 0.7,
+  });
+
+  assert.equal(result.lookbackHours, 24);
+  assert.equal(result.lookbackReason, 'recent_shift');
+  assert.ok(result.recentDemandChange >= 1);
+  assert.ok(result.safetyFactor > 1.2);
 });

@@ -328,14 +328,20 @@ function compactForecastSnapshot(snapshot = {}) {
   return {
     capturedAt: snapshot.capturedAt || null,
     status: snapshot.status || '',
+    parameterMode: snapshot.parameterMode || '',
     lookbackHours: Number(snapshot.lookbackHours || 0),
     horizonHours: Number(snapshot.horizonHours || 0),
     leadTimeHours: number(snapshot.leadTimeHours),
+    leadTimeHoursP50: number(snapshot.leadTimeHoursP50),
+    leadTimeHoursP90: number(snapshot.leadTimeHoursP90),
     coverageHours: Number(snapshot.coverageHours || 0),
     safetyFactor: number(snapshot.safetyFactor),
+    volatility: number(snapshot.volatility),
+    recentDemandChange: number(snapshot.recentDemandChange),
     observedUsage1h: number(snapshot.observedUsage1h),
     observedUsage6h: number(snapshot.observedUsage6h),
     observedUsage24h: number(snapshot.observedUsage24h),
+    recentHourlyRate: number(snapshot.recentHourlyRate),
     forecastUsage: number(snapshot.forecastUsage),
     currentRemainingCapacity: number(snapshot.currentRemainingCapacity),
     inFlightCapacity: number(snapshot.inFlightCapacity),
@@ -350,6 +356,11 @@ function compactForecastSnapshot(snapshot = {}) {
     emergencyQuantity: Number(snapshot.emergencyQuantity || 0),
     predictedQuantity: Number(snapshot.predictedQuantity || 0),
     recommendedQuantity: Number(snapshot.recommendedQuantity || 0),
+    runwayHours: number(snapshot.runwayHours),
+    nextCheckSeconds: Number(snapshot.nextCheckSeconds || 0),
+    decisionReasons: Array.isArray(snapshot.decisionReasons)
+      ? snapshot.decisionReasons.map(String).slice(0, 4)
+      : [],
     sourceAccountCount: Number(snapshot.sourceAccountCount || 0),
   };
 }
@@ -418,7 +429,17 @@ function normalizeRuleInput(input) {
       || input.forecastDefaultAccountCapacity === ''
       ? null : Number(input.forecastDefaultAccountCapacity),
   };
-  if (values.triggerStrategy === 'smart_forecast') values.quotaWindow = 'long';
+  if (values.triggerStrategy === 'smart_forecast') {
+    values.quotaWindow = 'long';
+    values.targetAvailableAccounts = values.minAvailableAccounts;
+    values.repairGraceSeconds = 0;
+    values.scheduleIntervalSeconds = 300;
+    values.forecastLookbackHours = 168;
+    values.forecastCoverageHours = 24;
+    values.forecastSafetyFactor = 1.2;
+    values.forecastFallbackLeadTimeHours = 2;
+    values.forecastDefaultAccountCapacity = null;
+  }
   if (!values.name) throw badRequest('请输入策略名称');
   if (!Number.isSafeInteger(values.productMappingId) || values.productMappingId <= 0) {
     throw badRequest('请选择有效的商品映射');
@@ -430,8 +451,9 @@ function normalizeRuleInput(input) {
   if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 1) {
     throw badRequest('最低有效库存必须是至少为 1 的整数');
   }
-  if (!Number.isSafeInteger(values.targetAvailableAccounts)
-    || values.targetAvailableAccounts < values.minAvailableAccounts) {
+  if (values.triggerStrategy !== 'fixed_schedule'
+    && (!Number.isSafeInteger(values.targetAvailableAccounts)
+      || values.targetAvailableAccounts < values.minAvailableAccounts)) {
     throw badRequest('目标库存不能低于最低有效库存');
   }
   if (!Number.isSafeInteger(values.replenishQuantity) || values.replenishQuantity < 1 || values.replenishQuantity > 1000) {
@@ -468,9 +490,6 @@ function normalizeRuleInput(input) {
   if (!Number.isSafeInteger(values.scheduleIntervalSeconds)
     || values.scheduleIntervalSeconds < 3 || values.scheduleIntervalSeconds > 86400) {
     throw badRequest('自动补号轮询间隔必须在 3 到 86400 秒之间');
-  }
-  if (values.triggerStrategy === 'smart_forecast' && values.scheduleIntervalSeconds < 300) {
-    throw badRequest('智能预测补号的轮询间隔不能低于 300 秒');
   }
   if (!Number.isSafeInteger(values.forecastLookbackHours)
     || values.forecastLookbackHours < 24 || values.forecastLookbackHours > 720) {
@@ -1104,6 +1123,7 @@ export class ReplenishmentRepository {
             Number(entry.requestedQuantity || 0) - Number(entry.validQuantity || 0),
           ), 0),
         historicalSuccessRate: requested > 0 ? valid / requested : null,
+        leadTimeHoursP50: percentileForDemo(leadTimes, 0.5),
         leadTimeHoursP90: percentileForDemo(leadTimes, 0.9),
         historicalOrderCount: historical.length,
       };
@@ -1127,6 +1147,12 @@ export class ReplenishmentRepository {
           WHERE status=ANY($3::text[]) AND valid_quantity>0
             AND created_at>=NOW()-INTERVAL '90 days'
         ) AS lead_time_hours_p90,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (
+          ORDER BY EXTRACT(EPOCH FROM (updated_at-created_at))/3600.0
+        ) FILTER (
+          WHERE status=ANY($3::text[]) AND valid_quantity>0
+            AND created_at>=NOW()-INTERVAL '90 days'
+        ) AS lead_time_hours_p50,
         COUNT(*) FILTER (
           WHERE status=ANY($3::text[]) AND created_at>=NOW()-INTERVAL '90 days'
         )::int AS historical_order_count
@@ -1136,6 +1162,7 @@ export class ReplenishmentRepository {
       hasActiveOrder: Boolean(result.rows[0]?.has_active_order),
       pendingQuantity: Number(result.rows[0]?.pending_quantity || 0),
       historicalSuccessRate: number(result.rows[0]?.historical_success_rate),
+      leadTimeHoursP50: number(result.rows[0]?.lead_time_hours_p50),
       leadTimeHoursP90: number(result.rows[0]?.lead_time_hours_p90),
       historicalOrderCount: Number(result.rows[0]?.historical_order_count || 0),
     };

@@ -13,6 +13,12 @@ function average(values) {
   return values.length ? values.reduce((sum, value) => sum + finite(value), 0) / values.length : 0;
 }
 
+function standardDeviation(values) {
+  if (!values.length) return 0;
+  const mean = average(values);
+  return Math.sqrt(average(values.map((value) => (finite(value) - mean) ** 2)));
+}
+
 export function percentile(values, ratio) {
   const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
   if (!sorted.length) return null;
@@ -42,6 +48,137 @@ function recentAverage(series, count) {
   return average(series.slice(-Math.min(series.length, count)));
 }
 
+function hourlySeries(rows, { nowMs, lookbackHours }) {
+  const completedEndMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  const startMs = completedEndMs - lookbackHours * HOUR_MS;
+  const hourly = Array.from({ length: lookbackHours }, () => 0);
+
+  for (const row of rows || []) {
+    const hourMs = Date.parse(row.hour);
+    if (!Number.isFinite(hourMs) || hourMs < startMs || hourMs >= completedEndMs) continue;
+    const index = Math.floor((hourMs - startMs) / HOUR_MS);
+    if (index >= 0 && index < hourly.length) hourly[index] += Math.max(0, finite(row.cost));
+  }
+
+  return { completedEndMs, startMs, hourly };
+}
+
+function confidenceFor(hourly) {
+  const nonZeroHours = hourly.filter((value) => value > 0).length;
+  const totalObservedUsage = hourly.reduce((sum, value) => sum + value, 0);
+  const confidence = totalObservedUsage <= 0
+    ? 'insufficient'
+    : nonZeroHours >= 72
+      ? 'high'
+      : nonZeroHours >= 24
+        ? 'medium'
+        : 'low';
+  return { confidence, nonZeroHours, totalObservedUsage };
+}
+
+export function deriveAdaptiveForecastParameters(rows, {
+  nowMs = Date.now(),
+  maximumLookbackHours = 168,
+  leadTimeHoursP50 = null,
+  leadTimeHoursP90 = null,
+  historicalSuccessRate = null,
+} = {}) {
+  const maximumLookback = Math.max(168, Math.floor(finite(maximumLookbackHours, 168)));
+  const { hourly } = hourlySeries(rows, { nowMs, lookbackHours: maximumLookback });
+  const fullStats = confidenceFor(hourly);
+  const recent24Rate = recentAverage(hourly, 24);
+  const previous24 = hourly.slice(-48, -24);
+  const previous24Rate = average(previous24);
+  const recentDemandChange = previous24Rate > 0
+    ? bounded((recent24Rate - previous24Rate) / previous24Rate, -1, 3)
+    : recent24Rate > 0
+      ? 1
+      : 0;
+  const recent72 = hourly.slice(-72);
+  const first36Rate = average(recent72.slice(0, 36));
+  const last36Rate = average(recent72.slice(-36));
+  const mediumTrend = first36Rate > 0
+    ? bounded((last36Rate - first36Rate) / first36Rate, -1, 3)
+    : last36Rate > 0
+      ? 1
+      : 0;
+
+  let lookbackHours = maximumLookback;
+  let lookbackReason = 'stable';
+  if (fullStats.confidence === 'insufficient' || fullStats.nonZeroHours < 24) {
+    lookbackReason = fullStats.confidence === 'insufficient' ? 'insufficient' : 'sparse';
+  } else if (Math.abs(recentDemandChange) >= 0.5) {
+    lookbackHours = 24;
+    lookbackReason = 'recent_shift';
+  } else if (Math.abs(recentDemandChange) >= 0.2 || Math.abs(mediumTrend) >= 0.25) {
+    lookbackHours = 72;
+    lookbackReason = 'trend';
+  }
+
+  const selectedHourly = hourly.slice(-lookbackHours);
+  const selectedStats = confidenceFor(selectedHourly);
+  const meanRate = average(selectedHourly);
+  const volatility = meanRate > 0
+    ? bounded(standardDeviation(selectedHourly) / meanRate, 0, 3)
+    : 0;
+  const successRate = Number.isFinite(Number(historicalSuccessRate))
+    ? bounded(historicalSuccessRate, 0.1, 1)
+    : 0.8;
+  const confidencePenalty = {
+    high: 0,
+    medium: 0.04,
+    low: 0.1,
+    insufficient: 0.18,
+  }[selectedStats.confidence] ?? 0.1;
+  const upwardShiftPenalty = Math.max(0, recentDemandChange) * 0.12;
+  const instabilityPenalty = Math.abs(Math.min(0, recentDemandChange)) * 0.04;
+  const safetyFactor = bounded(
+    1.08
+      + Math.min(0.28, volatility * 0.12)
+      + Math.min(0.15, upwardShiftPenalty + instabilityPenalty)
+      + confidencePenalty
+      + (1 - successRate) * 0.25,
+    1.08,
+    1.6,
+  );
+
+  const leadP90 = Number(leadTimeHoursP90) > 0 ? Number(leadTimeHoursP90) : 2;
+  const leadP50 = Number(leadTimeHoursP50) > 0
+    ? Math.min(Number(leadTimeHoursP50), leadP90)
+    : Math.min(leadP90, 1);
+  const leadSpread = Math.max(0, leadP90 - leadP50);
+  const coverageRaw = 18
+    + Math.min(12, volatility * 6)
+    + Math.min(6, leadSpread * 1.5)
+    + (1 - successRate) * 12
+    + (selectedStats.confidence === 'insufficient'
+      ? 12
+      : selectedStats.confidence === 'low'
+        ? 6
+        : selectedStats.confidence === 'medium'
+          ? 3
+          : 0)
+    + Math.min(6, Math.max(0, recentDemandChange) * 6);
+  const coverageHours = bounded(Math.ceil(coverageRaw / 6) * 6, 18, 42);
+
+  return {
+    parameterMode: 'adaptive',
+    maximumLookbackHours: maximumLookback,
+    lookbackHours,
+    lookbackReason,
+    coverageHours,
+    safetyFactor: rounded(safetyFactor, 4),
+    volatility: rounded(volatility, 4),
+    recentDemandChange: rounded(recentDemandChange, 4),
+    mediumTrend: rounded(mediumTrend, 4),
+    confidence: selectedStats.confidence,
+    nonZeroHours: selectedStats.nonZeroHours,
+    historicalSuccessRate: rounded(successRate, 4),
+    leadTimeHoursP50: rounded(leadP50, 3),
+    leadTimeHoursP90: rounded(leadP90, 3),
+  };
+}
+
 export function forecastHourlyDemand(rows, {
   nowMs = Date.now(),
   lookbackHours = 168,
@@ -51,16 +188,10 @@ export function forecastHourlyDemand(rows, {
 } = {}) {
   const normalizedLookback = Math.max(24, Math.floor(finite(lookbackHours, 168)));
   const normalizedHorizon = Math.max(1, Math.ceil(finite(horizonHours, 26)));
-  const completedEndMs = Math.floor(nowMs / HOUR_MS) * HOUR_MS;
-  const startMs = completedEndMs - normalizedLookback * HOUR_MS;
-  const hourly = Array.from({ length: normalizedLookback }, () => 0);
-
-  for (const row of rows || []) {
-    const hourMs = Date.parse(row.hour);
-    if (!Number.isFinite(hourMs) || hourMs < startMs || hourMs >= completedEndMs) continue;
-    const index = Math.floor((hourMs - startMs) / HOUR_MS);
-    if (index >= 0 && index < hourly.length) hourly[index] += Math.max(0, finite(row.cost));
-  }
+  const { completedEndMs, startMs, hourly } = hourlySeries(rows, {
+    nowMs,
+    lookbackHours: normalizedLookback,
+  });
 
   const observedUsage1h = recentAverage(hourly, 1);
   const observedUsage6h = recentAverage(hourly, 6) * 6;
@@ -95,15 +226,7 @@ export function forecastHourlyDemand(rows, {
     rawForecastUsage += predictedRate;
   }
 
-  const nonZeroHours = hourly.filter((value) => value > 0).length;
-  const totalObservedUsage = hourly.reduce((sum, value) => sum + value, 0);
-  const confidence = totalObservedUsage <= 0
-    ? 'insufficient'
-    : nonZeroHours >= 72
-      ? 'high'
-      : nonZeroHours >= 24
-        ? 'medium'
-        : 'low';
+  const { nonZeroHours, confidence } = confidenceFor(hourly);
 
   return {
     lookbackHours: normalizedLookback,

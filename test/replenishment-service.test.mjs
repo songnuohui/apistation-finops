@@ -105,18 +105,29 @@ test('replenishment trigger strategy is validated and stored', async () => {
   );
 });
 
-test('smart replenishment requires a five minute polling interval', async () => {
+test('smart replenishment normalizes user-entered forecast controls to adaptive defaults', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const current = await repository.getRule(1);
 
-  await assert.rejects(
-    repository.saveRule({
-      ...current,
-      triggerStrategy: 'smart_forecast',
-      scheduleIntervalSeconds: 299,
-    }),
-    /300/,
-  );
+  const saved = await repository.saveRule({
+    ...current,
+    triggerStrategy: 'smart_forecast',
+    minAvailableAccounts: 3,
+    targetAvailableAccounts: 99,
+    repairGraceSeconds: 900,
+    scheduleIntervalSeconds: 30,
+    forecastLookbackHours: 24,
+    forecastCoverageHours: 72,
+    forecastSafetyFactor: 2,
+    forecastFallbackLeadTimeHours: 12,
+    forecastDefaultAccountCapacity: 500,
+  });
+
+  assert.equal(saved.targetAvailableAccounts, 3);
+  assert.equal(saved.repairGraceSeconds, 0);
+  assert.equal(saved.scheduleIntervalSeconds, 300);
+  assert.equal(saved.forecastLookbackHours, 168);
+  assert.equal(saved.forecastDefaultAccountCapacity, null);
 });
 
 test('smart replenishment forecasts finite quota demand without creating an order in observe mode', async () => {
@@ -181,6 +192,9 @@ test('smart replenishment forecasts finite quota demand without creating an orde
   assert.ok(result.forecast.forecastUsage > 0);
   assert.ok(result.forecast.conservativeAccountCapacity > 0);
   assert.ok(result.forecast.recommendedQuantity > 0);
+  assert.equal(result.forecast.parameterMode, 'adaptive');
+  assert.ok([24, 72, 168].includes(result.forecast.lookbackHours));
+  assert.ok([300, 600, 900, 1800].includes(result.forecast.nextCheckSeconds));
   assert.equal((await repository.listOrders()).length, 0);
 });
 
