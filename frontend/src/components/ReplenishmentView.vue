@@ -90,7 +90,8 @@
             <div class="runtime-block-title"><ShieldCheck :size="15" /><strong>动态保护窗口</strong></div>
             <dl class="runtime-facts">
               <div><dt>采购 P50 / P90</dt><dd>{{ hoursValue(runtimeData.leadTimeHoursP50) }} / {{ hoursValue(runtimeData.leadTimeHoursP90) }}</dd></div>
-              <div><dt>动态缓冲</dt><dd>{{ hoursValue(runtimeData.bufferHours) }}</dd></div>
+              <div><dt>账号有效期 P25</dt><dd>{{ hoursValue(runtimeData.accountValidityHours) }}</dd></div>
+              <div><dt>分钟级缓冲</dt><dd>{{ hoursValue(runtimeData.bufferHours) }}</dd></div>
               <div><dt>安全系数</dt><dd>{{ Number(runtimeData.safetyFactor || 1).toFixed(2) }}</dd></div>
               <div><dt>保护窗口</dt><dd>{{ hoursValue(runtimeData.protectionHours) }}</dd></div>
               <div><dt>所需容量</dt><dd>{{ usageValue(runtimeData.requiredCapacity) }}</dd></div>
@@ -212,7 +213,8 @@
               <div v-else-if="rule.triggerStrategy === 'smart_forecast' && rule.lastForecastSnapshot?.capturedAt" class="inventory-strip forecast-strip">
                 <span>15/30/60分钟 {{ usageValue(rule.lastForecastSnapshot.observedUsage15m) }} / {{ usageValue(rule.lastForecastSnapshot.observedUsage30m) }} / {{ usageValue(rule.lastForecastSnapshot.observedUsage1h) }}</span>
                 <span>提前期 P50/P90 {{ hoursValue(rule.lastForecastSnapshot.leadTimeHoursP50) }} / {{ hoursValue(rule.lastForecastSnapshot.leadTimeHoursP90) }}</span>
-                <span>动态缓冲 {{ hoursValue(rule.lastForecastSnapshot.bufferHours) }}</span>
+                <span>有效期P25 {{ hoursValue(rule.lastForecastSnapshot.accountValidityHours) }}</span>
+                <span>分钟级缓冲 {{ hoursValue(rule.lastForecastSnapshot.bufferHours) }}</span>
                 <span>在途容量 {{ usageValue(rule.lastForecastSnapshot.inFlightCapacity) }}</span>
                 <span>容量缺口 {{ usageValue(rule.lastForecastSnapshot.capacityGap) }}</span>
                 <span>单号P25 {{ usageValue(rule.lastForecastSnapshot.conservativeAccountCapacity) }}</span>
@@ -626,7 +628,9 @@ const moneyFen = (value: any) => value === null || value === undefined ? '--' : 
 const usageValue = (value: any) => value === null || value === undefined ? '--' : Number(value || 0).toFixed(2);
 const hoursValue = (value: any) => value === null || value === undefined || value === ''
   ? '--'
-  : `${Number(value).toFixed(Number(value) % 1 === 0 ? 0 : 1)}小时`;
+  : Number(value) < 1
+    ? `${Math.max(0, Math.round(Number(value) * 60))}分钟`
+    : `${Number(value).toFixed(Number(value) % 1 === 0 ? 0 : 1)}小时`;
 const safetyPercent = (value: any) => value === null || value === undefined
   ? '--'
   : `${Math.max(0, (Number(value) - 1) * 100).toFixed(0)}%`;

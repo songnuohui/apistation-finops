@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   deriveAdaptiveForecastParameters,
+  deriveRealtimeProtection,
   estimateFiniteQuotaCapacity,
   forecastHourlyDemand,
 } from '../src/services/replenishment-forecast.mjs';
@@ -122,4 +123,20 @@ test('adaptive forecast shortens the window and raises protection after a demand
   assert.equal(result.lookbackReason, 'recent_shift');
   assert.ok(result.recentDemandChange >= 1);
   assert.ok(result.safetyFactor > 1.2);
+});
+
+test('realtime protection keeps short-lived account buffers in minutes', () => {
+  const result = deriveRealtimeProtection({
+    volatility: 1.76,
+    leadTimeHoursP50: 0.047,
+    leadTimeHoursP90: 0.452,
+    historicalSuccessRate: 0.9463,
+    checkIntervalSeconds: 30,
+    accountValidityHours: 50 / 60,
+  });
+
+  assert.ok(result.bufferHours >= 5 / 60);
+  assert.ok(result.bufferHours <= 13 / 60);
+  assert.ok(result.protectionHours < 0.7);
+  assert.equal(result.accountValidityHours, 0.833);
 });

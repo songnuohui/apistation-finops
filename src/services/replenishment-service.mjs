@@ -271,6 +271,24 @@ function accountDisplayName(account) {
   ).trim();
 }
 
+function accountValidityHoursFromName(value) {
+  const match = /有效期\s*(\d+(?:\.\d+)?)\s*(分钟|小时|天)/.exec(String(value || ''));
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (match[2] === '分钟') return amount / 60;
+  if (match[2] === '天') return amount * 24;
+  return amount;
+}
+
+function inferredAccountExpiry({ accountName: name, capacityStartedAt, explicitExpiresAt }) {
+  if (explicitExpiresAt !== null) return explicitExpiresAt;
+  const validityHours = accountValidityHoursFromName(name);
+  const startedAt = Date.parse(String(capacityStartedAt || ''));
+  if (validityHours === null || !Number.isFinite(startedAt)) return null;
+  return Math.floor((startedAt + validityHours * 3_600_000) / 1000);
+}
+
 function latestTimestamp(...values) {
   const timestamps = values.map((value) => Date.parse(String(value || '')))
     .filter(Number.isFinite);
@@ -1625,7 +1643,18 @@ export class ReplenishmentService {
       const accountStates = poolAccounts.map((account) => {
         const accountId = Number(account.id);
         const tracked = trackedByAccountId.get(accountId);
-        const expiresAt = epochSeconds(account?.expires_at ?? account?.expiresAt);
+        const displayName = accountDisplayName(account);
+        const capacityStartedAt = tracked?.capacityStartedAt
+          || tracked?.createdAt
+          || account?.created_at
+          || account?.createdAt
+          || null;
+        const validityHours = accountValidityHoursFromName(displayName);
+        const expiresAt = inferredAccountExpiry({
+          accountName: displayName,
+          capacityStartedAt,
+          explicitExpiresAt: epochSeconds(account?.expires_at ?? account?.expiresAt),
+        });
         const expired = expiresAt !== null && expiresAt * 1000 <= now;
         const repairing = repairingAccountIds.has(accountId);
         const authFailed = textIncludesAuthFailure(account?.error_message, account?.errorMessage);
@@ -1654,7 +1683,7 @@ export class ReplenishmentService {
           && !authFailed;
         return {
           accountId,
-          accountName: accountDisplayName(account),
+          accountName: displayName,
           sourceStatus: account?.status || '',
           sourceSchedulable: account?.schedulable === true,
           scheduleState: schedule.state,
@@ -1663,6 +1692,7 @@ export class ReplenishmentService {
           repairing,
           expired,
           expiresAt,
+          validityHours,
           quotaUsedPercent: quota.long,
           quotaShortUsedPercent: quota.short,
           quotaCurrent,
@@ -1678,11 +1708,7 @@ export class ReplenishmentService {
           tempUnschedulableUntil: schedule.tempUnschedulableUntil,
           tempUnschedulableReason: schedule.tempUnschedulableReason,
           lastError: account?.error_message || account?.errorMessage || '',
-          capacityStartedAt: tracked?.capacityStartedAt
-            || tracked?.createdAt
-            || account?.created_at
-            || account?.createdAt
-            || null,
+          capacityStartedAt,
         };
       });
       let runtimeUsageError = '';
@@ -1765,6 +1791,7 @@ export class ReplenishmentService {
           repairing: account.repairing,
           expired: account.expired,
           expiresAt: account.expiresAt,
+          validityHours: account.validityHours,
           quotaUsedPercent: account.quotaUsedPercent,
           quotaRemainingPercent: account.quotaUsedPercent === null
             ? null
@@ -1809,12 +1836,18 @@ export class ReplenishmentService {
         3,
         Number(rule.scheduleIntervalSeconds || 300),
       );
+      const accountValidityHours = percentile(
+        accountStates.map((account) => account.validityHours)
+          .filter((value) => Number.isFinite(value) && value > 0),
+        0.25,
+      );
       const protection = deriveRealtimeProtection({
         volatility: realtimeUsage.pool.volatility,
         leadTimeHoursP50: planning.leadTimeHoursP50,
         leadTimeHoursP90: planning.leadTimeHoursP90,
         historicalSuccessRate,
         checkIntervalSeconds,
+        accountValidityHours,
       });
       const accountCapacity = capacity.conservativeAccountCapacity;
       const pendingAccounts = Number(planning.pendingQuantity || 0);
@@ -1884,7 +1917,7 @@ export class ReplenishmentService {
             ? '最近完整观测窗口没有实际消耗，最低有效账号数满足时不补号'
             : `当前速度 ${rounded(currentHourlyRate, 2)}/小时，按账号累计成本增量生成最近完整 5 分钟桶`,
         `当前剩余容量 ${rounded(capacity.currentRemainingCapacity, 2)}，在途折算容量 ${rounded(inFlightCapacity, 2)}`,
-        `采购 P90 ${protection.leadTimeHoursP90} 小时 + 动态缓冲 ${protection.bufferHours} 小时，保护窗口 ${protection.protectionHours} 小时`,
+        `账号有效期 P25 ${protection.accountValidityHours || '--'} 小时，采购 P90 ${protection.leadTimeHoursP90} 小时 + 分钟级缓冲 ${protection.bufferHours} 小时，保护窗口 ${protection.protectionHours} 小时`,
         !predictiveDataReady
           ? unknownOrStaleAccounts > 0
             ? `有 ${unknownOrStaleAccounts} 个额度未知或窗口已过期的账号，预测下单已阻止，仅保留最低账号数兜底`
@@ -1908,6 +1941,9 @@ export class ReplenishmentService {
         leadTimeHours: protection.leadTimeHoursP90,
         leadTimeHoursP50: protection.leadTimeHoursP50,
         leadTimeHoursP90: protection.leadTimeHoursP90,
+        accountValidityHours: protection.accountValidityHours,
+        reviewIntervalHours: protection.reviewIntervalHours,
+        bufferCapHours: protection.bufferCapHours,
         coverageHours: protection.bufferHours,
         bufferHours: protection.bufferHours,
         protectionHours: protection.protectionHours,

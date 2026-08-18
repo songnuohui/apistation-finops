@@ -505,6 +505,7 @@ export function deriveRealtimeProtection({
   leadTimeHoursP90 = null,
   historicalSuccessRate = null,
   checkIntervalSeconds = 600,
+  accountValidityHours = null,
 } = {}) {
   const successRate = Number.isFinite(Number(historicalSuccessRate))
     ? bounded(Number(historicalSuccessRate), 0.1, 1)
@@ -515,12 +516,19 @@ export function deriveRealtimeProtection({
     : Math.min(leadP90, 1);
   const normalizedVolatility = bounded(finite(volatility), 0, 3);
   const leadSpread = Math.max(0, leadP90 - leadP50);
-  const checkHours = bounded(finite(checkIntervalSeconds, 600) / 3600, 5 / 60, 1);
-  const bufferHours = bounded(
-    1 + leadSpread * 0.75 + normalizedVolatility * 1.5 + checkHours,
-    1,
-    6,
+  const checkHours = bounded(finite(checkIntervalSeconds, 600) / 3600, 3 / 3600, 0.25);
+  const validityHours = Number(accountValidityHours) > 0 ? Number(accountValidityHours) : null;
+  const bufferCapHours = validityHours === null
+    ? 0.5
+    : bounded(validityHours * 0.25, 5 / 60, 0.5);
+  const baseBufferHours = Math.max(5 / 60, checkHours * 2);
+  const volatilityBufferHours = Math.min(15 / 60, normalizedVolatility * (5 / 60));
+  const leadSpreadBufferHours = Math.min(10 / 60, leadSpread * 0.25);
+  const bufferHours = Math.min(
+    bufferCapHours,
+    baseBufferHours + volatilityBufferHours + leadSpreadBufferHours,
   );
+  const roundedBufferHours = Math.min(bufferCapHours, Math.ceil(bufferHours * 60) / 60);
   const safetyFactor = bounded(
     1.05 + normalizedVolatility * 0.12 + (1 - successRate) * 0.2,
     1.05,
@@ -531,8 +539,11 @@ export function deriveRealtimeProtection({
     leadTimeHoursP50: rounded(leadP50, 3),
     leadTimeHoursP90: rounded(leadP90, 3),
     leadTimeSpreadHours: rounded(leadSpread, 3),
-    bufferHours: rounded(Math.ceil(bufferHours * 4) / 4, 2),
-    protectionHours: rounded(leadP90 + Math.ceil(bufferHours * 4) / 4, 2),
+    accountValidityHours: rounded(validityHours, 3),
+    reviewIntervalHours: rounded(checkHours, 4),
+    bufferCapHours: rounded(bufferCapHours, 3),
+    bufferHours: rounded(roundedBufferHours, 3),
+    protectionHours: rounded(leadP90 + roundedBufferHours, 3),
     safetyFactor: rounded(safetyFactor, 4),
     historicalSuccessRate: rounded(successRate, 4),
   };
