@@ -335,28 +335,46 @@ function compactForecastSnapshot(snapshot = {}) {
     leadTimeHoursP50: number(snapshot.leadTimeHoursP50),
     leadTimeHoursP90: number(snapshot.leadTimeHoursP90),
     coverageHours: Number(snapshot.coverageHours || 0),
+    bufferHours: number(snapshot.bufferHours),
+    protectionHours: number(snapshot.protectionHours),
     safetyFactor: number(snapshot.safetyFactor),
     volatility: number(snapshot.volatility),
     recentDemandChange: number(snapshot.recentDemandChange),
+    observedUsage15m: number(snapshot.observedUsage15m),
+    observedUsage30m: number(snapshot.observedUsage30m),
     observedUsage1h: number(snapshot.observedUsage1h),
     observedUsage6h: number(snapshot.observedUsage6h),
     observedUsage24h: number(snapshot.observedUsage24h),
+    rate15m: number(snapshot.rate15m),
+    rate30m: number(snapshot.rate30m),
+    rate60m: number(snapshot.rate60m),
     recentHourlyRate: number(snapshot.recentHourlyRate),
     forecastUsage: number(snapshot.forecastUsage),
+    requiredCapacity: number(snapshot.requiredCapacity),
     currentRemainingCapacity: number(snapshot.currentRemainingCapacity),
     inFlightCapacity: number(snapshot.inFlightCapacity),
     capacityGap: number(snapshot.capacityGap),
     conservativeAccountCapacity: number(snapshot.conservativeAccountCapacity),
+    expectedDeliveredAccountCapacity: number(snapshot.expectedDeliveredAccountCapacity),
     capacitySampleCount: Number(snapshot.capacitySampleCount || 0),
     capacityConfidence: snapshot.capacityConfidence || '',
     demandConfidence: snapshot.demandConfidence || '',
+    predictiveDataReady: Boolean(snapshot.predictiveDataReady),
     effectiveAccounts: Number(snapshot.effectiveAccounts || 0),
+    exhaustedAccounts: Number(snapshot.exhaustedAccounts || 0),
+    limitedAccounts: Number(snapshot.limitedAccounts || 0),
+    errorAccounts: Number(snapshot.errorAccounts || 0),
+    unavailableAccounts: Number(snapshot.unavailableAccounts || 0),
+    repairingAccounts: Number(snapshot.repairingAccounts || 0),
+    staleQuotaAccounts: Number(snapshot.staleQuotaAccounts || 0),
+    unknownQuotaAccounts: Number(snapshot.unknownQuotaAccounts || 0),
     pendingAccounts: Number(snapshot.pendingAccounts || 0),
     pendingSuccessRate: number(snapshot.pendingSuccessRate),
     emergencyQuantity: Number(snapshot.emergencyQuantity || 0),
     predictedQuantity: Number(snapshot.predictedQuantity || 0),
     recommendedQuantity: Number(snapshot.recommendedQuantity || 0),
     runwayHours: number(snapshot.runwayHours),
+    protectedRunwayHours: number(snapshot.protectedRunwayHours),
     nextCheckSeconds: Number(snapshot.nextCheckSeconds || 0),
     decisionReasons: Array.isArray(snapshot.decisionReasons)
       ? snapshot.decisionReasons.map(String).slice(0, 4)
@@ -1202,6 +1220,35 @@ export class ReplenishmentRepository {
         AND i.sub2api_account_id IS NOT NULL
       ORDER BY i.id`, [targetPoolKey]);
     return result.rows.map(item);
+  }
+
+  async listOpenRecoveryAccountIdsForPool(targetPoolKey) {
+    const openStatuses = [
+      'detected', 'waiting_supplier', 'claimable', 'credentials_saved',
+      'updating_sub2api', 'verifying', 'retry_wait', 'manual_required',
+    ];
+    if (this.demo) {
+      const orderIds = new Set(this.orders
+        .filter((entry) => entry.targetPoolKey === targetPoolKey)
+        .map((entry) => entry.id));
+      const itemIds = new Set(this.items
+        .filter((entry) => orderIds.has(entry.orderId))
+        .map((entry) => entry.id));
+      return [...new Set(this.recoveries
+        .filter((entry) => itemIds.has(entry.orderItemId) && openStatuses.includes(entry.status))
+        .map((entry) => Number(entry.sub2apiAccountId))
+        .filter((value) => Number.isSafeInteger(value) && value > 0))];
+    }
+    const result = await this.pool.query(`
+      SELECT DISTINCT rr.sub2api_account_id
+      FROM ${this.schema}.replenishment_recoveries rr
+      JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      WHERE o.target_pool_key=$1
+        AND rr.status=ANY($2::text[])`, [targetPoolKey, openStatuses]);
+    return result.rows
+      .map((row) => Number(row.sub2api_account_id))
+      .filter((value) => Number.isSafeInteger(value) && value > 0);
   }
 
   async upsertRecovery(input) {

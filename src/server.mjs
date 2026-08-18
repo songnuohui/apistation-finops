@@ -790,6 +790,28 @@ async function api(request,res,url){
       ()=>replenishmentRepository.listRules(),
     ));
   }
+  if(request.method==='GET'&&url.pathname==='/api/replenishment/runtime'){
+    const ruleId=Number(url.searchParams.get('ruleId'));
+    if(!Number.isSafeInteger(ruleId)||ruleId<=0){
+      return json(res,400,{error:'ruleId is required'});
+    }
+    const selectedRule=await replenishmentRepository.getRule(ruleId);
+    if(!selectedRule)return json(res,404,{error:'replenishment rule not found'});
+    if(selectedRule.triggerStrategy!=='smart_forecast'){
+      return json(res,400,{error:'runtime panel is only available for smart replenishment rules'});
+    }
+    return json(res,200,await replenishmentService.runtimePanel(selectedRule,{
+      ...page(),
+      search:searchTerm(url.searchParams),
+      status:filterTerm(url.searchParams,'status',40),
+      quota:filterTerm(url.searchParams,'quota',40),
+      force:url.searchParams.get('fresh')==='1',
+      ...listSort(url.searchParams,[
+        'account_id','account_name','status','quota_used_percent',
+        'remaining_capacity','current_rate','runway_hours','quota_observed_at',
+      ],'quota_used_percent'),
+    }));
+  }
   if(request.method==='GET'&&url.pathname==='/api/replenishment/recovery-policies'){
     return json(res,200,await cached(
       'replenishment-recovery-policies',

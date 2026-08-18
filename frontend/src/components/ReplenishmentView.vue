@@ -24,11 +24,145 @@
     </section>
 
     <nav class="replenishment-tabs" aria-label="自动补号工作区">
+      <button :class="{ active: activeSection === 'runtime' }" @click="changeSection('runtime')"><Gauge :size="16" /><span>运行面板</span><small>{{ runtimeData.effectiveAccounts ?? '—' }}</small></button>
       <button :class="{ active: activeSection === 'setup' }" @click="changeSection('setup')"><Settings2 :size="16" /><span>策略与映射</span><small>{{ rules.length }}</small></button>
-      <button :class="{ active: activeSection === 'logs' }" @click="changeSection('logs')"><History :size="16" /><span>执行日志</span><small>{{ eventsLoaded ? executionEvents.length : '…' }}</small></button>
       <button :class="{ active: activeSection === 'orders' }" @click="changeSection('orders')"><ShoppingCart :size="16" /><span>补号订单</span><small>{{ ordersLoaded ? orderData.total : (dashboard.summary?.totalOrders || 0) }}</small></button>
       <button :class="{ active: activeSection === 'repairs' }" @click="changeSection('repairs')"><Wrench :size="16" /><span>账号修复</span><small>{{ recoveriesLoaded ? recoveryData.pendingTotal : (dashboard.summary?.repairingAccounts || 0) }}</small></button>
+      <button :class="{ active: activeSection === 'logs' }" @click="changeSection('logs')"><History :size="16" /><span>执行日志</span><small>{{ eventsLoaded ? executionEvents.length : '…' }}</small></button>
     </nav>
+
+    <section v-if="activeSection === 'runtime'" class="panel replenishment-runtime-panel">
+      <div class="panel-head runtime-panel-head">
+        <div>
+          <h2>实时容量与补号决策</h2>
+          <p>只读 Sub2API 当前额度和最近完整 60 分钟用量，不同步原始用量记录。</p>
+        </div>
+        <div class="runtime-head-actions">
+          <select v-model="runtimeRuleId" aria-label="选择智能补号策略" @change="changeRuntimeRule">
+            <option value="" disabled>选择智能补号策略</option>
+            <option v-for="rule in smartRules" :key="rule.id" :value="String(rule.id)">{{ rule.name }}</option>
+          </select>
+          <span class="runtime-observed-at">更新于 {{ dateTimeWithSeconds(runtimeData.capturedAt) }}</span>
+          <button class="icon-button" title="刷新实时数据" :disabled="runtimeLoading || !runtimeRuleId" @click="loadRuntime(true)">
+            <RefreshCw :size="15" :class="{ spinning: runtimeLoading }" />
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!smartRules.length" class="empty-state">当前没有智能预测补号策略，请先在“策略与映射”中新增或修改策略。</div>
+      <div v-else-if="runtimeLoading && !runtimeLoaded" class="empty-state">正在读取 Sub2API 实时额度与用量...</div>
+      <template v-else>
+        <div class="runtime-kpi-grid">
+          <div><span>实时有效账号</span><strong>{{ runtimeData.effectiveAccounts || 0 }}</strong><small>最低兜底 {{ runtimeData.rule?.minAvailableAccounts || 0 }}</small></div>
+          <div><span>当前剩余容量</span><strong>{{ usageValue(runtimeData.currentRemainingCapacity) }}</strong><small>按每个账号 7 天剩余额度折算</small></div>
+          <div><span>当前用量速度</span><strong>{{ usageValue(runtimeData.currentHourlyRate) }}/h</strong><small>最近完整 5 分钟桶 EWMA</small></div>
+          <div><span>预计续航</span><strong>{{ hoursValue(runtimeData.runwayHours) }}</strong><small>含在途 {{ hoursValue(runtimeData.protectedRunwayHours) }}</small></div>
+          <div :class="runtimeData.recommendedQuantity > 0 ? 'warning' : 'good'"><span>建议补号</span><strong>{{ runtimeData.recommendedQuantity || 0 }}</strong><small>单次最多 {{ runtimeData.rule?.maxPurchaseQuantity || 0 }}</small></div>
+        </div>
+
+        <div class="runtime-state-strip">
+          <span><i class="effective" />有效 {{ runtimeData.effectiveAccounts || 0 }}</span>
+          <span><i class="exhausted" />耗尽 {{ runtimeData.exhaustedAccounts || 0 }}</span>
+          <span><i class="limited" />限流 {{ runtimeData.limitedAccounts || 0 }}</span>
+          <span><i class="error" />异常 {{ runtimeData.errorAccounts || 0 }}</span>
+          <span><i class="repairing" />修复 {{ runtimeData.repairingAccounts || 0 }}</span>
+          <span><i class="pending" />在途 {{ runtimeData.pendingAccounts || 0 }}</span>
+          <span><i class="unknown" />额度未知/滞后 {{ (runtimeData.unknownQuotaAccounts || 0) + (runtimeData.staleQuotaAccounts || 0) }}</span>
+        </div>
+
+        <div class="runtime-overview">
+          <div class="runtime-overview-block">
+            <div class="runtime-block-title"><Activity :size="15" /><strong>实时用量速度</strong></div>
+            <div class="runtime-velocity-row">
+              <span>15 分钟</span><strong>{{ usageValue(runtimeData.observedUsage15m) }}</strong><small>{{ usageValue(runtimeData.rate15m) }}/h</small>
+              <i><b :style="{ width: runtimeVelocityWidth(runtimeData.rate15m) }" /></i>
+            </div>
+            <div class="runtime-velocity-row">
+              <span>30 分钟</span><strong>{{ usageValue(runtimeData.observedUsage30m) }}</strong><small>{{ usageValue(runtimeData.rate30m) }}/h</small>
+              <i><b :style="{ width: runtimeVelocityWidth(runtimeData.rate30m) }" /></i>
+            </div>
+            <div class="runtime-velocity-row">
+              <span>60 分钟</span><strong>{{ usageValue(runtimeData.observedUsage1h) }}</strong><small>{{ usageValue(runtimeData.rate60m) }}/h</small>
+              <i><b :style="{ width: runtimeVelocityWidth(runtimeData.rate60m) }" /></i>
+            </div>
+          </div>
+          <div class="runtime-overview-block">
+            <div class="runtime-block-title"><ShieldCheck :size="15" /><strong>动态保护窗口</strong></div>
+            <dl class="runtime-facts">
+              <div><dt>采购 P50 / P90</dt><dd>{{ hoursValue(runtimeData.leadTimeHoursP50) }} / {{ hoursValue(runtimeData.leadTimeHoursP90) }}</dd></div>
+              <div><dt>动态缓冲</dt><dd>{{ hoursValue(runtimeData.bufferHours) }}</dd></div>
+              <div><dt>安全系数</dt><dd>{{ Number(runtimeData.safetyFactor || 1).toFixed(2) }}</dd></div>
+              <div><dt>保护窗口</dt><dd>{{ hoursValue(runtimeData.protectionHours) }}</dd></div>
+              <div><dt>所需容量</dt><dd>{{ usageValue(runtimeData.requiredCapacity) }}</dd></div>
+              <div><dt>容量缺口</dt><dd>{{ usageValue(runtimeData.capacityGap) }}</dd></div>
+            </dl>
+          </div>
+        </div>
+
+        <div class="runtime-decision" :class="runtimeDecisionTone">
+          <div><BrainCircuit :size="17" /><strong>{{ runtimeDecisionTitle }}</strong></div>
+          <p v-for="reason in runtimeData.decisionReasons || []" :key="reason">{{ reason }}</p>
+        </div>
+
+        <div class="runtime-account-head">
+          <div><h3>账号实时明细</h3><small>共 {{ runtimeData.total || 0 }} 个匹配账号</small></div>
+          <form class="runtime-account-filters" @submit.prevent="applyRuntimeFilters">
+            <label><Search :size="14" /><input v-model.trim="runtimeFilters.search" placeholder="账号名称 / Sub2API ID" /></label>
+            <select v-model="runtimeFilters.status" aria-label="运行状态">
+              <option value="">全部状态</option>
+              <option v-for="option in runtimeStatusOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+            <select v-model="runtimeFilters.quota" aria-label="额度范围">
+              <option value="">全部额度</option>
+              <option value="under_50">已用低于 50%</option>
+              <option value="50_80">已用 50%-80%</option>
+              <option value="80_100">已用 80%-100%</option>
+              <option value="exhausted">已耗尽</option>
+              <option value="unknown">额度未知</option>
+            </select>
+            <button class="icon-button filter-submit" type="submit" title="查询" :disabled="runtimeLoading"><Search :size="15" /></button>
+            <button class="icon-button" type="button" title="清空筛选" :disabled="runtimeLoading" @click="clearRuntimeFilters"><RotateCcw :size="15" /></button>
+          </form>
+        </div>
+
+        <div class="runtime-account-viewport" :aria-busy="runtimeLoading">
+          <table class="data-table runtime-account-table">
+            <thead><tr>
+              <th><button class="column-sort" @click="toggleRuntimeSort('account_name')">账号 <ArrowUp v-if="runtimeSortBy === 'account_name' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'account_name'" :size="13" /></button></th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('status')">状态 <ArrowUp v-if="runtimeSortBy === 'status' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'status'" :size="13" /></button></th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('quota_used_percent')">7 天额度 <ArrowUp v-if="runtimeSortBy === 'quota_used_percent' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'quota_used_percent'" :size="13" /></button></th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('remaining_capacity')">容量 <ArrowUp v-if="runtimeSortBy === 'remaining_capacity' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'remaining_capacity'" :size="13" /></button></th>
+              <th>15m / 30m / 60m</th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('current_rate')">当前速度 <ArrowUp v-if="runtimeSortBy === 'current_rate' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'current_rate'" :size="13" /></button></th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('runway_hours')">续航 <ArrowUp v-if="runtimeSortBy === 'runway_hours' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'runway_hours'" :size="13" /></button></th>
+              <th><button class="column-sort" @click="toggleRuntimeSort('quota_observed_at')">观测时间 <ArrowUp v-if="runtimeSortBy === 'quota_observed_at' && runtimeSortOrder === 'asc'" :size="13" /><ArrowDown v-else-if="runtimeSortBy === 'quota_observed_at'" :size="13" /></button></th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="account in runtimeData.accounts || []" :key="account.accountId">
+                <td><strong>{{ account.accountName }}</strong><small>Sub2API #{{ account.accountId }} · 并发 {{ account.currentConcurrency || 0 }}</small></td>
+                <td><span class="status-pill" :class="runtimeStatusTone(account.runtimeStatus)">{{ runtimeStatusLabel(account.runtimeStatus) }}</span><small :title="account.runtimeReason">{{ account.runtimeReason || account.scheduleState }}</small></td>
+                <td>
+                  <div class="quota-cell"><span><b :style="{ width: quotaWidth(account.quotaUsedPercent) }" /></span><strong>{{ percentValue(account.quotaUsedPercent) }}</strong></div>
+                  <small>剩余 {{ percentValue(account.quotaRemainingPercent) }}</small>
+                </td>
+                <td><strong>{{ usageValue(account.estimatedRemainingCapacity) }}</strong><small>满额 {{ usageValue(account.estimatedFullCapacity) }}</small></td>
+                <td><strong>{{ usageValue(account.usage15m) }} / {{ usageValue(account.usage30m) }} / {{ usageValue(account.usage60m) }}</strong><small>本容量周期累计 {{ usageValue(account.observedCapacityUsage) }}</small></td>
+                <td><strong>{{ usageValue(account.currentHourlyRate) }}/h</strong><small>60m {{ usageValue(account.rate60m) }}/h</small></td>
+                <td><strong>{{ hoursValue(account.runwayHours) }}</strong><small>到期 {{ account.expiresAt ? dateTime(Number(account.expiresAt) * 1000) : '--' }}</small></td>
+                <td><strong>{{ dateTimeWithSeconds(account.quotaObservedAt) }}</strong><small>最近用量 {{ dateTimeWithSeconds(account.lastUsageAt) }}</small></td>
+              </tr>
+              <tr v-if="runtimeLoading && !(runtimeData.accounts || []).length"><td colspan="8" class="empty-cell">正在更新账号实时数据...</td></tr>
+              <tr v-else-if="!(runtimeData.accounts || []).length"><td colspan="8" class="empty-cell">没有符合条件的账号</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="runtimeData.pages > 1" class="pager">
+          <button class="small-button" :disabled="runtimeLoading || runtimePage <= 1" @click="moveRuntimePage(-1)">上一页</button>
+          <span>第 {{ runtimePage }} / {{ runtimeData.pages }} 页，共 {{ runtimeData.total }} 个账号</span>
+          <button class="small-button" :disabled="runtimeLoading || runtimePage >= runtimeData.pages" @click="moveRuntimePage(1)">下一页</button>
+        </div>
+      </template>
+    </section>
 
     <div v-if="activeSection === 'setup'" class="replenishment-layout">
       <section class="panel">
@@ -56,8 +190,8 @@
                 </template>
                 <template v-else-if="rule.triggerStrategy === 'smart_forecast'">
                   <span>有效 {{ rule.lastForecastSnapshot?.effectiveAccounts ?? '--' }}</span>
-                  <span>回看 {{ hoursValue(rule.lastForecastSnapshot?.lookbackHours) }}</span>
-                  <span>保障 {{ hoursValue(rule.lastForecastSnapshot?.coverageHours) }}</span>
+                  <span>实时速度 {{ usageValue(rule.lastForecastSnapshot?.recentHourlyRate) }}/h</span>
+                  <span>保护窗口 {{ hoursValue(rule.lastForecastSnapshot?.protectionHours) }}</span>
                   <span>安全余量 {{ safetyPercent(rule.lastForecastSnapshot?.safetyFactor) }}</span>
                   <span>续航 {{ hoursValue(rule.lastForecastSnapshot?.runwayHours) }}</span>
                   <span>建议补 {{ rule.lastForecastSnapshot?.recommendedQuantity ?? '--' }}</span>
@@ -76,9 +210,9 @@
                 <small>{{ dateTime(rule.lastInventorySnapshot.capturedAt) }}</small>
               </div>
               <div v-else-if="rule.triggerStrategy === 'smart_forecast' && rule.lastForecastSnapshot?.capturedAt" class="inventory-strip forecast-strip">
-                <span>近1小时 {{ usageValue(rule.lastForecastSnapshot.observedUsage1h) }}</span>
-                <span>近6小时 {{ usageValue(rule.lastForecastSnapshot.observedUsage6h) }}</span>
+                <span>15/30/60分钟 {{ usageValue(rule.lastForecastSnapshot.observedUsage15m) }} / {{ usageValue(rule.lastForecastSnapshot.observedUsage30m) }} / {{ usageValue(rule.lastForecastSnapshot.observedUsage1h) }}</span>
                 <span>提前期 P50/P90 {{ hoursValue(rule.lastForecastSnapshot.leadTimeHoursP50) }} / {{ hoursValue(rule.lastForecastSnapshot.leadTimeHoursP90) }}</span>
+                <span>动态缓冲 {{ hoursValue(rule.lastForecastSnapshot.bufferHours) }}</span>
                 <span>在途容量 {{ usageValue(rule.lastForecastSnapshot.inFlightCapacity) }}</span>
                 <span>容量缺口 {{ usageValue(rule.lastForecastSnapshot.capacityGap) }}</span>
                 <span>单号P25 {{ usageValue(rule.lastForecastSnapshot.conservativeAccountCapacity) }}</span>
@@ -308,7 +442,7 @@
           <template v-else-if="editor.triggerStrategy === 'smart_forecast'">
             <label>最低有效账号数<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /><small class="field-hint">预测不可用或库存突降时，系统自动补回这个下限。</small></label>
             <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
-            <div class="form-note full-field">回看周期、安全余量、到账后保障、采购提前期、账号容量、在途成功率和检查频率均由系统动态计算。固定使用不可恢复的7天额度，修复账号只有成功导入 Sub2API 后才计入容量。</div>
+            <div class="form-note full-field">系统按最近完整 60 分钟的实时速度和当前 Team 剩余额度计算补号数量；采购 P90、动态缓冲、安全系数、单号容量、在途成功率和检查频率均自动调整。额度未知或滞后时禁止预测下单，只保留最低有效账号数兜底。</div>
           </template>
           <label v-else>每次固定购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
           <label v-if="editor.triggerStrategy === 'inventory_threshold'">修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
@@ -400,10 +534,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
-  ArrowDown, ArrowUp, ChevronRight, History, Pause, Play, Plus, RefreshCw, RotateCcw, Search,
-  Settings2, ShoppingCart, Trash2, Wrench, X, Zap,
+  Activity, ArrowDown, ArrowUp, BrainCircuit, ChevronRight, Gauge, History, Pause, Play, Plus,
+  RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, ShoppingCart, Trash2, Wrench, X, Zap,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
 
@@ -422,14 +556,24 @@ const editorError = ref('');
 const eventsLoading = ref(false);
 const ordersLoading = ref(false);
 const recoveriesLoading = ref(false);
+const runtimeLoading = ref(false);
 const eventsLoaded = ref(false);
 const ordersLoaded = ref(false);
 const recoveriesLoaded = ref(false);
+const runtimeLoaded = ref(false);
 const dashboard = ref<any>({ summary: {}, oauthSupply: {} });
 const catalog = ref<any>({ groups: [], platforms: [], proxies: [] });
 const modelSearch = ref('');
 const mappings = ref<any[]>([]);
 const rules = ref<any[]>([]);
+const runtimeData = ref<any>({ accounts: [], page: 1, pageSize: 20, total: 0, pages: 1 });
+const runtimeRuleId = ref('');
+const runtimePage = ref(1);
+const emptyRuntimeFilters = () => ({ search: '', status: '', quota: '' });
+const runtimeFilters = ref(emptyRuntimeFilters());
+const appliedRuntimeFilters = ref(emptyRuntimeFilters());
+const runtimeSortBy = ref('quota_used_percent');
+const runtimeSortOrder = ref<'asc' | 'desc'>('desc');
 const orders = ref<any[]>([]);
 const recoveries = ref<any[]>([]);
 const orderPage = ref(1);
@@ -453,15 +597,17 @@ const recoverySortOrder = ref<'asc' | 'desc'>('desc');
 const recoveryPolicies = ref<any[]>([]);
 const executionEvents = ref<any[]>([]);
 const eventRuleId = ref('');
-const activeSection = ref<'setup' | 'logs' | 'orders' | 'repairs'>('setup');
+const activeSection = ref<'runtime' | 'setup' | 'logs' | 'orders' | 'repairs'>('runtime');
 const recoveryTab = ref<'pending' | 'completed'>('pending');
 const executionLogPanel = ref<HTMLElement | null>(null);
 const editor = ref<any | null>(null);
 const recoveryEditor = ref<any>({ enabled: true, mode: 'manual', retryLimit: null, retryIntervalSeconds: 60 });
 const selectedOrder = ref<any | null>(null);
 const selectedEvent = ref<any | null>(null);
+let runtimeTimer: number | null = null;
 
 const connected = computed(() => Boolean(dashboard.value.oauthSupply?.balance && !dashboard.value.oauthSupply.balance.error));
+const smartRules = computed(() => rules.value.filter((rule) => rule.triggerStrategy === 'smart_forecast'));
 const selectedRule = computed(() => selectedOrder.value ? rules.value.find((rule) => rule.id === selectedOrder.value.ruleId) : null);
 const groupById = computed<Map<number, any>>(() => new Map((catalog.value.groups || []).map((group: any) => [Number(group.id), group])));
 const mappingGroups = computed(() => !editor.value?.platform ? [] : (catalog.value.groups || []).filter((group: any) => group.platform === editor.value.platform));
@@ -503,6 +649,49 @@ const triggerActionLabel = (rule: any) => rule.triggerStrategy === 'fixed_schedu
     ? '立即预测容量'
     : '立即检查库存';
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
+const runtimeStatusLabels: Record<string, string> = {
+  effective: '有效',
+  exhausted: '已耗尽',
+  rate_limited: '限流',
+  error: '异常',
+  repairing: '修复中',
+  unavailable: '不可用',
+  quota_unknown: '额度未知',
+  stale_quota: '额度滞后',
+};
+const runtimeStatusOptions = Object.entries(runtimeStatusLabels)
+  .map(([value, label]) => ({ value, label }));
+const runtimeStatusLabel = (value: string) => runtimeStatusLabels[value] || value || '未知';
+const runtimeStatusTone = (value: string) => value === 'effective'
+  ? 'success'
+  : ['error', 'exhausted'].includes(value)
+    ? 'danger'
+    : 'warning';
+const percentValue = (value: any) => value === null || value === undefined || value === ''
+  ? '--'
+  : `${Number(value).toFixed(1)}%`;
+const quotaWidth = (value: any) => `${Math.min(100, Math.max(0, Number(value) || 0))}%`;
+const runtimeVelocityWidth = (value: any) => {
+  const maximum = Math.max(
+    Number(runtimeData.value.rate15m || 0),
+    Number(runtimeData.value.rate30m || 0),
+    Number(runtimeData.value.rate60m || 0),
+    0,
+  );
+  return maximum > 0 ? `${Math.max(3, Number(value || 0) / maximum * 100)}%` : '0%';
+};
+const runtimeDecisionTone = computed(() => runtimeData.value.recommendedQuantity > 0
+  ? 'warning'
+  : runtimeData.value.predictiveDataReady === false
+    ? 'muted'
+    : 'good');
+const runtimeDecisionTitle = computed(() => runtimeData.value.recommendedQuantity > 0
+  ? `建议补充 ${runtimeData.value.recommendedQuantity} 个账号`
+  : runtimeData.value.predictiveDataReady === false
+    ? '实时数据不足，预测下单已阻止'
+    : runtimeData.value.status === 'idle'
+      ? '当前没有实际消耗，无需补号'
+      : '当前容量充足，无需补号');
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusOptions = Object.entries({
   approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中',
@@ -592,6 +781,84 @@ function eventDetailEntries(event: any) {
     .map(([key, value]) => ({ key, label: labels[key] || key, value: detailValue(value) }));
 }
 
+function ensureRuntimeRule() {
+  if (smartRules.value.some((rule) => String(rule.id) === runtimeRuleId.value)) return;
+  runtimeRuleId.value = smartRules.value.length ? String(smartRules.value[0].id) : '';
+  runtimePage.value = 1;
+}
+
+async function loadRuntime(fresh = false) {
+  ensureRuntimeRule();
+  if (!runtimeRuleId.value) {
+    runtimeData.value = { accounts: [], page: 1, pageSize: 20, total: 0, pages: 1 };
+    runtimeLoaded.value = true;
+    return;
+  }
+  runtimeLoading.value = true;
+  try {
+    const params = query({
+      ruleId: runtimeRuleId.value,
+      page: String(runtimePage.value),
+      page_size: String(runtimeData.value.pageSize || 20),
+      search: appliedRuntimeFilters.value.search,
+      status: appliedRuntimeFilters.value.status,
+      quota: appliedRuntimeFilters.value.quota,
+      sort_by: runtimeSortBy.value,
+      sort_order: runtimeSortOrder.value,
+      fresh: fresh ? '1' : '',
+    });
+    runtimeData.value = await get(`/replenishment/runtime?${params}`);
+    runtimePage.value = runtimeData.value.page || 1;
+    runtimeLoaded.value = true;
+  } catch (err: any) {
+    error.value = err.message || '实时运行数据读取失败';
+  } finally {
+    runtimeLoading.value = false;
+  }
+}
+
+async function changeRuntimeRule() {
+  runtimePage.value = 1;
+  runtimeLoaded.value = false;
+  await loadRuntime(true);
+}
+
+async function applyRuntimeFilters() {
+  appliedRuntimeFilters.value = { ...runtimeFilters.value };
+  runtimePage.value = 1;
+  await loadRuntime();
+}
+
+async function clearRuntimeFilters() {
+  runtimeFilters.value = emptyRuntimeFilters();
+  await applyRuntimeFilters();
+}
+
+async function toggleRuntimeSort(sortBy: string) {
+  if (runtimeSortBy.value === sortBy) {
+    runtimeSortOrder.value = runtimeSortOrder.value === 'asc' ? 'desc' : 'asc';
+  } else {
+    runtimeSortBy.value = sortBy;
+    runtimeSortOrder.value = ['account_name', 'status'].includes(sortBy) ? 'asc' : 'desc';
+  }
+  runtimePage.value = 1;
+  await loadRuntime();
+}
+
+async function moveRuntimePage(delta: number) {
+  runtimePage.value = Math.max(1, Math.min(runtimeData.value.pages || 1, runtimePage.value + delta));
+  await loadRuntime();
+}
+
+function syncRuntimePolling() {
+  if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
+  runtimeTimer = null;
+  if (activeSection.value !== 'runtime') return;
+  runtimeTimer = window.setInterval(() => {
+    if (!document.hidden && !runtimeLoading.value) loadRuntime();
+  }, 30_000);
+}
+
 async function load() {
   loading.value = true;
   error.value = '';
@@ -638,6 +905,8 @@ async function load() {
   }
   if (eventsLoaded.value || activeSection.value === 'logs') tasks.push(loadEvents());
   await Promise.allSettled(tasks);
+  ensureRuntimeRule();
+  if (activeSection.value === 'runtime') await loadRuntime();
   if (failures.length) error.value = failures[0];
   loading.value = false;
 }
@@ -692,9 +961,10 @@ async function loadRecoveries() {
   }
 }
 
-async function changeSection(section: 'setup' | 'logs' | 'orders' | 'repairs') {
+async function changeSection(section: 'runtime' | 'setup' | 'logs' | 'orders' | 'repairs') {
   activeSection.value = section;
-  if (section === 'orders' && !ordersLoaded.value) await loadOrders();
+  if (section === 'runtime' && !runtimeLoaded.value) await loadRuntime();
+  else if (section === 'orders' && !ordersLoaded.value) await loadOrders();
   else if (section === 'repairs' && !recoveriesLoaded.value) await loadRecoveries();
   else if (section === 'logs' && !eventsLoaded.value) await loadEvents();
 }
@@ -1040,8 +1310,16 @@ async function completeRecoveryManually(recovery: any) {
   }
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  syncRuntimePolling();
+});
+onUnmounted(() => {
+  if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
+});
+watch(activeSection, syncRuntimePolling);
 watch(() => props.refreshToken, () => {
+  runtimePage.value = 1;
   orderPage.value = 1;
   recoveryPage.value = 1;
   load();

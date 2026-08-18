@@ -1,8 +1,8 @@
 import { SupplierCredentialVault } from './supplier-credentials.mjs';
 import {
-  deriveAdaptiveForecastParameters,
-  estimateFiniteQuotaCapacity,
-  forecastHourlyDemand,
+  buildRealtimeUsageSnapshot,
+  deriveRealtimeProtection,
+  estimateRealtimeCapacity,
 } from './replenishment-forecast.mjs';
 
 const ACTIVE_STATUSES = new Set(['ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
@@ -252,6 +252,30 @@ function quotaSnapshot(account, usage) {
   return { short, long };
 }
 
+function quotaRuntimeMetadata(account) {
+  const extra = account?.extra || {};
+  return {
+    observedAt: extra.codex_usage_updated_at || null,
+    shortResetAt: extra.codex_5h_reset_at || null,
+    longResetAt: extra.codex_7d_reset_at || null,
+  };
+}
+
+function accountDisplayName(account) {
+  return String(
+    account?.credentials?.email
+    || account?.email
+    || account?.name
+    || `Sub2API #${account?.id || '--'}`,
+  ).trim();
+}
+
+function latestTimestamp(...values) {
+  const timestamps = values.map((value) => Date.parse(String(value || '')))
+    .filter(Number.isFinite);
+  return timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : null;
+}
+
 function selectedQuota(quota, window) {
   if (window === 'short') return { value: quota.short, window: 'short' };
   if (window === 'long') return { value: quota.long, window: 'long' };
@@ -470,6 +494,8 @@ export class ReplenishmentService {
     this.vault = new SupplierCredentialVault(config.supplierCredentialsKey);
     this.timer = null;
     this.running = false;
+    this.runtimeCache = new Map();
+    this.runtimeInflight = new Map();
   }
 
   start() {
@@ -1382,218 +1408,460 @@ export class ReplenishmentService {
     return snapshot;
   }
 
-  async forecastRuleCapacity(rule, inventorySnapshot) {
+  async buildRealtimeCapacitySnapshot(rule, { force = false } = {}) {
     if (!this.sourceUsageRepository || !this.accountReader) {
-      throw new Error('智能预测所需的 Sub2API 只读数据源未配置');
+      throw new Error('智能补号所需的 Sub2API 只读数据源未配置');
     }
-    const [trackedItems, sourceAccounts, planning] = await Promise.all([
-      this.repository.listTrackedItemsForPool(rule.targetPoolKey),
-      this.accountReader.listAllAccounts({ platform: rule.platform, status: '' }),
-      this.repository.getPoolPlanningStats(rule.targetPoolKey),
-    ]);
-    const poolAccounts = (sourceAccounts || []).filter((account) => accountMatchesRule(account, rule));
-    const trackedByAccountId = new Map(trackedItems
-      .filter((item) => Number.isSafeInteger(Number(item.sub2apiAccountId)))
-      .map((item) => [Number(item.sub2apiAccountId), item]));
-    const inventoryByAccountId = new Map((inventorySnapshot?.accounts || [])
-      .map((account) => [Number(account.sub2apiAccountId), account]));
-    const repairingAccountIds = new Set((inventorySnapshot?.accounts || [])
-      .filter((account) => account.healthStatus === 'repairing')
-      .map((account) => Number(account.sub2apiAccountId)));
-    const accountStates = [];
-    const sourceIds = new Set();
+    const cacheKey = `${rule.id}:${rule.updatedAt || ''}:${rule.targetPoolKey}`;
+    const now = this.now();
+    if (force) this.runtimeCache.delete(cacheKey);
+    const cached = this.runtimeCache.get(cacheKey);
+    if (cached?.expiresAt > now) return cached.value;
+    if (this.runtimeInflight.has(cacheKey)) return this.runtimeInflight.get(cacheKey);
 
-    for (const account of poolAccounts) {
-      const accountId = Number(account?.id);
-      if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
-      sourceIds.add(accountId);
-      const tracked = trackedByAccountId.get(accountId);
-      const inventoryAccount = inventoryByAccountId.get(accountId);
-      const expiresAt = epochSeconds(account?.expires_at ?? account?.expiresAt);
-      const expired = expiresAt !== null && expiresAt * 1000 <= this.now();
-      const schedule = scheduleSnapshot(account, {
-        expired,
-        repairing: repairingAccountIds.has(accountId),
-        status: account?.status || '',
-        platformMatched: true,
-        groupMatched: true,
-        nowMs: this.now(),
+    const load = (async () => {
+      const [trackedItems, sourceAccounts, planning, openRecoveryIds] = await Promise.all([
+        this.repository.listTrackedItemsForPool(rule.targetPoolKey),
+        this.accountReader.listAllAccounts({ platform: rule.platform, status: '' }),
+        this.repository.getPoolPlanningStats(rule.targetPoolKey),
+        this.repository.listOpenRecoveryAccountIdsForPool(rule.targetPoolKey),
+      ]);
+      const poolAccounts = (sourceAccounts || []).filter((account) => accountMatchesRule(account, rule));
+      const trackedByAccountId = new Map();
+      for (const item of trackedItems) {
+        const accountId = Number(item.sub2apiAccountId);
+        if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
+        const current = trackedByAccountId.get(accountId);
+        if (!current || Date.parse(item.capacityStartedAt || 0) > Date.parse(current.capacityStartedAt || 0)) {
+          trackedByAccountId.set(accountId, item);
+        }
+      }
+      const repairingAccountIds = new Set(openRecoveryIds.map(Number));
+      const accountIds = poolAccounts.map((account) => Number(account.id))
+        .filter((value) => Number.isSafeInteger(value) && value > 0);
+      const completedEndMs = Math.floor(now / 300_000) * 300_000;
+      const capacityScopes = poolAccounts.map((account) => {
+        const tracked = trackedByAccountId.get(Number(account.id));
+        return {
+          accountId: Number(account.id),
+          startedAt: latestTimestamp(
+            tracked?.capacityStartedAt,
+            tracked?.createdAt,
+            account?.created_at,
+            account?.createdAt,
+          ) || new Date(now - 7 * 86_400_000).toISOString(),
+        };
       });
-      const liveQuota = quotaSnapshot(account, null).long;
-      const fallbackQuota = inventoryAccount?.quotaLongUsedPercent
-        ?? (tracked?.quotaWindow === 'long' ? tracked.quotaUsedPercent : null);
-      accountStates.push({
-        accountId,
-        quotaUsedPercent: liveQuota ?? fallbackQuota,
-        available: String(account?.status || '').toLowerCase() === 'active'
+      const capacityScopeByAccountId = new Map(capacityScopes
+        .map((entry) => [entry.accountId, entry.startedAt]));
+      const [recentRows, capacityTotals] = await Promise.all([
+        this.sourceUsageRepository.getFiveMinuteAccountStats({
+          start: new Date(completedEndMs - 60 * 60_000),
+          end: new Date(completedEndMs),
+          accountIds,
+        }),
+        this.sourceUsageRepository.getAccountCapacityUsageTotals({
+          accounts: capacityScopes,
+          end: new Date(now),
+        }),
+      ]);
+      const realtimeUsage = buildRealtimeUsageSnapshot(recentRows, { nowMs: now });
+      const usageByAccount = new Map(realtimeUsage.accounts.map((entry) => [entry.accountId, entry]));
+      const totalsByAccount = new Map(capacityTotals.map((entry) => [Number(entry.accountId), entry]));
+      const accountStates = poolAccounts.map((account) => {
+        const accountId = Number(account.id);
+        const tracked = trackedByAccountId.get(accountId);
+        const expiresAt = epochSeconds(account?.expires_at ?? account?.expiresAt);
+        const expired = expiresAt !== null && expiresAt * 1000 <= now;
+        const repairing = repairingAccountIds.has(accountId);
+        const authFailed = textIncludesAuthFailure(account?.error_message, account?.errorMessage);
+        const schedule = scheduleSnapshot(account, {
+          expired,
+          repairing,
+          status: account?.status || '',
+          authFailed,
+          platformMatched: true,
+          groupMatched: true,
+          nowMs: now,
+        });
+        const quota = quotaSnapshot(account, null);
+        const quotaMetadata = quotaRuntimeMetadata(account);
+        const quotaObservedMs = Date.parse(String(quotaMetadata.observedAt || ''));
+        const lastUsageMs = Date.parse(String(totalsByAccount.get(accountId)?.lastUsageAt || ''));
+        const recentlyObserved = Number.isFinite(quotaObservedMs)
+          && now - quotaObservedMs <= 15 * 60_000;
+        const usageAfterObservation = Number.isFinite(lastUsageMs)
+          && (!Number.isFinite(quotaObservedMs) || lastUsageMs > quotaObservedMs + 2 * 60_000);
+        const quotaCurrent = quota.long !== null
+          && Number.isFinite(quotaObservedMs)
+          && (recentlyObserved || !usageAfterObservation);
+        const available = String(account?.status || '').toLowerCase() === 'active'
           && account?.schedulable === true
           && schedule.state === 'schedulable'
           && !expired
-          && !repairingAccountIds.has(accountId),
-        capacityStartedAt: tracked?.capacityStartedAt
-          || tracked?.createdAt || account?.created_at || account?.createdAt || null,
+          && !repairing
+          && !authFailed;
+        return {
+          accountId,
+          accountName: accountDisplayName(account),
+          sourceStatus: account?.status || '',
+          sourceSchedulable: account?.schedulable === true,
+          scheduleState: schedule.state,
+          scheduleReason: schedule.reason,
+          authFailed,
+          repairing,
+          expired,
+          expiresAt,
+          quotaUsedPercent: quota.long,
+          quotaShortUsedPercent: quota.short,
+          quotaCurrent,
+          quotaObservedAt: quotaMetadata.observedAt,
+          quotaResetAt: quotaMetadata.longResetAt,
+          quotaObservationLagging: usageAfterObservation,
+          available,
+          currentConcurrency: Number(account?.current_concurrency || account?.currentConcurrency || 0),
+          rateLimitResetAt: schedule.rateLimitResetAt
+            || account?.rate_limit_reset_at
+            || account?.rateLimitResetAt
+            || null,
+          tempUnschedulableUntil: schedule.tempUnschedulableUntil,
+          tempUnschedulableReason: schedule.tempUnschedulableReason,
+          lastError: account?.error_message || account?.errorMessage || '',
+          capacityStartedAt: capacityScopeByAccountId.get(accountId)
+            || tracked?.capacityStartedAt
+            || tracked?.createdAt
+            || null,
+        };
       });
-    }
-
-    for (const tracked of trackedItems) {
-      const accountId = Number(tracked.sub2apiAccountId);
-      if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
-      sourceIds.add(accountId);
-      if (accountStates.some((entry) => entry.accountId === accountId)) continue;
-      const inventoryAccount = inventoryByAccountId.get(accountId);
-      accountStates.push({
-        accountId,
-        quotaUsedPercent: inventoryAccount?.quotaLongUsedPercent
-          ?? (tracked.quotaWindow === 'long' ? tracked.quotaUsedPercent : null),
-        available: false,
-        capacityStartedAt: tracked.capacityStartedAt || tracked.createdAt || null,
+      const priorCapacity = rule.lastForecastSnapshot?.conservativeAccountCapacity;
+      const capacity = estimateRealtimeCapacity({
+        accountStates,
+        usageTotals: capacityTotals,
+        priorAccountCapacity: priorCapacity,
+        defaultAccountCapacity: rule.forecastDefaultAccountCapacity,
+        minimumSamples: 3,
       });
-    }
-
-    const maximumLookbackHours = 168;
-    const completedEndMs = Math.floor(this.now() / 3_600_000) * 3_600_000;
-    const usageRows = await this.sourceUsageRepository.getHourlyAccountStats({
-      start: new Date(completedEndMs - maximumLookbackHours * 3_600_000),
-      end: new Date(completedEndMs),
-      accountIds: [...sourceIds],
-    });
-    const historicalSuccessRate = planning.historicalSuccessRate === null
-      || planning.historicalSuccessRate === undefined
-      ? 0.8
-      : bounded(planning.historicalSuccessRate, 0.1, 1);
-    const adaptive = deriveAdaptiveForecastParameters(usageRows, {
-      nowMs: this.now(),
-      maximumLookbackHours,
-      leadTimeHoursP50: planning.leadTimeHoursP50,
-      leadTimeHoursP90: planning.leadTimeHoursP90,
-      historicalSuccessRate,
-    });
-    const leadTimeHours = adaptive.leadTimeHoursP90;
-    const coverageHours = adaptive.coverageHours;
-    const horizonHours = Math.max(1, Math.ceil(leadTimeHours + coverageHours));
-    const demand = forecastHourlyDemand(usageRows, {
-      nowMs: this.now(),
-      lookbackHours: adaptive.lookbackHours,
-      horizonHours,
-      safetyFactor: adaptive.safetyFactor,
-      timezone: this.config.timezone,
-    });
-    const capacity = estimateFiniteQuotaCapacity({
-      accountStates,
-      usageRows,
-      minimumSamples: 3,
-    });
-    const accountCapacity = capacity.conservativeAccountCapacity;
-    const pendingAccounts = Number(planning.pendingQuantity || 0);
-    const inFlightCapacity = accountCapacity === null
-      ? 0
-      : pendingAccounts * accountCapacity * historicalSuccessRate;
-    const forecastUsage = Number(demand.forecastUsage || 0);
-    const capacityGap = Math.max(
-      0,
-      forecastUsage - Number(capacity.currentRemainingCapacity || 0) - inFlightCapacity,
-    );
-    const deliveredAccountCapacity = accountCapacity === null
-      ? null
-      : accountCapacity * historicalSuccessRate;
-    const predictedQuantity = deliveredAccountCapacity && capacityGap > 0
-      ? Math.ceil(capacityGap / deliveredAccountCapacity)
-      : 0;
-    const projectedEffectiveAccounts = capacity.effectiveAccounts
-      + Math.floor(pendingAccounts * historicalSuccessRate);
-    const emergencyQuantity = Math.max(
-      0,
-      Number(rule.minAvailableAccounts || 0) - projectedEffectiveAccounts,
-    );
-    const uncappedRecommendedQuantity = Math.max(predictedQuantity, emergencyQuantity);
-    const recommendedQuantity = Math.max(
-      0,
-      Math.min(uncappedRecommendedQuantity, Number(rule.replenishQuantity || 1), 1000),
-    );
-    const insufficient = demand.confidence === 'insufficient' || accountCapacity === null;
-    const status = recommendedQuantity > 0
-      ? emergencyQuantity > predictedQuantity
-        ? 'emergency_replenishment'
-        : 'replenishment_needed'
-      : insufficient
-        ? 'insufficient_data'
-        : 'capacity_healthy';
-    const protectedCapacity = Number(capacity.currentRemainingCapacity || 0) + inFlightCapacity;
-    const protectedHourlyRate = Math.max(
-      Number(demand.recentHourlyRate || 0) * Number(demand.safetyFactor || 1),
-      Number(demand.forecastUsage || 0) / Math.max(1, horizonHours),
-    );
-    const runwayHours = protectedHourlyRate > 0
-      ? protectedCapacity / protectedHourlyRate
-      : null;
-    const nextCheckSeconds = recommendedQuantity > 0
-      ? 300
-      : runwayHours !== null && runwayHours <= leadTimeHours + 6
-        ? 600
-        : runwayHours !== null && runwayHours <= leadTimeHours + coverageHours
-          ? 900
-          : insufficient
-            ? 900
+      const zeroUsage = {
+        usage15m: 0, usage30m: 0, usage60m: 0,
+        rate15m: 0, rate30m: 0, rate60m: 0,
+        currentHourlyRate: 0, volatility: 0, activeBuckets: 0,
+      };
+      const accounts = capacity.accounts.map((account) => {
+        const usage = usageByAccount.get(account.accountId) || zeroUsage;
+        let runtimeStatus = 'unavailable';
+        let runtimeReason = account.scheduleReason || '账号当前不可调度';
+        if (account.repairing) {
+          runtimeStatus = 'repairing';
+          runtimeReason = '账号正在修复，成功导入前不计入容量';
+        } else if (account.authFailed || account.scheduleState === 'authentication_failed') {
+          runtimeStatus = 'error';
+          runtimeReason = account.lastError || account.scheduleReason || '账号凭据或运行状态异常';
+        } else if (account.quotaCurrent && account.quotaUsedPercent >= 100) {
+          runtimeStatus = 'exhausted';
+          runtimeReason = '7 天额度已达到 100%';
+        } else if (account.scheduleState === 'rate_limited') {
+          runtimeStatus = 'rate_limited';
+          runtimeReason = account.scheduleReason || '账号正在限流';
+        } else if (!account.available) {
+          runtimeStatus = 'unavailable';
+        } else if (account.quotaUsedPercent === null) {
+          runtimeStatus = 'quota_unknown';
+          runtimeReason = 'Sub2API 未提供 7 天额度快照';
+        } else if (!account.quotaCurrent) {
+          runtimeStatus = 'stale_quota';
+          runtimeReason = '额度快照落后于最近用量，已禁止预测下单';
+        } else if (account.effective) {
+          runtimeStatus = 'effective';
+          runtimeReason = '';
+        }
+        const accountRunwayHours = Number(usage.currentHourlyRate) > 0
+          && account.estimatedRemainingCapacity !== null
+          ? Number(account.estimatedRemainingCapacity) / Number(usage.currentHourlyRate)
+          : null;
+        return {
+          accountId: account.accountId,
+          accountName: account.accountName,
+          runtimeStatus,
+          runtimeReason,
+          sourceStatus: account.sourceStatus,
+          schedulable: account.sourceSchedulable,
+          scheduleState: account.scheduleState,
+          repairing: account.repairing,
+          expired: account.expired,
+          expiresAt: account.expiresAt,
+          quotaUsedPercent: account.quotaUsedPercent,
+          quotaRemainingPercent: account.quotaUsedPercent === null
+            ? null
+            : rounded(Math.max(0, 100 - account.quotaUsedPercent), 2),
+          quotaShortUsedPercent: account.quotaShortUsedPercent,
+          quotaCurrent: account.quotaCurrent,
+          quotaObservedAt: account.quotaObservedAt,
+          quotaResetAt: account.quotaResetAt,
+          rateLimitResetAt: account.rateLimitResetAt,
+          tempUnschedulableUntil: account.tempUnschedulableUntil,
+          tempUnschedulableReason: account.tempUnschedulableReason,
+          currentConcurrency: account.currentConcurrency,
+          estimatedFullCapacity: account.estimatedFullCapacity,
+          estimatedRemainingCapacity: account.estimatedRemainingCapacity,
+          capacityStartedAt: account.capacityStartedAt,
+          observedCapacityUsage: rounded(account.observedUsage),
+          lastUsageAt: account.lastUsageAt,
+          usage15m: usage.usage15m,
+          usage30m: usage.usage30m,
+          usage60m: usage.usage60m,
+          rate15m: usage.rate15m,
+          rate30m: usage.rate30m,
+          rate60m: usage.rate60m,
+          currentHourlyRate: usage.currentHourlyRate,
+          runwayHours: rounded(accountRunwayHours, 3),
+          lastError: account.lastError,
+        };
+      });
+      const counts = accounts.reduce((result, account) => {
+        result[account.runtimeStatus] = (result[account.runtimeStatus] || 0) + 1;
+        return result;
+      }, {});
+      const emergencyAvailableAccounts = accounts.filter((account) => (
+        ['effective', 'quota_unknown', 'stale_quota'].includes(account.runtimeStatus)
+      )).length;
+      const unknownOrStaleAccounts = Number(counts.quota_unknown || 0) + Number(counts.stale_quota || 0);
+      const historicalSuccessRate = planning.historicalSuccessRate === null
+        || planning.historicalSuccessRate === undefined
+        ? 0.8
+        : bounded(planning.historicalSuccessRate, 0.1, 1);
+      const checkIntervalSeconds = Math.max(
+        300,
+        Number(rule.lastForecastSnapshot?.nextCheckSeconds || rule.scheduleIntervalSeconds || 600),
+      );
+      const protection = deriveRealtimeProtection({
+        volatility: realtimeUsage.pool.volatility,
+        leadTimeHoursP50: planning.leadTimeHoursP50,
+        leadTimeHoursP90: planning.leadTimeHoursP90,
+        historicalSuccessRate,
+        checkIntervalSeconds,
+      });
+      const accountCapacity = capacity.conservativeAccountCapacity;
+      const pendingAccounts = Number(planning.pendingQuantity || 0);
+      const deliveredAccountCapacity = accountCapacity === null
+        ? null
+        : accountCapacity * historicalSuccessRate;
+      const inFlightCapacity = deliveredAccountCapacity === null
+        ? 0
+        : pendingAccounts * deliveredAccountCapacity;
+      const currentHourlyRate = Number(realtimeUsage.pool.currentHourlyRate || 0);
+      const requiredCapacity = currentHourlyRate
+        * Number(protection.protectionHours || 0)
+        * Number(protection.safetyFactor || 1);
+      const capacityGap = Math.max(
+        0,
+        requiredCapacity - Number(capacity.currentRemainingCapacity || 0) - inFlightCapacity,
+      );
+      const predictiveDataReady = poolAccounts.length > 0
+        && accountCapacity !== null
+        && capacity.capacityUnknownAccounts === 0
+        && unknownOrStaleAccounts === 0;
+      const predictedQuantity = predictiveDataReady
+        && deliveredAccountCapacity
+        && capacityGap > 0
+        ? Math.ceil(capacityGap / deliveredAccountCapacity)
+        : 0;
+      const projectedAvailableAccounts = emergencyAvailableAccounts
+        + Math.floor(pendingAccounts * historicalSuccessRate);
+      const emergencyQuantity = Math.max(
+        0,
+        Number(rule.minAvailableAccounts || 0) - projectedAvailableAccounts,
+      );
+      const uncappedRecommendedQuantity = Math.max(predictedQuantity, emergencyQuantity);
+      const recommendedQuantity = Math.max(
+        0,
+        Math.min(uncappedRecommendedQuantity, Number(rule.replenishQuantity || 1), 1000),
+      );
+      const runwayHours = currentHourlyRate > 0
+        ? Number(capacity.currentRemainingCapacity || 0) / currentHourlyRate
+        : null;
+      const protectedRunwayHours = currentHourlyRate > 0
+        ? (Number(capacity.currentRemainingCapacity || 0) + inFlightCapacity) / currentHourlyRate
+        : null;
+      const status = recommendedQuantity > 0
+        ? emergencyQuantity > predictedQuantity
+          ? 'emergency_replenishment'
+          : 'replenishment_needed'
+        : !predictiveDataReady
+          ? 'insufficient_data'
+          : currentHourlyRate <= 0
+            ? 'idle'
+            : 'capacity_healthy';
+      const nextCheckSeconds = recommendedQuantity > 0 || !predictiveDataReady
+        ? 300
+        : runwayHours !== null && runwayHours <= Number(protection.protectionHours || 0) + 2
+          ? 300
+          : runwayHours !== null && runwayHours <= Number(protection.protectionHours || 0) * 2
+            ? 600
             : 1800;
-    const lookbackReasons = {
-      recent_shift: '近期用量明显变化，采用24小时数据',
-      trend: '近期用量存在趋势，采用72小时数据',
-      sparse: '用量样本稀疏，采用168小时数据',
-      insufficient: '暂无有效用量，保留168小时观察窗口',
-      stable: '用量稳定，采用168小时数据',
+      const decisionReasons = [
+        currentHourlyRate <= 0
+          ? '最近 60 分钟没有实际消耗，最低有效账号数满足时不补号'
+          : `当前速度 ${rounded(currentHourlyRate, 2)}/小时，按最近完整 5 分钟桶动态计算`,
+        `当前剩余容量 ${rounded(capacity.currentRemainingCapacity, 2)}，在途折算容量 ${rounded(inFlightCapacity, 2)}`,
+        `采购 P90 ${protection.leadTimeHoursP90} 小时 + 动态缓冲 ${protection.bufferHours} 小时，保护窗口 ${protection.protectionHours} 小时`,
+        !predictiveDataReady
+          ? `有 ${unknownOrStaleAccounts} 个额度未知或滞后的账号，预测下单已阻止，仅保留最低账号数兜底`
+          : capacityGap > 0
+            ? `保护窗口容量缺口 ${rounded(capacityGap, 2)}，建议补 ${recommendedQuantity} 个账号`
+            : `当前剩余额度和在途容量足够覆盖保护窗口，无需补号`,
+      ];
+      return {
+        capturedAt: new Date(now).toISOString(),
+        completedThrough: realtimeUsage.completedThrough,
+        status,
+        parameterMode: protection.parameterMode,
+        dataSource: 'sub2api_readonly',
+        rawUsageSynchronized: false,
+        lookbackHours: 1,
+        horizonHours: protection.protectionHours,
+        leadTimeHours: protection.leadTimeHoursP90,
+        leadTimeHoursP50: protection.leadTimeHoursP50,
+        leadTimeHoursP90: protection.leadTimeHoursP90,
+        coverageHours: protection.bufferHours,
+        bufferHours: protection.bufferHours,
+        protectionHours: protection.protectionHours,
+        safetyFactor: protection.safetyFactor,
+        volatility: realtimeUsage.pool.volatility,
+        observedUsage15m: realtimeUsage.pool.usage15m,
+        observedUsage30m: realtimeUsage.pool.usage30m,
+        observedUsage1h: realtimeUsage.pool.usage60m,
+        observedUsage6h: null,
+        observedUsage24h: null,
+        rate15m: realtimeUsage.pool.rate15m,
+        rate30m: realtimeUsage.pool.rate30m,
+        rate60m: realtimeUsage.pool.rate60m,
+        recentHourlyRate: realtimeUsage.pool.currentHourlyRate,
+        currentHourlyRate: realtimeUsage.pool.currentHourlyRate,
+        forecastUsage: rounded(requiredCapacity),
+        requiredCapacity: rounded(requiredCapacity),
+        currentRemainingCapacity: capacity.currentRemainingCapacity,
+        inFlightCapacity: rounded(inFlightCapacity),
+        capacityGap: rounded(capacityGap),
+        conservativeAccountCapacity: accountCapacity,
+        expectedDeliveredAccountCapacity: rounded(deliveredAccountCapacity),
+        capacitySampleCount: capacity.sampleCount,
+        capacityConfidence: capacity.confidence,
+        demandConfidence: currentHourlyRate > 0 ? 'realtime' : 'idle',
+        predictiveDataReady,
+        effectiveAccounts: Number(counts.effective || 0),
+        emergencyAvailableAccounts,
+        exhaustedAccounts: Number(counts.exhausted || 0),
+        limitedAccounts: Number(counts.rate_limited || 0),
+        errorAccounts: Number(counts.error || 0),
+        unavailableAccounts: Number(counts.unavailable || 0),
+        repairingAccounts: Number(counts.repairing || 0),
+        staleQuotaAccounts: Number(counts.stale_quota || 0),
+        unknownQuotaAccounts: Number(counts.quota_unknown || 0),
+        pendingAccounts,
+        pendingSuccessRate: rounded(historicalSuccessRate, 4),
+        historicalOrderCount: Number(planning.historicalOrderCount || 0),
+        emergencyQuantity,
+        predictedQuantity,
+        uncappedRecommendedQuantity,
+        recommendedQuantity,
+        runwayHours: rounded(runwayHours, 3),
+        protectedRunwayHours: rounded(protectedRunwayHours, 3),
+        nextCheckSeconds,
+        decisionReasons,
+        sourceAccountCount: poolAccounts.length,
+        trackedAccountCount: trackedItems.length,
+        accounts,
+      };
+    })().then((value) => {
+      this.runtimeCache.set(cacheKey, { value, expiresAt: this.now() + 25_000 });
+      while (this.runtimeCache.size > 20) this.runtimeCache.delete(this.runtimeCache.keys().next().value);
+      return value;
+    }).finally(() => this.runtimeInflight.delete(cacheKey));
+
+    this.runtimeInflight.set(cacheKey, load);
+    return load;
+  }
+
+  async runtimePanel(rule, {
+    force = false,
+    page = 1,
+    pageSize = 20,
+    search = '',
+    status = '',
+    quota = '',
+    sortBy = 'quota_used_percent',
+    sortOrder = 'desc',
+  } = {}) {
+    const snapshot = await this.buildRealtimeCapacitySnapshot(rule, { force });
+    const query = String(search || '').trim().toLowerCase();
+    const filtered = snapshot.accounts.filter((account) => {
+      const searchMatched = !query || [
+        account.accountId, account.accountName, account.sourceStatus,
+        account.runtimeStatus, account.lastError,
+      ].some((value) => String(value ?? '').toLowerCase().includes(query));
+      const statusMatched = !status || account.runtimeStatus === status;
+      const used = Number(account.quotaUsedPercent);
+      const quotaMatched = !quota
+        || (quota === 'under_50' && Number.isFinite(used) && used < 50)
+        || (quota === '50_80' && Number.isFinite(used) && used >= 50 && used < 80)
+        || (quota === '80_100' && Number.isFinite(used) && used >= 80 && used < 100)
+        || (quota === 'exhausted' && Number.isFinite(used) && used >= 100)
+        || (quota === 'unknown' && !Number.isFinite(used));
+      return searchMatched && statusMatched && quotaMatched;
+    });
+    const sortKeys = {
+      account_id: 'accountId',
+      account_name: 'accountName',
+      status: 'runtimeStatus',
+      quota_used_percent: 'quotaUsedPercent',
+      remaining_capacity: 'estimatedRemainingCapacity',
+      current_rate: 'currentHourlyRate',
+      runway_hours: 'runwayHours',
+      quota_observed_at: 'quotaObservedAt',
     };
-    const decisionReasons = [
-      lookbackReasons[adaptive.lookbackReason] || lookbackReasons.stable,
-      `波动系数 ${adaptive.volatility}，安全余量 ${rounded((adaptive.safetyFactor - 1) * 100, 1)}%`,
-      `采购提前期 P50 ${adaptive.leadTimeHoursP50} 小时 / P90 ${adaptive.leadTimeHoursP90} 小时`,
-      runwayHours === null
-        ? `每 ${nextCheckSeconds / 60} 分钟重新评估`
-        : `库存预计续航 ${rounded(runwayHours, 1)} 小时`,
-    ];
-    const snapshot = {
-      capturedAt: new Date(this.now()).toISOString(),
-      status,
-      parameterMode: adaptive.parameterMode,
-      lookbackHours: demand.lookbackHours,
-      horizonHours: demand.horizonHours,
-      leadTimeHours: rounded(leadTimeHours, 3),
-      leadTimeHoursP50: adaptive.leadTimeHoursP50,
-      leadTimeHoursP90: adaptive.leadTimeHoursP90,
-      coverageHours,
-      safetyFactor: demand.safetyFactor,
-      volatility: adaptive.volatility,
-      recentDemandChange: adaptive.recentDemandChange,
-      observedUsage1h: demand.observedUsage1h,
-      observedUsage6h: demand.observedUsage6h,
-      observedUsage24h: demand.observedUsage24h,
-      recentHourlyRate: demand.recentHourlyRate,
-      trendFactor: demand.trendFactor,
-      forecastUsage: demand.forecastUsage,
-      currentRemainingCapacity: capacity.currentRemainingCapacity,
-      inFlightCapacity: rounded(inFlightCapacity),
-      capacityGap: rounded(capacityGap),
-      conservativeAccountCapacity: accountCapacity,
-      capacitySampleCount: capacity.sampleCount,
-      capacityConfidence: capacity.confidence,
-      demandConfidence: demand.confidence,
-      effectiveAccounts: capacity.effectiveAccounts,
-      exhaustedAccounts: capacity.exhaustedAccounts,
-      unknownQuotaAccounts: capacity.unknownQuotaAccounts,
-      pendingAccounts,
-      pendingSuccessRate: rounded(historicalSuccessRate, 4),
-      historicalOrderCount: Number(planning.historicalOrderCount || 0),
-      emergencyQuantity,
-      predictedQuantity,
-      uncappedRecommendedQuantity,
-      recommendedQuantity,
-      runwayHours: rounded(runwayHours, 3),
-      nextCheckSeconds,
-      decisionReasons,
-      sourceAccountCount: poolAccounts.length,
-      trackedAccountCount: trackedItems.length,
+    const selectedSortKey = sortKeys[sortBy] || sortKeys.quota_used_percent;
+    const direction = sortOrder === 'asc' ? 1 : -1;
+    filtered.sort((left, right) => {
+      const leftValue = left[selectedSortKey];
+      const rightValue = right[selectedSortKey];
+      if (leftValue === null || leftValue === undefined) return 1;
+      if (rightValue === null || rightValue === undefined) return -1;
+      const leftNumber = Number(leftValue);
+      const rightNumber = Number(rightValue);
+      const result = Number.isFinite(leftNumber) && Number.isFinite(rightNumber)
+        ? leftNumber - rightNumber
+        : String(leftValue).localeCompare(String(rightValue), 'zh-CN');
+      return result * direction || Number(left.accountId) - Number(right.accountId);
+    });
+    const normalizedPageSize = Math.min(100, Math.max(10, Number(pageSize) || 20));
+    const pages = Math.max(1, Math.ceil(filtered.length / normalizedPageSize));
+    const normalizedPage = Math.min(pages, Math.max(1, Number(page) || 1));
+    const offset = (normalizedPage - 1) * normalizedPageSize;
+    const { accounts: _accounts, ...summary } = snapshot;
+    return {
+      ...summary,
+      rule: {
+        id: rule.id,
+        name: rule.name,
+        product: rule.product,
+        platform: rule.platform,
+        targetGroupIds: rule.targetGroupIds,
+        minAvailableAccounts: rule.minAvailableAccounts,
+        maxPurchaseQuantity: rule.replenishQuantity,
+      },
+      accounts: filtered.slice(offset, offset + normalizedPageSize),
+      page: normalizedPage,
+      pageSize: normalizedPageSize,
+      total: filtered.length,
+      pages,
     };
+  }
+
+  async forecastRuleCapacity(rule) {
+    const liveSnapshot = await this.buildRealtimeCapacitySnapshot(rule, { force: true });
+    const { accounts: _accounts, ...snapshot } = liveSnapshot;
     await this.repository.saveForecastSnapshot(rule.id, snapshot);
-    return { snapshot, hasActiveOrder: Boolean(planning.hasActiveOrder) };
+    return { snapshot, hasActiveOrder: Boolean(await this.repository.hasActiveOrder(rule.id)) };
   }
 
   async createOrderForRule(rule, {
@@ -1629,13 +1897,13 @@ export class ReplenishmentService {
       const inventoryStrategy = triggerStrategy === 'inventory_threshold';
       const smartStrategy = triggerStrategy === 'smart_forecast';
       const dynamicStrategy = inventoryStrategy || smartStrategy;
-      const snapshot = dynamicStrategy ? await this.inspectRuleInventory(rule) : null;
+      const snapshot = inventoryStrategy ? await this.inspectRuleInventory(rule) : null;
       let smartForecast = null;
       let smartForecastError = '';
       let smartHasActiveOrder = false;
       if (smartStrategy) {
         try {
-          const result = await this.forecastRuleCapacity(rule, snapshot);
+          const result = await this.forecastRuleCapacity(rule);
           smartForecast = result.snapshot;
           smartHasActiveOrder = result.hasActiveOrder;
         } catch (error) {
@@ -1643,10 +1911,8 @@ export class ReplenishmentService {
           smartForecast = {
             capturedAt: new Date(this.now()).toISOString(),
             status: 'read_failed',
-            parameterMode: 'adaptive',
+            parameterMode: 'realtime_adaptive',
             recommendedQuantity: 0,
-            effectiveAccounts: Number(snapshot?.effectiveAccounts || 0),
-            pendingAccounts: Number(snapshot?.pendingAccounts || 0),
             nextCheckSeconds: 300,
             error: smartForecastError,
           };
@@ -1743,44 +2009,24 @@ export class ReplenishmentService {
           };
         }
         if (smartForecastError) {
-          const effectiveAccounts = Number(snapshot?.effectiveAccounts || 0);
-          const pendingAccounts = Number(snapshot?.pendingAccounts || 0);
-          const projectedInventory = effectiveAccounts + pendingAccounts;
-          const emergencyQuantity = Math.max(
-            0,
-            Number(rule.minAvailableAccounts || 0) - projectedInventory,
-          );
-          if (!emergencyQuantity) {
-            await recordDecision('forecast_insufficient', '智能预测数据读取失败，当前库存未触发紧急兜底，本轮不下单', {
-              reason: 'forecast_read_failed',
-              error: smartForecastError,
-              forecast: smartForecast,
-              inventory: snapshot,
-            });
-            return {
-              status: 'forecast_unavailable',
-              forecast: smartForecast,
-              inventory: snapshot,
-            };
-          }
-          quantity = Math.max(1, Math.min(emergencyQuantity, Number(rule.replenishQuantity || 1), 1000));
-          smartForecast = {
-            ...smartForecast,
-            status: 'emergency_fallback',
-            emergencyQuantity,
-            recommendedQuantity: quantity,
-            nextCheckSeconds: 300,
-          };
-          await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
-            error: `智能预测读取失败，已按最低库存兜底：${smartForecastError}`,
+          await recordDecision('forecast_insufficient', 'Sub2API 实时数据读取失败，本轮禁止预测下单并等待下次检查', {
+            reason: 'forecast_read_failed',
+            error: smartForecastError,
+            forecast: smartForecast,
           });
+          return {
+            status: 'forecast_unavailable',
+            forecast: smartForecast,
+          };
         } else {
           quantity = Number(smartForecast?.recommendedQuantity || 0);
           if (quantity <= 0) {
             const insufficient = smartForecast?.status === 'insufficient_data';
             const message = insufficient
-              ? '智能预测样本不足且未触发最低库存兜底，本轮不下单'
-              : `智能预测完成：未来 ${smartForecast.horizonHours} 小时需求 ${smartForecast.forecastUsage || 0}，当前及在途容量可覆盖，无需补号`;
+              ? '实时额度或容量数据不足，预测下单已阻止且最低账号数未触发兜底'
+              : smartForecast?.status === 'idle'
+                ? '最近 60 分钟没有实际消耗，当前最低有效账号数满足，无需补号'
+                : `实时预测完成：保护窗口 ${smartForecast.protectionHours || smartForecast.horizonHours} 小时需要容量 ${smartForecast.requiredCapacity || 0}，当前及在途容量可覆盖，无需补号`;
             await recordDecision(insufficient ? 'forecast_insufficient' : 'forecast_healthy', message, {
               reason: insufficient ? 'forecast_samples_insufficient' : 'forecast_capacity_healthy',
               forecast: smartForecast,
@@ -1850,7 +2096,7 @@ export class ReplenishmentService {
       }
       if (rule.mode === 'observe') {
         const message = smartStrategy
-          ? `观察模式：未来 ${smartForecast.horizonHours || 0} 小时预测用量 ${smartForecast.forecastUsage || 0}，容量缺口 ${smartForecast.capacityGap || 0}，建议补充 ${quantity} 个账号，未创建订单`
+          ? `观察模式：实时速度 ${smartForecast.currentHourlyRate || 0}/小时，保护窗口 ${smartForecast.protectionHours || 0} 小时需要容量 ${smartForecast.requiredCapacity || 0}，容量缺口 ${smartForecast.capacityGap || 0}，建议补充 ${quantity} 个账号，未创建订单`
           : inventoryStrategy
             ? `观察模式：有效 ${snapshot.effectiveAccounts}、进行中订单待补 ${snapshot.pendingAccounts}、修复等待 ${snapshot.graceRepairingAccounts}，投影库存 ${snapshot.effectiveAccounts + snapshot.graceRepairingAccounts + snapshot.pendingAccounts}，计划补充 ${quantity} 个账号，未创建订单`
             : `观察模式：建议购买 ${quantity} 个账号，未创建订单`;

@@ -238,4 +238,140 @@ export class SourceUsageRepository {
     this.inflight.set(key, load);
     return load;
   }
+
+  async getFiveMinuteAccountStats({ start, end, accountIds = null }) {
+    const ids = accountIds?.length
+      ? [...new Set(accountIds.map(Number)
+        .filter((value) => Number.isSafeInteger(value) && value > 0))]
+      : null;
+    if (!ids?.length) return [];
+    const key = `account-5m:${new Date(start).toISOString()}:${new Date(end).toISOString()}:${ids
+      .sort((left, right) => left - right).join(',')}`;
+    const now = Date.now();
+    const cached = this.cache.get(key);
+    if (cached?.expiresAt > now) return cached.value;
+    if (this.inflight.has(key)) return this.inflight.get(key);
+
+    const load = (async () => {
+      const client = await this.pool.connect();
+      let result;
+      try {
+        await client.query('BEGIN TRANSACTION READ ONLY');
+        result = await client.query(`
+          SELECT
+            COALESCE(ul.account_id,0)::bigint AS account_id,
+            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM ul.created_at) / 300) * 300) AS bucket,
+            COUNT(*)::bigint AS requests,
+            COALESCE(SUM(
+              COALESCE(ul.account_stats_cost,ul.total_cost)
+              * COALESCE(ul.account_rate_multiplier,1)
+            ),0) AS usage
+          FROM ${this.schema}.usage_logs ul
+          WHERE ul.created_at >= $1 AND ul.created_at < $2
+            AND ul.account_id=ANY($3::bigint[])
+          GROUP BY
+            COALESCE(ul.account_id,0),
+            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM ul.created_at) / 300) * 300)
+          ORDER BY bucket,account_id
+        `, [start, end, ids]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+      const value = result.rows.map((row) => ({
+        accountId: number(row.account_id),
+        bucket: row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket || ''),
+        requests: number(row.requests),
+        usage: number(row.usage),
+      }));
+      // Completed five-minute buckets are immutable. Keep them until the
+      // rolling window advances instead of querying the same range every poll.
+      this.cache.set(key, { value, expiresAt: Date.now() + 10 * 60_000 });
+      this.pruneCache();
+      return value;
+    })().finally(() => this.inflight.delete(key));
+
+    this.inflight.set(key, load);
+    return load;
+  }
+
+  async getAccountCapacityUsageTotals({ accounts = [], end = new Date() } = {}) {
+    const normalized = accounts
+      .map((entry) => ({
+        accountId: Number(entry?.accountId),
+        startedAt: new Date(entry?.startedAt || 0),
+      }))
+      .filter((entry) => Number.isSafeInteger(entry.accountId) && entry.accountId > 0
+        && Number.isFinite(entry.startedAt.getTime()));
+    if (!normalized.length) return [];
+    const unique = [...new Map(normalized.map((entry) => [entry.accountId, entry])).values()]
+      .sort((left, right) => left.accountId - right.accountId);
+    const key = `account-capacity-total:${unique
+      .map((entry) => `${entry.accountId}:${entry.startedAt.toISOString()}`).join(',')}`;
+    const now = Date.now();
+    const cached = this.cache.get(key);
+    if (cached?.expiresAt > now) return cached.value;
+    if (this.inflight.has(key)) return this.inflight.get(key);
+
+    const load = (async () => {
+      const accountIds = unique.map((entry) => entry.accountId);
+      const startedAt = unique.map((entry) => entry.startedAt.toISOString());
+      const client = await this.pool.connect();
+      let result;
+      try {
+        await client.query('BEGIN TRANSACTION READ ONLY');
+        result = await client.query(`
+          WITH scope AS (
+            SELECT *
+            FROM UNNEST($1::bigint[],$2::timestamptz[]) AS selected(account_id,started_at)
+          )
+          SELECT
+            scope.account_id,
+            COALESCE(totals.usage,0) AS usage,
+            COALESCE(totals.requests,0)::bigint AS requests,
+            totals.last_usage_at
+          FROM scope
+          LEFT JOIN LATERAL (
+            SELECT
+              COALESCE(SUM(
+                COALESCE(ul.account_stats_cost,ul.total_cost)
+                * COALESCE(ul.account_rate_multiplier,1)
+              ),0) AS usage,
+              COUNT(*)::bigint AS requests,
+              MAX(ul.created_at) AS last_usage_at
+            FROM ${this.schema}.usage_logs ul
+            WHERE ul.account_id=scope.account_id
+              AND ul.created_at>=scope.started_at
+              AND ul.created_at<$3
+          ) totals ON TRUE
+          ORDER BY scope.account_id
+        `, [accountIds, startedAt, end]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+      const value = result.rows.map((row) => ({
+        accountId: number(row.account_id),
+        usage: number(row.usage),
+        requests: number(row.requests),
+        lastUsageAt: row.last_usage_at instanceof Date
+          ? row.last_usage_at.toISOString()
+          : row.last_usage_at || null,
+      }));
+      // Full-capacity calibration changes slowly; a five-minute cache keeps the
+      // read-only source database load bounded while recent velocity stays live.
+      this.cache.set(key, { value, expiresAt: Date.now() + 5 * 60_000 });
+      this.pruneCache();
+      return value;
+    })().finally(() => this.inflight.delete(key));
+
+    this.inflight.set(key, load);
+    return load;
+  }
 }

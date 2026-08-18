@@ -329,3 +329,211 @@ export function estimateFiniteQuotaCapacity({
     evaluatedAccounts: estimates.length,
   };
 }
+
+function sum(values) {
+  return values.reduce((total, value) => total + finite(value), 0);
+}
+
+function realtimeSeriesSummary(series, bucketMinutes) {
+  const bucketRateFactor = 60 / bucketMinutes;
+  const usage15m = sum(series.slice(-Math.ceil(15 / bucketMinutes)));
+  const usage30m = sum(series.slice(-Math.ceil(30 / bucketMinutes)));
+  const usage60m = sum(series);
+  let ewma = finite(series[0]);
+  const alpha = 0.35;
+  for (const value of series.slice(1)) {
+    ewma = alpha * finite(value) + (1 - alpha) * ewma;
+  }
+  const mean = average(series);
+  const volatility = mean > 0
+    ? bounded(standardDeviation(series) / mean, 0, 3)
+    : 0;
+  return {
+    usage15m: rounded(usage15m),
+    usage30m: rounded(usage30m),
+    usage60m: rounded(usage60m),
+    rate15m: rounded(usage15m * 4),
+    rate30m: rounded(usage30m * 2),
+    rate60m: rounded(usage60m),
+    currentHourlyRate: rounded(Math.max(0, ewma * bucketRateFactor)),
+    volatility: rounded(volatility, 4),
+    activeBuckets: series.filter((value) => value > 0).length,
+  };
+}
+
+export function buildRealtimeUsageSnapshot(rows, {
+  nowMs = Date.now(),
+  bucketMinutes = 5,
+  windowMinutes = 60,
+} = {}) {
+  const normalizedBucketMinutes = Math.max(1, Math.floor(finite(bucketMinutes, 5)));
+  const normalizedWindowMinutes = Math.max(
+    normalizedBucketMinutes,
+    Math.floor(finite(windowMinutes, 60) / normalizedBucketMinutes) * normalizedBucketMinutes,
+  );
+  const bucketMs = normalizedBucketMinutes * 60_000;
+  const bucketCount = normalizedWindowMinutes / normalizedBucketMinutes;
+  const completedEndMs = Math.floor(nowMs / bucketMs) * bucketMs;
+  const startMs = completedEndMs - normalizedWindowMinutes * 60_000;
+  const poolSeries = Array.from({ length: bucketCount }, () => 0);
+  const seriesByAccount = new Map();
+
+  for (const row of rows || []) {
+    const bucketAt = Date.parse(row.bucket);
+    const accountId = Number(row.accountId);
+    if (!Number.isFinite(bucketAt) || bucketAt < startMs || bucketAt >= completedEndMs
+      || !Number.isSafeInteger(accountId) || accountId <= 0) continue;
+    const index = Math.floor((bucketAt - startMs) / bucketMs);
+    if (index < 0 || index >= bucketCount) continue;
+    const usage = Math.max(0, finite(row.usage ?? row.cost));
+    poolSeries[index] += usage;
+    if (!seriesByAccount.has(accountId)) {
+      seriesByAccount.set(accountId, Array.from({ length: bucketCount }, () => 0));
+    }
+    seriesByAccount.get(accountId)[index] += usage;
+  }
+
+  return {
+    bucketMinutes: normalizedBucketMinutes,
+    windowMinutes: normalizedWindowMinutes,
+    windowStartedAt: new Date(startMs).toISOString(),
+    completedThrough: new Date(completedEndMs).toISOString(),
+    pool: realtimeSeriesSummary(poolSeries, normalizedBucketMinutes),
+    accounts: [...seriesByAccount.entries()].map(([accountId, series]) => ({
+      accountId,
+      ...realtimeSeriesSummary(series, normalizedBucketMinutes),
+    })),
+  };
+}
+
+export function estimateRealtimeCapacity({
+  accountStates = [],
+  usageTotals = [],
+  priorAccountCapacity = null,
+  defaultAccountCapacity = null,
+  minimumSamples = 3,
+} = {}) {
+  const totalsByAccount = new Map((usageTotals || []).map((entry) => [
+    Number(entry.accountId),
+    {
+      usage: Math.max(0, finite(entry.usage)),
+      requests: Math.max(0, finite(entry.requests)),
+      lastUsageAt: entry.lastUsageAt || null,
+    },
+  ]));
+  const preliminary = accountStates.map((account) => {
+    const accountId = Number(account.accountId);
+    const used = Number(account.quotaUsedPercent);
+    const usedPercent = Number.isFinite(used) ? bounded(used, 0, 100) : null;
+    const totals = totalsByAccount.get(accountId) || { usage: 0, requests: 0, lastUsageAt: null };
+    const estimatedCapacity = usedPercent !== null && usedPercent >= 5 && totals.usage > 0
+      ? totals.usage / (usedPercent / 100)
+      : null;
+    const validSample = estimatedCapacity !== null
+      && usedPercent >= 10
+      && Boolean(account.quotaCurrent);
+    return {
+      ...account,
+      accountId,
+      quotaUsedPercent: usedPercent,
+      observedUsage: totals.usage,
+      observedRequests: totals.requests,
+      lastUsageAt: totals.lastUsageAt,
+      ownEstimatedCapacity: estimatedCapacity,
+      validSample,
+    };
+  });
+  const samples = preliminary
+    .filter((entry) => entry.validSample)
+    .map((entry) => entry.ownEstimatedCapacity);
+  const prior = Number(priorAccountCapacity);
+  const configured = Number(defaultAccountCapacity);
+  const conservativeAccountCapacity = percentile(samples, 0.25)
+    ?? (Number.isFinite(prior) && prior > 0 ? prior : null)
+    ?? (Number.isFinite(configured) && configured > 0 ? configured : null);
+  let currentRemainingCapacity = 0;
+  let effectiveAccounts = 0;
+  let capacityKnownAccounts = 0;
+  let capacityUnknownAccounts = 0;
+
+  const accounts = preliminary.map((entry) => {
+    const effective = Boolean(entry.available)
+      && Boolean(entry.quotaCurrent)
+      && entry.quotaUsedPercent !== null
+      && entry.quotaUsedPercent < 100;
+    const fullCapacity = entry.ownEstimatedCapacity ?? conservativeAccountCapacity;
+    const remainingCapacity = effective && fullCapacity !== null
+      ? fullCapacity * (1 - entry.quotaUsedPercent / 100)
+      : null;
+    if (effective) {
+      effectiveAccounts += 1;
+      if (remainingCapacity === null) capacityUnknownAccounts += 1;
+      else {
+        capacityKnownAccounts += 1;
+        currentRemainingCapacity += remainingCapacity;
+      }
+    }
+    return {
+      ...entry,
+      effective,
+      estimatedFullCapacity: rounded(fullCapacity),
+      estimatedRemainingCapacity: rounded(remainingCapacity),
+    };
+  });
+
+  return {
+    accounts,
+    conservativeAccountCapacity: rounded(conservativeAccountCapacity),
+    currentRemainingCapacity: rounded(currentRemainingCapacity),
+    sampleCount: samples.length,
+    confidence: samples.length >= Math.max(1, Number(minimumSamples) || 3)
+      ? 'high'
+      : samples.length
+        ? 'low'
+        : conservativeAccountCapacity !== null
+          ? 'historical'
+          : 'insufficient',
+    effectiveAccounts,
+    capacityKnownAccounts,
+    capacityUnknownAccounts,
+  };
+}
+
+export function deriveRealtimeProtection({
+  volatility = 0,
+  leadTimeHoursP50 = null,
+  leadTimeHoursP90 = null,
+  historicalSuccessRate = null,
+  checkIntervalSeconds = 600,
+} = {}) {
+  const successRate = Number.isFinite(Number(historicalSuccessRate))
+    ? bounded(Number(historicalSuccessRate), 0.1, 1)
+    : 0.8;
+  const leadP90 = Number(leadTimeHoursP90) > 0 ? Number(leadTimeHoursP90) : 2;
+  const leadP50 = Number(leadTimeHoursP50) > 0
+    ? Math.min(Number(leadTimeHoursP50), leadP90)
+    : Math.min(leadP90, 1);
+  const normalizedVolatility = bounded(finite(volatility), 0, 3);
+  const leadSpread = Math.max(0, leadP90 - leadP50);
+  const checkHours = bounded(finite(checkIntervalSeconds, 600) / 3600, 5 / 60, 1);
+  const bufferHours = bounded(
+    1 + leadSpread * 0.75 + normalizedVolatility * 1.5 + checkHours,
+    1,
+    6,
+  );
+  const safetyFactor = bounded(
+    1.05 + normalizedVolatility * 0.12 + (1 - successRate) * 0.2,
+    1.05,
+    1.35,
+  );
+  return {
+    parameterMode: 'realtime_adaptive',
+    leadTimeHoursP50: rounded(leadP50, 3),
+    leadTimeHoursP90: rounded(leadP90, 3),
+    leadTimeSpreadHours: rounded(leadSpread, 3),
+    bufferHours: rounded(Math.ceil(bufferHours * 4) / 4, 2),
+    protectionHours: rounded(leadP90 + Math.ceil(bufferHours * 4) / 4, 2),
+    safetyFactor: rounded(safetyFactor, 4),
+    historicalSuccessRate: rounded(successRate, 4),
+  };
+}
