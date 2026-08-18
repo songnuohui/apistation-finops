@@ -3,6 +3,7 @@ import {
   buildRealtimeUsageSnapshot,
   deriveRealtimeProtection,
   estimateRealtimeCapacity,
+  percentile,
 } from './replenishment-forecast.mjs';
 
 const ACTIVE_STATUSES = new Set(['ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
@@ -310,6 +311,58 @@ function rounded(value, digits = 6) {
   return Math.round(parsed * scale) / scale;
 }
 
+function localDayKey(at, timezone) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(at));
+}
+
+function accountTodayStatsMap(payload) {
+  const raw = payload?.stats || payload?.data?.stats || payload || {};
+  return new Map(Object.entries(raw).map(([accountId, stats]) => [
+    Number(accountId),
+    {
+      cost: Math.max(0, Number(stats?.cost || 0)),
+      requests: Math.max(0, Number(stats?.requests || 0)),
+    },
+  ]).filter(([accountId, stats]) => (
+    Number.isSafeInteger(accountId)
+    && accountId > 0
+    && Number.isFinite(stats.cost)
+    && Number.isFinite(stats.requests)
+  )));
+}
+
+function addDistributedUsage(rows, accountId, previous, current, {
+  windowStartMs,
+  completedEndMs,
+  bucketMs = 300_000,
+} = {}) {
+  const intervalMs = current.capturedAt - previous.capturedAt;
+  const usage = current.cost - previous.cost;
+  if (!(intervalMs > 0) || !(usage > 0)) return;
+  const clippedStart = Math.max(previous.capturedAt, windowStartMs);
+  const clippedEnd = Math.min(current.capturedAt, completedEndMs);
+  if (clippedEnd <= clippedStart) return;
+  for (
+    let bucketAt = Math.floor(clippedStart / bucketMs) * bucketMs;
+    bucketAt < clippedEnd;
+    bucketAt += bucketMs
+  ) {
+    const overlapStart = Math.max(clippedStart, bucketAt);
+    const overlapEnd = Math.min(clippedEnd, bucketAt + bucketMs);
+    if (overlapEnd <= overlapStart) continue;
+    rows.push({
+      accountId,
+      bucket: new Date(bucketAt).toISOString(),
+      usage: usage * (overlapEnd - overlapStart) / intervalMs,
+    });
+  }
+}
+
 function retryDelayMs(attempt) {
   return Math.min(15 * 60_000, 15_000 * (2 ** Math.max(0, attempt - 1)));
 }
@@ -496,6 +549,7 @@ export class ReplenishmentService {
     this.running = false;
     this.runtimeCache = new Map();
     this.runtimeInflight = new Map();
+    this.runtimeUsageHistory = new Map();
   }
 
   start() {
@@ -1408,11 +1462,140 @@ export class ReplenishmentService {
     return snapshot;
   }
 
+  captureRuntimeUsage(cacheKey, accountStates, payload, nowMs) {
+    const dayKey = localDayKey(nowMs, this.config.timezone);
+    let state = this.runtimeUsageHistory.get(cacheKey);
+    if (!state || state.dayKey !== dayKey) {
+      state = {
+        dayKey,
+        startedAt: nowMs,
+        captures: 0,
+        accounts: new Map(),
+      };
+      this.runtimeUsageHistory.set(cacheKey, state);
+    }
+    state.captures += 1;
+    const statsByAccount = accountTodayStatsMap(payload);
+    const activeAccountIds = new Set();
+    const historyCutoff = nowMs - 65 * 60_000;
+
+    for (const account of accountStates) {
+      const accountId = Number(account.accountId);
+      const stats = statsByAccount.get(accountId);
+      if (!stats) continue;
+      activeAccountIds.add(accountId);
+      let history = state.accounts.get(accountId);
+      if (!history) {
+        history = {
+          samples: [],
+          capacityEstimates: [],
+          capacityAnchor: null,
+          lastUsageAt: null,
+          lastSeenAt: nowMs,
+        };
+        state.accounts.set(accountId, history);
+      }
+      history.lastSeenAt = nowMs;
+      const sample = {
+        capturedAt: nowMs,
+        cost: stats.cost,
+        requests: stats.requests,
+        quotaUsedPercent: Number.isFinite(Number(account.quotaUsedPercent))
+          ? Number(account.quotaUsedPercent)
+          : null,
+        quotaResetAt: account.quotaResetAt || null,
+      };
+      const previous = history.samples.at(-1);
+      if (previous && sample.capturedAt > previous.capturedAt) {
+        const costDelta = sample.cost - previous.cost;
+        if (costDelta > 0) history.lastUsageAt = new Date(nowMs).toISOString();
+      }
+      const capacityAnchor = history.capacityAnchor;
+      if (!capacityAnchor) {
+        history.capacityAnchor = sample;
+      } else if (sample.capturedAt > capacityAnchor.capturedAt) {
+        const costDelta = sample.cost - capacityAnchor.cost;
+        const quotaDelta = sample.quotaUsedPercent !== null
+          && capacityAnchor.quotaUsedPercent !== null
+          ? sample.quotaUsedPercent - capacityAnchor.quotaUsedPercent
+          : null;
+        const sameQuotaWindow = !capacityAnchor.quotaResetAt
+          || !sample.quotaResetAt
+          || capacityAnchor.quotaResetAt === sample.quotaResetAt;
+        if (!sameQuotaWindow || costDelta < 0 || quotaDelta === null || quotaDelta < 0) {
+          history.capacityAnchor = sample;
+        } else if (costDelta > 0 && quotaDelta >= 0.05) {
+          const estimate = costDelta / (quotaDelta / 100);
+          if (Number.isFinite(estimate) && estimate > 0 && estimate <= 1_000_000_000) {
+            history.capacityEstimates.push({ value: estimate, capturedAt: nowMs });
+            history.capacityEstimates = history.capacityEstimates
+              .filter((entry) => entry.capturedAt >= nowMs - 24 * 60 * 60_000)
+              .slice(-40);
+          }
+          history.capacityAnchor = sample;
+        }
+      }
+      if (!previous || sample.capturedAt > previous.capturedAt) {
+        history.samples.push(sample);
+      }
+      const firstCurrentIndex = history.samples
+        .findIndex((entry) => entry.capturedAt >= historyCutoff);
+      if (firstCurrentIndex > 1) history.samples.splice(0, firstCurrentIndex - 1);
+    }
+
+    for (const [accountId, history] of state.accounts) {
+      if (!activeAccountIds.has(accountId) && history.lastSeenAt < nowMs - 10 * 60_000) {
+        state.accounts.delete(accountId);
+      }
+    }
+    while (this.runtimeUsageHistory.size > 8) {
+      this.runtimeUsageHistory.delete(this.runtimeUsageHistory.keys().next().value);
+    }
+
+    const completedEndMs = Math.floor(nowMs / 300_000) * 300_000;
+    const windowStartMs = completedEndMs - 60 * 60_000;
+    const rows = [];
+    const capacityTotals = [];
+    for (const account of accountStates) {
+      const accountId = Number(account.accountId);
+      const history = state.accounts.get(accountId);
+      if (!history) continue;
+      for (let index = 1; index < history.samples.length; index += 1) {
+        addDistributedUsage(rows, accountId, history.samples[index - 1], history.samples[index], {
+          windowStartMs,
+          completedEndMs,
+        });
+      }
+      const capacityEstimate = percentile(
+        history.capacityEstimates.map((entry) => entry.value),
+        0.25,
+      );
+      const usedPercent = Number(account.quotaUsedPercent);
+      capacityTotals.push({
+        accountId,
+        usage: capacityEstimate !== null && Number.isFinite(usedPercent)
+          ? capacityEstimate * bounded(usedPercent, 0, 100) / 100
+          : 0,
+        requests: history.samples.at(-1)?.requests || 0,
+        lastUsageAt: history.lastUsageAt,
+      });
+    }
+
+    return {
+      rows,
+      capacityTotals,
+      observationWindowMinutes: Math.max(0, (nowMs - state.startedAt) / 60_000),
+      captures: state.captures,
+      sampledAccountCount: statsByAccount.size,
+    };
+  }
+
   async buildRealtimeCapacitySnapshot(rule, { force = false } = {}) {
-    if (!this.sourceUsageRepository || !this.accountReader) {
+    if (!this.accountReader) {
       throw new Error('智能补号所需的 Sub2API 只读数据源未配置');
     }
     const cacheKey = `${rule.id}:${rule.updatedAt || ''}:${rule.targetPoolKey}`;
+    const usageHistoryKey = `${rule.platform}:${rule.targetPoolKey}`;
     const now = this.now();
     if (force) this.runtimeCache.delete(cacheKey);
     const cached = this.runtimeCache.get(cacheKey);
@@ -1439,35 +1622,6 @@ export class ReplenishmentService {
       const repairingAccountIds = new Set(openRecoveryIds.map(Number));
       const accountIds = poolAccounts.map((account) => Number(account.id))
         .filter((value) => Number.isSafeInteger(value) && value > 0);
-      const completedEndMs = Math.floor(now / 300_000) * 300_000;
-      const capacityScopes = poolAccounts.map((account) => {
-        const tracked = trackedByAccountId.get(Number(account.id));
-        return {
-          accountId: Number(account.id),
-          startedAt: latestTimestamp(
-            tracked?.capacityStartedAt,
-            tracked?.createdAt,
-            account?.created_at,
-            account?.createdAt,
-          ) || new Date(now - 7 * 86_400_000).toISOString(),
-        };
-      });
-      const capacityScopeByAccountId = new Map(capacityScopes
-        .map((entry) => [entry.accountId, entry.startedAt]));
-      const [recentRows, capacityTotals] = await Promise.all([
-        this.sourceUsageRepository.getFiveMinuteAccountStats({
-          start: new Date(completedEndMs - 60 * 60_000),
-          end: new Date(completedEndMs),
-          accountIds,
-        }),
-        this.sourceUsageRepository.getAccountCapacityUsageTotals({
-          accounts: capacityScopes,
-          end: new Date(now),
-        }),
-      ]);
-      const realtimeUsage = buildRealtimeUsageSnapshot(recentRows, { nowMs: now });
-      const usageByAccount = new Map(realtimeUsage.accounts.map((entry) => [entry.accountId, entry]));
-      const totalsByAccount = new Map(capacityTotals.map((entry) => [Number(entry.accountId), entry]));
       const accountStates = poolAccounts.map((account) => {
         const accountId = Number(account.id);
         const tracked = trackedByAccountId.get(accountId);
@@ -1487,14 +1641,11 @@ export class ReplenishmentService {
         const quota = quotaSnapshot(account, null);
         const quotaMetadata = quotaRuntimeMetadata(account);
         const quotaObservedMs = Date.parse(String(quotaMetadata.observedAt || ''));
-        const lastUsageMs = Date.parse(String(totalsByAccount.get(accountId)?.lastUsageAt || ''));
-        const recentlyObserved = Number.isFinite(quotaObservedMs)
-          && now - quotaObservedMs <= 15 * 60_000;
-        const usageAfterObservation = Number.isFinite(lastUsageMs)
-          && (!Number.isFinite(quotaObservedMs) || lastUsageMs > quotaObservedMs + 2 * 60_000);
+        const quotaResetMs = Date.parse(String(quotaMetadata.longResetAt || ''));
+        const quotaWindowExpired = Number.isFinite(quotaResetMs) && quotaResetMs <= now;
         const quotaCurrent = quota.long !== null
           && Number.isFinite(quotaObservedMs)
-          && (recentlyObserved || !usageAfterObservation);
+          && !quotaWindowExpired;
         const available = String(account?.status || '').toLowerCase() === 'active'
           && account?.schedulable === true
           && schedule.state === 'schedulable'
@@ -1517,7 +1668,7 @@ export class ReplenishmentService {
           quotaCurrent,
           quotaObservedAt: quotaMetadata.observedAt,
           quotaResetAt: quotaMetadata.longResetAt,
-          quotaObservationLagging: usageAfterObservation,
+          quotaObservationLagging: quotaWindowExpired,
           available,
           currentConcurrency: Number(account?.current_concurrency || account?.currentConcurrency || 0),
           rateLimitResetAt: schedule.rateLimitResetAt
@@ -1527,16 +1678,41 @@ export class ReplenishmentService {
           tempUnschedulableUntil: schedule.tempUnschedulableUntil,
           tempUnschedulableReason: schedule.tempUnschedulableReason,
           lastError: account?.error_message || account?.errorMessage || '',
-          capacityStartedAt: capacityScopeByAccountId.get(accountId)
-            || tracked?.capacityStartedAt
+          capacityStartedAt: tracked?.capacityStartedAt
             || tracked?.createdAt
+            || account?.created_at
+            || account?.createdAt
             || null,
         };
       });
+      let runtimeUsageError = '';
+      let runtimeUsageSample = {
+        rows: [],
+        capacityTotals: [],
+        observationWindowMinutes: 0,
+        captures: 0,
+        sampledAccountCount: 0,
+      };
+      try {
+        const accountTodayStats = accountIds.length
+          ? await this.accountReader.accountTodayStats(accountIds)
+          : { stats: {} };
+        runtimeUsageSample = this.captureRuntimeUsage(
+          usageHistoryKey,
+          accountStates,
+          accountTodayStats,
+          now,
+        );
+      } catch (error) {
+        runtimeUsageError = String(error?.message || error);
+        this.logger.warn('[replenishment] realtime usage sampling failed', runtimeUsageError);
+      }
+      const realtimeUsage = buildRealtimeUsageSnapshot(runtimeUsageSample.rows, { nowMs: now });
+      const usageByAccount = new Map(realtimeUsage.accounts.map((entry) => [entry.accountId, entry]));
       const priorCapacity = rule.lastForecastSnapshot?.conservativeAccountCapacity;
       const capacity = estimateRealtimeCapacity({
         accountStates,
-        usageTotals: capacityTotals,
+        usageTotals: runtimeUsageSample.capacityTotals,
         priorAccountCapacity: priorCapacity,
         defaultAccountCapacity: rule.forecastDefaultAccountCapacity,
         minimumSamples: 3,
@@ -1656,10 +1832,15 @@ export class ReplenishmentService {
         0,
         requiredCapacity - Number(capacity.currentRemainingCapacity || 0) - inFlightCapacity,
       );
-      const predictiveDataReady = poolAccounts.length > 0
-        && accountCapacity !== null
-        && capacity.capacityUnknownAccounts === 0
-        && unknownOrStaleAccounts === 0;
+      const demandDataReady = !runtimeUsageError
+        && runtimeUsageSample.captures >= 2
+        && runtimeUsageSample.observationWindowMinutes >= 5;
+      const capacityDataReady = accountCapacity !== null
+        && capacity.capacityUnknownAccounts === 0;
+      const predictiveDataReady = demandDataReady
+        && poolAccounts.length > 0
+        && unknownOrStaleAccounts === 0
+        && (currentHourlyRate <= 0 || capacityDataReady);
       const predictedQuantity = predictiveDataReady
         && deliveredAccountCapacity
         && capacityGap > 0
@@ -1686,11 +1867,13 @@ export class ReplenishmentService {
         ? emergencyQuantity > predictedQuantity
           ? 'emergency_replenishment'
           : 'replenishment_needed'
-        : !predictiveDataReady
-          ? 'insufficient_data'
-          : currentHourlyRate <= 0
-            ? 'idle'
-            : 'capacity_healthy';
+        : !demandDataReady
+          ? 'warming_up'
+          : !predictiveDataReady
+            ? 'insufficient_data'
+            : currentHourlyRate <= 0
+              ? 'idle'
+              : 'capacity_healthy';
       const nextCheckSeconds = recommendedQuantity > 0 || !predictiveDataReady
         ? 300
         : runwayHours !== null && runwayHours <= Number(protection.protectionHours || 0) + 2
@@ -1699,24 +1882,33 @@ export class ReplenishmentService {
             ? 600
             : 1800;
       const decisionReasons = [
-        currentHourlyRate <= 0
-          ? '最近 60 分钟没有实际消耗，最低有效账号数满足时不补号'
-          : `当前速度 ${rounded(currentHourlyRate, 2)}/小时，按最近完整 5 分钟桶动态计算`,
+        !demandDataReady
+          ? runtimeUsageError
+            ? `Sub2API 批量用量读取失败：${runtimeUsageError}，预测下单已阻止`
+            : `实时用量正在预热，已观察 ${rounded(runtimeUsageSample.observationWindowMinutes, 1)} 分钟，满 5 分钟后开始预测`
+          : currentHourlyRate <= 0
+            ? '最近完整观测窗口没有实际消耗，最低有效账号数满足时不补号'
+            : `当前速度 ${rounded(currentHourlyRate, 2)}/小时，按账号累计成本增量生成最近完整 5 分钟桶`,
         `当前剩余容量 ${rounded(capacity.currentRemainingCapacity, 2)}，在途折算容量 ${rounded(inFlightCapacity, 2)}`,
         `采购 P90 ${protection.leadTimeHoursP90} 小时 + 动态缓冲 ${protection.bufferHours} 小时，保护窗口 ${protection.protectionHours} 小时`,
         !predictiveDataReady
-          ? `有 ${unknownOrStaleAccounts} 个额度未知或滞后的账号，预测下单已阻止，仅保留最低账号数兜底`
+          ? unknownOrStaleAccounts > 0
+            ? `有 ${unknownOrStaleAccounts} 个额度未知或窗口已过期的账号，预测下单已阻止，仅保留最低账号数兜底`
+            : '实时速度或账号容量样本仍不足，预测下单已阻止，仅保留最低账号数兜底'
           : capacityGap > 0
             ? `保护窗口容量缺口 ${rounded(capacityGap, 2)}，建议补 ${recommendedQuantity} 个账号`
-            : `当前剩余额度和在途容量足够覆盖保护窗口，无需补号`,
+            : '当前剩余额度和在途容量足够覆盖保护窗口，无需补号',
       ];
       return {
         capturedAt: new Date(now).toISOString(),
         completedThrough: realtimeUsage.completedThrough,
         status,
         parameterMode: protection.parameterMode,
-        dataSource: 'sub2api_readonly',
+        dataSource: 'sub2api_admin_account_today_stats',
         rawUsageSynchronized: false,
+        observationWindowMinutes: rounded(runtimeUsageSample.observationWindowMinutes, 2),
+        usageSampledAccountCount: runtimeUsageSample.sampledAccountCount,
+        runtimeUsageError: runtimeUsageError || null,
         lookbackHours: 1,
         horizonHours: protection.protectionHours,
         leadTimeHours: protection.leadTimeHoursP90,
@@ -1746,7 +1938,13 @@ export class ReplenishmentService {
         expectedDeliveredAccountCapacity: rounded(deliveredAccountCapacity),
         capacitySampleCount: capacity.sampleCount,
         capacityConfidence: capacity.confidence,
-        demandConfidence: currentHourlyRate > 0 ? 'realtime' : 'idle',
+        demandConfidence: runtimeUsageError
+          ? 'unavailable'
+          : !demandDataReady
+            ? 'warming'
+            : currentHourlyRate > 0
+              ? 'realtime'
+              : 'idle',
         predictiveDataReady,
         effectiveAccounts: Number(counts.effective || 0),
         emergencyAvailableAccounts,

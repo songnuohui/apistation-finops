@@ -94,11 +94,13 @@ export class Sub2ApiReadonlyGateway {
     staleTtlMs = (this.config.sub2apiUsageStaleTtlSeconds || 0) * 1_000,
     timeoutMs = this.config.sub2apiAuthTimeoutMs || 10_000,
     cache = true,
+    cachePost = false,
   } = {}) {
     const now = Date.now();
-    const existing = cache && method === 'GET' ? this.cache.get(cacheKey) : null;
+    const cacheable = cache && (method === 'GET' || cachePost);
+    const existing = cacheable ? this.cache.get(cacheKey) : null;
     if (existing && existing.expiresAt > now) return existing.payload;
-    const coalesced = cache && method === 'GET' ? this.inflight.get(cacheKey) : null;
+    const coalesced = cacheable ? this.inflight.get(cacheKey) : null;
     if (coalesced) return coalesced;
     const requestWithAuthentication = async (authentication) => {
       if (!authentication?.credential) throw Object.assign(new Error('sub2api administrator session is unavailable'), { statusCode: 503 });
@@ -137,7 +139,7 @@ export class Sub2ApiReadonlyGateway {
       const selected = await this.authentication();
       try {
         const payload = await requestWithAuthentication(selected);
-        if (cache && method === 'GET') {
+        if (cacheable) {
           this.cache.set(cacheKey, {
             payload,
             expiresAt: Date.now() + ttlMs,
@@ -152,7 +154,7 @@ export class Sub2ApiReadonlyGateway {
           const retryAuthentication = await this.authentication({ force: true });
           try {
             const payload = await requestWithAuthentication(retryAuthentication);
-            if (cache && method === 'GET') {
+            if (cacheable) {
               this.cache.set(cacheKey, {
                 payload,
                 expiresAt: Date.now() + ttlMs,
@@ -177,9 +179,9 @@ export class Sub2ApiReadonlyGateway {
       }
     };
     const promise = execute().finally(() => {
-      if (cache && method === 'GET') this.inflight.delete(cacheKey);
+      if (cacheable) this.inflight.delete(cacheKey);
     });
-    if (cache && method === 'GET') this.inflight.set(cacheKey, promise);
+    if (cacheable) this.inflight.set(cacheKey, promise);
     return promise;
   }
 
@@ -430,6 +432,7 @@ export class Sub2ApiReadonlyGateway {
       body: { account_ids: accountIds },
       cacheKey: `account-today:${[...accountIds].sort((a, b) => a - b).join(',')}`,
       ttlMs: 30_000,
+      cachePost: true,
     });
   }
 
