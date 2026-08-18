@@ -92,10 +92,96 @@ test('replenishment trigger strategy is validated and stored', async () => {
   const saved = await repository.saveRule({ ...current, triggerStrategy: 'fixed_schedule' });
 
   assert.equal(saved.triggerStrategy, 'fixed_schedule');
+  const smart = await repository.saveRule({
+    ...current,
+    triggerStrategy: 'smart_forecast',
+    scheduleIntervalSeconds: 300,
+  });
+  assert.equal(smart.triggerStrategy, 'smart_forecast');
+  assert.equal(smart.quotaWindow, 'long');
   await assert.rejects(
     repository.saveRule({ ...current, triggerStrategy: 'unknown' }),
     /补号方式无效/,
   );
+});
+
+test('smart replenishment requires a five minute polling interval', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const current = await repository.getRule(1);
+
+  await assert.rejects(
+    repository.saveRule({
+      ...current,
+      triggerStrategy: 'smart_forecast',
+      scheduleIntervalSeconds: 299,
+    }),
+    /300/,
+  );
+});
+
+test('smart replenishment forecasts finite quota demand without creating an order in observe mode', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  Object.assign(rule, {
+    mode: 'observe',
+    enabled: true,
+    triggerStrategy: 'smart_forecast',
+    scheduleIntervalSeconds: 300,
+    forecastLookbackHours: 48,
+    forecastCoverageHours: 24,
+    forecastSafetyFactor: 1.2,
+    forecastFallbackLeadTimeHours: 2,
+    replenishQuantity: 5,
+  });
+  const nowMs = Date.parse('2026-08-18T12:30:00.000Z');
+  const usageRows = [];
+  for (let offset = 1; offset <= 48; offset += 1) {
+    const hour = new Date(Math.floor(nowMs / 3_600_000) * 3_600_000 - offset * 3_600_000).toISOString();
+    for (const accountId of [101, 102, 103]) {
+      usageRows.push({ accountId, hour, cost: 4 });
+    }
+  }
+  const accounts = [101, 102, 103].map((id, index) => ({
+    id,
+    platform: 'openai',
+    status: 'active',
+    schedulable: true,
+    group_ids: [1],
+    extra: { codex_7d_used_percent: 90 + index * 5 },
+  }));
+  const service = new ReplenishmentService(
+    repository,
+    authStub(),
+    {},
+    config,
+    console,
+    {
+      now: () => nowMs,
+      sourceUsageRepository: {
+        async getHourlyAccountStats() {
+          return usageRows;
+        },
+      },
+      accountReader: {
+        async listAllAccounts() {
+          return accounts;
+        },
+      },
+      client: {
+        async inventory() {
+          return { payload: { available: 20, estimated_total_fen: 2000 } };
+        },
+      },
+    },
+  );
+
+  const result = await service.createOrderForRule(rule);
+
+  assert.equal(result.status, 'observed_need');
+  assert.ok(result.forecast.forecastUsage > 0);
+  assert.ok(result.forecast.conservativeAccountCapacity > 0);
+  assert.ok(result.forecast.recommendedQuantity > 0);
+  assert.equal((await repository.listOrders()).length, 0);
 });
 
 test('replenishment thresholds allow equal minimum and target at the new lower bounds', async () => {

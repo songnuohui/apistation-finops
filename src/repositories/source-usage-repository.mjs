@@ -185,4 +185,57 @@ export class SourceUsageRepository {
     this.inflight.set(key, load);
     return load;
   }
+
+  async getHourlyAccountStats({ start, end, accountIds = null }) {
+    const ids = accountIds?.length
+      ? [...new Set(accountIds.map(Number)
+        .filter((value) => Number.isSafeInteger(value) && value > 0))]
+      : null;
+    if (!ids?.length) return [];
+    const key = this.cacheKey({ start, end, accountIds: ids, dimension: 'account-hour' });
+    const now = Date.now();
+    const cached = this.cache.get(key);
+    if (cached?.expiresAt > now) return cached.value;
+    if (this.inflight.has(key)) return this.inflight.get(key);
+
+    const load = (async () => {
+      const client = await this.pool.connect();
+      let result;
+      try {
+        await client.query('BEGIN TRANSACTION READ ONLY');
+        result = await client.query(`
+          SELECT
+            COALESCE(ul.account_id,0)::bigint AS account_id,
+            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM ul.created_at) / 3600) * 3600) AS hour,
+            COUNT(*)::bigint AS requests,
+            COALESCE(SUM(ul.total_cost),0) AS cost
+          FROM ${this.schema}.usage_logs ul
+          WHERE ul.created_at >= $1 AND ul.created_at < $2
+            AND ul.account_id=ANY($3::bigint[])
+          GROUP BY
+            COALESCE(ul.account_id,0),
+            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM ul.created_at) / 3600) * 3600)
+          ORDER BY hour,account_id
+        `, [start, end, ids]);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+      const value = result.rows.map((row) => ({
+        accountId: number(row.account_id),
+        hour: row.hour instanceof Date ? row.hour.toISOString() : String(row.hour || ''),
+        requests: number(row.requests),
+        cost: number(row.cost),
+      }));
+      this.cache.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+      this.pruneCache();
+      return value;
+    })().finally(() => this.inflight.delete(key));
+
+    this.inflight.set(key, load);
+    return load;
+  }
 }

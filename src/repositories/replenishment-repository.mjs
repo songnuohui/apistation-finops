@@ -40,6 +40,16 @@ function sortDemoRows(rows, sortKey, sortOrder) {
   });
 }
 
+function percentileForDemo(values, ratio) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  const position = Math.min(1, Math.max(0, Number(ratio) || 0)) * (sorted.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
 function itemMetadata(value) {
   const metadata = { ...(value || {}) };
   const rawExpiresAt = metadata.expiresAt;
@@ -105,11 +115,18 @@ function rule(row) {
     scheduleStartTime: String(row.schedule_start_time || '00:00').slice(0, 5),
     scheduleEndTime: String(row.schedule_end_time || '00:00').slice(0, 5),
     scheduleIntervalSeconds: Number(row.schedule_interval_seconds || 300),
+    forecastLookbackHours: Number(row.forecast_lookback_hours || 168),
+    forecastCoverageHours: Number(row.forecast_coverage_hours || 24),
+    forecastSafetyFactor: Number(row.forecast_safety_factor || 1.2),
+    forecastFallbackLeadTimeHours: Number(row.forecast_fallback_lead_time_hours || 2),
+    forecastDefaultAccountCapacity: number(row.forecast_default_account_capacity),
     lastScheduledAt: row.last_scheduled_at || null,
     lastTriggeredAt: row.last_triggered_at || null,
     lastInventoryAt: row.last_inventory_at || null,
     lastError: row.last_error || '',
     lastInventorySnapshot: row.last_inventory_snapshot || {},
+    lastForecastAt: row.last_forecast_at || null,
+    lastForecastSnapshot: row.last_forecast_snapshot || {},
     product: row.product || '',
     platform: row.platform || '',
     targetPoolKey: row.target_pool_key || '',
@@ -196,6 +213,7 @@ function item(row) {
     importAttemptCount: Number(row.import_attempt_count || 0),
     nextImportRetryAt: row.next_import_retry_at || null,
     repairCompletionSource: row.repair_completion_source || '',
+    capacityStartedAt: row.capacity_started_at || row.created_at || null,
   };
 }
 
@@ -306,6 +324,36 @@ function compactInventorySnapshot(snapshot = {}) {
   };
 }
 
+function compactForecastSnapshot(snapshot = {}) {
+  return {
+    capturedAt: snapshot.capturedAt || null,
+    status: snapshot.status || '',
+    lookbackHours: Number(snapshot.lookbackHours || 0),
+    horizonHours: Number(snapshot.horizonHours || 0),
+    leadTimeHours: number(snapshot.leadTimeHours),
+    coverageHours: Number(snapshot.coverageHours || 0),
+    safetyFactor: number(snapshot.safetyFactor),
+    observedUsage1h: number(snapshot.observedUsage1h),
+    observedUsage6h: number(snapshot.observedUsage6h),
+    observedUsage24h: number(snapshot.observedUsage24h),
+    forecastUsage: number(snapshot.forecastUsage),
+    currentRemainingCapacity: number(snapshot.currentRemainingCapacity),
+    inFlightCapacity: number(snapshot.inFlightCapacity),
+    capacityGap: number(snapshot.capacityGap),
+    conservativeAccountCapacity: number(snapshot.conservativeAccountCapacity),
+    capacitySampleCount: Number(snapshot.capacitySampleCount || 0),
+    capacityConfidence: snapshot.capacityConfidence || '',
+    demandConfidence: snapshot.demandConfidence || '',
+    effectiveAccounts: Number(snapshot.effectiveAccounts || 0),
+    pendingAccounts: Number(snapshot.pendingAccounts || 0),
+    pendingSuccessRate: number(snapshot.pendingSuccessRate),
+    emergencyQuantity: Number(snapshot.emergencyQuantity || 0),
+    predictedQuantity: Number(snapshot.predictedQuantity || 0),
+    recommendedQuantity: Number(snapshot.recommendedQuantity || 0),
+    sourceAccountCount: Number(snapshot.sourceAccountCount || 0),
+  };
+}
+
 function event(row) {
   if (!row) return null;
   return {
@@ -361,13 +409,22 @@ function normalizeRuleInput(input) {
     scheduleStartTime: String(input.scheduleStartTime || '00:00').trim(),
     scheduleEndTime: String(input.scheduleEndTime || '00:00').trim(),
     scheduleIntervalSeconds: Number(input.scheduleIntervalSeconds ?? 300),
+    forecastLookbackHours: Number(input.forecastLookbackHours ?? 168),
+    forecastCoverageHours: Number(input.forecastCoverageHours ?? 24),
+    forecastSafetyFactor: Number(input.forecastSafetyFactor ?? 1.2),
+    forecastFallbackLeadTimeHours: Number(input.forecastFallbackLeadTimeHours ?? 2),
+    forecastDefaultAccountCapacity: input.forecastDefaultAccountCapacity === null
+      || input.forecastDefaultAccountCapacity === undefined
+      || input.forecastDefaultAccountCapacity === ''
+      ? null : Number(input.forecastDefaultAccountCapacity),
   };
+  if (values.triggerStrategy === 'smart_forecast') values.quotaWindow = 'long';
   if (!values.name) throw badRequest('请输入策略名称');
   if (!Number.isSafeInteger(values.productMappingId) || values.productMappingId <= 0) {
     throw badRequest('请选择有效的商品映射');
   }
   if (!['observe', 'approval', 'auto'].includes(values.mode)) throw badRequest('运行模式无效');
-  if (!['inventory_threshold', 'fixed_schedule'].includes(values.triggerStrategy)) {
+  if (!['inventory_threshold', 'fixed_schedule', 'smart_forecast'].includes(values.triggerStrategy)) {
     throw badRequest('补号方式无效');
   }
   if (!Number.isSafeInteger(values.minAvailableAccounts) || values.minAvailableAccounts < 1) {
@@ -411,6 +468,30 @@ function normalizeRuleInput(input) {
   if (!Number.isSafeInteger(values.scheduleIntervalSeconds)
     || values.scheduleIntervalSeconds < 3 || values.scheduleIntervalSeconds > 86400) {
     throw badRequest('自动补号轮询间隔必须在 3 到 86400 秒之间');
+  }
+  if (values.triggerStrategy === 'smart_forecast' && values.scheduleIntervalSeconds < 300) {
+    throw badRequest('智能预测补号的轮询间隔不能低于 300 秒');
+  }
+  if (!Number.isSafeInteger(values.forecastLookbackHours)
+    || values.forecastLookbackHours < 24 || values.forecastLookbackHours > 720) {
+    throw badRequest('预测回看时长必须在 24 到 720 小时之间');
+  }
+  if (!Number.isSafeInteger(values.forecastCoverageHours)
+    || values.forecastCoverageHours < 1 || values.forecastCoverageHours > 168) {
+    throw badRequest('预测保障时长必须在 1 到 168 小时之间');
+  }
+  if (!Number.isFinite(values.forecastSafetyFactor)
+    || values.forecastSafetyFactor < 1 || values.forecastSafetyFactor > 3) {
+    throw badRequest('预测安全系数必须在 1 到 3 之间');
+  }
+  if (!Number.isFinite(values.forecastFallbackLeadTimeHours)
+    || values.forecastFallbackLeadTimeHours < 0.25 || values.forecastFallbackLeadTimeHours > 168) {
+    throw badRequest('缺省采购提前期必须在 0.25 到 168 小时之间');
+  }
+  if (values.forecastDefaultAccountCapacity !== null
+    && (!Number.isFinite(values.forecastDefaultAccountCapacity)
+      || values.forecastDefaultAccountCapacity <= 0)) {
+    throw badRequest('缺省单账号容量必须留空或大于 0');
   }
   return values;
 }
@@ -485,6 +566,11 @@ export class ReplenishmentRepository {
       scheduleStartTime: '00:00',
       scheduleEndTime: '00:00',
       scheduleIntervalSeconds: 300,
+      forecastLookbackHours: 168,
+      forecastCoverageHours: 24,
+      forecastSafetyFactor: 1.2,
+      forecastFallbackLeadTimeHours: 2,
+      forecastDefaultAccountCapacity: null,
       lastScheduledAt: null,
       product: 'oauth_30d',
       platform: 'openai',
@@ -494,6 +580,8 @@ export class ReplenishmentRepository {
       lastInventoryAt: null,
       lastError: '',
       lastInventorySnapshot: {},
+      lastForecastAt: null,
+      lastForecastSnapshot: {},
       updatedAt: new Date().toISOString(),
     }] : [];
     this.orders = [];
@@ -602,6 +690,9 @@ export class ReplenishmentRepository {
         targetGroupIds: [...(productMapping?.targetGroupIds || [])],
         lastTriggeredAt: current.lastTriggeredAt || null,
         lastInventoryAt: current.lastInventoryAt || null,
+        lastForecastAt: current.lastForecastAt || null,
+        lastInventorySnapshot: current.lastInventorySnapshot || {},
+        lastForecastSnapshot: current.lastForecastSnapshot || {},
         lastError: current.lastError || '',
         updatedAt: new Date().toISOString(),
       });
@@ -622,6 +713,8 @@ export class ReplenishmentRepository {
       values.modelWhitelist,
       values.retryLimit, values.cooldownSeconds,
       values.scheduleStartTime, values.scheduleEndTime, values.scheduleIntervalSeconds,
+      values.forecastLookbackHours, values.forecastCoverageHours, values.forecastSafetyFactor,
+      values.forecastFallbackLeadTimeHours, values.forecastDefaultAccountCapacity,
     ];
     const result = input.id
       ? await this.pool.query(`
@@ -633,7 +726,10 @@ export class ReplenishmentRepository {
             rate_multiplier=$21,auto_pause_on_expired=$22,verification_model=$23,
             verification_prompt=$24,poll_interval_seconds=$25,model_whitelist=$26,retry_limit=$27,
             cooldown_seconds=$28,schedule_start_time=$29,schedule_end_time=$30,
-            schedule_interval_seconds=$31,updated_at=NOW()
+            schedule_interval_seconds=$31,forecast_lookback_hours=$32,
+            forecast_coverage_hours=$33,forecast_safety_factor=$34,
+            forecast_fallback_lead_time_hours=$35,forecast_default_account_capacity=$36,
+            updated_at=NOW()
           WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [input.id, ...params])
       : await this.pool.query(`
           INSERT INTO ${this.schema}.replenishment_rules(
@@ -643,8 +739,10 @@ export class ReplenishmentRepository {
             concurrency,load_factor,proxy_id,priority,rate_multiplier,auto_pause_on_expired,verification_model,
             verification_prompt,poll_interval_seconds,model_whitelist,retry_limit,cooldown_seconds,
             schedule_start_time,schedule_end_time,
-            schedule_interval_seconds,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+            schedule_interval_seconds,forecast_lookback_hours,forecast_coverage_hours,
+            forecast_safety_factor,forecast_fallback_lead_time_hours,
+            forecast_default_account_capacity,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
           RETURNING id`, [...params, actor]);
     if (!result.rowCount) throw notFound('补号策略不存在或已删除');
     return this.getRule(result.rows[0]?.id);
@@ -945,6 +1043,23 @@ export class ReplenishmentRepository {
     [id, JSON.stringify(snapshot || {}), String(error || '').slice(0, 1000)]);
   }
 
+  async saveForecastSnapshot(id, snapshot, { error = '' } = {}) {
+    if (this.demo) {
+      const current = this.rules.find((entry) => entry.id === Number(id));
+      if (current) {
+        current.lastForecastAt = new Date().toISOString();
+        current.lastForecastSnapshot = structuredClone(snapshot || {});
+        current.lastError = error;
+      }
+      return;
+    }
+    await this.pool.query(`
+      UPDATE ${this.schema}.replenishment_rules SET
+        last_forecast_at=NOW(),last_forecast_snapshot=$2::jsonb,last_error=$3,updated_at=NOW()
+      WHERE id=$1`,
+    [id, JSON.stringify(snapshot || {}), String(error || '').slice(0, 1000)]);
+  }
+
   async hasActiveOrder(ruleId) {
     const active = new Set(['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
     if (this.demo) return this.orders.some((entry) => entry.ruleId === Number(ruleId) && active.has(entry.status));
@@ -968,6 +1083,64 @@ export class ReplenishmentRepository {
     return Number(result.rows[0]?.quantity || 0);
   }
 
+  async getPoolPlanningStats(targetPoolKey) {
+    const active = ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'];
+    const terminal = ['completed', 'partial_failed', 'failed'];
+    if (this.demo) {
+      const poolOrders = this.orders.filter((entry) => entry.targetPoolKey === targetPoolKey);
+      const historical = poolOrders.filter((entry) => terminal.includes(entry.status));
+      const requested = historical.reduce((sum, entry) => sum + Number(entry.requestedQuantity || 0), 0);
+      const valid = historical.reduce((sum, entry) => sum + Number(entry.validQuantity || 0), 0);
+      const leadTimes = historical
+        .filter((entry) => Number(entry.validQuantity || 0) > 0)
+        .map((entry) => (Date.parse(entry.updatedAt) - Date.parse(entry.createdAt)) / 3_600_000)
+        .filter((value) => Number.isFinite(value) && value >= 0);
+      return {
+        hasActiveOrder: poolOrders.some((entry) => active.includes(entry.status)),
+        pendingQuantity: poolOrders
+          .filter((entry) => active.includes(entry.status))
+          .reduce((sum, entry) => sum + Math.max(
+            0,
+            Number(entry.requestedQuantity || 0) - Number(entry.validQuantity || 0),
+          ), 0),
+        historicalSuccessRate: requested > 0 ? valid / requested : null,
+        leadTimeHoursP90: percentileForDemo(leadTimes, 0.9),
+        historicalOrderCount: historical.length,
+      };
+    }
+    const result = await this.pool.query(`
+      SELECT
+        EXISTS(
+          SELECT 1 FROM ${this.schema}.oauth_supply_orders
+          WHERE target_pool_key=$1 AND status=ANY($2::text[])
+        ) AS has_active_order,
+        COALESCE(SUM(GREATEST(requested_quantity-valid_quantity,0))
+          FILTER (WHERE status=ANY($2::text[])),0)::int AS pending_quantity,
+        (SUM(valid_quantity)
+          FILTER (WHERE status=ANY($3::text[]) AND created_at>=NOW()-INTERVAL '90 days'))::numeric
+          / NULLIF((SUM(requested_quantity)
+          FILTER (WHERE status=ANY($3::text[]) AND created_at>=NOW()-INTERVAL '90 days'))::numeric,0)
+          AS historical_success_rate,
+        PERCENTILE_CONT(0.9) WITHIN GROUP (
+          ORDER BY EXTRACT(EPOCH FROM (updated_at-created_at))/3600.0
+        ) FILTER (
+          WHERE status=ANY($3::text[]) AND valid_quantity>0
+            AND created_at>=NOW()-INTERVAL '90 days'
+        ) AS lead_time_hours_p90,
+        COUNT(*) FILTER (
+          WHERE status=ANY($3::text[]) AND created_at>=NOW()-INTERVAL '90 days'
+        )::int AS historical_order_count
+      FROM ${this.schema}.oauth_supply_orders
+      WHERE target_pool_key=$1`, [targetPoolKey, active, terminal]);
+    return {
+      hasActiveOrder: Boolean(result.rows[0]?.has_active_order),
+      pendingQuantity: Number(result.rows[0]?.pending_quantity || 0),
+      historicalSuccessRate: number(result.rows[0]?.historical_success_rate),
+      leadTimeHoursP90: number(result.rows[0]?.lead_time_hours_p90),
+      historicalOrderCount: Number(result.rows[0]?.historical_order_count || 0),
+    };
+  }
+
   async listTrackedItems(ruleId) {
     if (this.demo) {
       const orderIds = new Set(this.orders.filter((entry) => entry.ruleId === Number(ruleId)).map((entry) => entry.id));
@@ -982,6 +1155,25 @@ export class ReplenishmentRepository {
       WHERE o.rule_id=$1
         AND i.sub2api_account_id IS NOT NULL
       ORDER BY i.id`, [ruleId]);
+    return result.rows.map(item);
+  }
+
+  async listTrackedItemsForPool(targetPoolKey) {
+    if (this.demo) {
+      const orderIds = new Set(this.orders
+        .filter((entry) => entry.targetPoolKey === targetPoolKey)
+        .map((entry) => entry.id));
+      return this.items
+        .filter((entry) => orderIds.has(entry.orderId) && entry.sub2apiAccountId)
+        .map((entry) => ({ ...entry }));
+    }
+    const result = await this.pool.query(`
+      SELECT i.*,o.rule_id,o.product,o.platform
+      FROM ${this.schema}.oauth_supply_order_items i
+      JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
+      WHERE o.target_pool_key=$1
+        AND i.sub2api_account_id IS NOT NULL
+      ORDER BY i.id`, [targetPoolKey]);
     return result.rows.map(item);
   }
 
@@ -1191,7 +1383,10 @@ export class ReplenishmentRepository {
     if (this.demo) {
       const existing = this.orders.find((entry) => entry.idempotencyKey === idempotencyKey);
       if (existing) return { ...existing, idempotentReplay: true };
-      if (await this.hasActiveOrder(selectedRule.id)) return null;
+      if (this.orders.some((entry) => entry.targetPoolKey === selectedRule.targetPoolKey
+        && ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing'].includes(entry.status))) {
+        return null;
+      }
       const run = {
         id: ++this.sequence, ruleId: selectedRule.id, trigger, mode: selectedRule.mode,
         status, requestedQuantity: quantity, availableBefore, quotedAmountCny,
@@ -1218,7 +1413,7 @@ export class ReplenishmentRepository {
       // same transaction to close the check-then-insert race.
       await client.query(`
         SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-      [`apistation-finops:replenishment-rule:${selectedRule.id}`]);
+      [`apistation-finops:replenishment-pool:${selectedRule.targetPoolKey}`]);
       const duplicate = await client.query(`
         SELECT * FROM ${this.schema}.oauth_supply_orders
         WHERE idempotency_key=$1
@@ -1229,10 +1424,10 @@ export class ReplenishmentRepository {
       }
       const active = await client.query(`
         SELECT 1 FROM ${this.schema}.oauth_supply_orders
-        WHERE rule_id=$1
+        WHERE target_pool_key=$1
           AND status=ANY($2::text[])
         LIMIT 1`,
-      [selectedRule.id, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
+      [selectedRule.targetPoolKey, ['approval_required', 'ordering', 'queued', 'processing', 'ready_to_collect', 'importing']]);
       if (active.rowCount) {
         await client.query('ROLLBACK');
         return null;
@@ -2062,6 +2257,7 @@ export class ReplenishmentRepository {
           errorMessage: value.errorMessage || '',
           importAttemptCount: value.importAttemptCount || 0, nextImportRetryAt: value.nextImportRetryAt || null,
           repairCompletionSource: value.repairCompletionSource || '',
+          capacityStartedAt: value.capacityStartedAt || new Date().toISOString(),
           healthStatus: value.healthStatus || 'unknown', quotaUsedPercent: value.quotaUsedPercent ?? null,
           quotaWindow: value.quotaWindow || '', lastHealthAt: value.lastHealthAt || null,
           metadata: itemMetadata(value.metadata), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -2107,7 +2303,8 @@ export class ReplenishmentRepository {
         cost_ledger_status=$9,cost_ledger_period_id=$10,cost_ledger_error=$11,
         error_message=$12,metadata=$13::jsonb,health_status=$14,quota_used_percent=$15,
         quota_window=$16,last_health_at=$17,import_attempt_count=$18,
-        next_import_retry_at=$19,repair_completion_source=$20,updated_at=NOW()
+        next_import_retry_at=$19,repair_completion_source=$20,capacity_started_at=$21,
+        updated_at=NOW()
       WHERE id=$1 RETURNING *`,
     [id, merged.status, merged.verificationStatus, merged.individualCostCny, merged.finalCostCny,
       merged.credentialVersion || '', merged.credentialCiphertext || '', merged.sub2apiAccountId,
@@ -2116,7 +2313,7 @@ export class ReplenishmentRepository {
       String(merged.errorMessage || '').slice(0, 1000), JSON.stringify(itemMetadata(merged.metadata)),
       merged.healthStatus || 'unknown', merged.quotaUsedPercent ?? null, merged.quotaWindow || '',
       merged.lastHealthAt || null, Number(merged.importAttemptCount || 0), merged.nextImportRetryAt || null,
-      merged.repairCompletionSource || '']);
+      merged.repairCompletionSource || '', merged.capacityStartedAt || current.capacityStartedAt || current.createdAt]);
     return item(result.rows[0]);
   }
 
@@ -2289,6 +2486,7 @@ export class ReplenishmentRepository {
       rules: rules.map((entry) => ({
         ...entry,
         lastInventorySnapshot: compactInventorySnapshot(entry.lastInventorySnapshot),
+        lastForecastSnapshot: compactForecastSnapshot(entry.lastForecastSnapshot),
       })),
       summary: {
         enabledRules: rules.filter((entry) => entry.enabled).length,

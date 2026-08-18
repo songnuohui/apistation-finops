@@ -94,7 +94,12 @@ const replenishmentService=new ReplenishmentService(
   sub2ApiAccountImportGateway,
   config,
   console,
-  {client:oauthSupplyClient,ledgerRepository:repository},
+  {
+    client:oauthSupplyClient,
+    ledgerRepository:repository,
+    sourceUsageRepository,
+    accountReader:sub2ApiReadonlyGateway,
+  },
 );
 replenishmentService.start();
 const accountProfitGuardService=new AccountProfitGuardService(repository,sub2ApiReadonlyGateway);
@@ -1069,6 +1074,11 @@ async function readiness(){
     ['054_overview_statistics_indexes'],
   );
   if(!overviewMigration.rowCount)throw new Error('required FinOps migration 054_overview_statistics_indexes is not applied');
+  const forecastMigration=await finopsPool.query(
+    `SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version=$1`,
+    ['056_smart_replenishment_forecast'],
+  );
+  if(!forecastMigration.rowCount)throw new Error('required FinOps migration 056_smart_replenishment_forecast is not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',

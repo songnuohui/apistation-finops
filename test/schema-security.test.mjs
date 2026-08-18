@@ -317,6 +317,16 @@ test('replenishment trigger strategies remain FinOps-owned and constrained', () 
   assert.doesNotMatch(migration, /sub2api/i);
 });
 
+test('smart replenishment forecasting remains aggregate-only and FinOps-owned', () => {
+  const migration = read('migrations/056_smart_replenishment_forecast.sql');
+  assert.match(migration, /'inventory_threshold','fixed_schedule','smart_forecast'/);
+  assert.match(migration, /capacity_started_at TIMESTAMPTZ/);
+  assert.match(migration, /MAX\(recovered_at\) AS latest_recovered_at/);
+  assert.match(migration, /Contains aggregates only, never raw Sub2API usage events/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /fact_usage_events|fact_usage_daily|credentials|redis/i);
+});
+
 test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   const migration = read('migrations/022_usage_cost_snapshot_performance.sql');
   assert.match(migration, /idx_finops_rate_observations_account_effective_time/);

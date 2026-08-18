@@ -33,7 +33,7 @@
     <div v-if="activeSection === 'setup'" class="replenishment-layout">
       <section class="panel">
         <div class="panel-head">
-          <div><h2>补号策略</h2><p>可按有效库存补到目标数量，也可在执行时段内定时购买固定数量。</p></div>
+          <div><h2>补号策略</h2><p>支持库存阈值、智能容量预测和定时定量三种补号方式。</p></div>
           <button class="primary-button" @click="newRule"><Plus :size="15" />新增策略</button>
         </div>
         <div v-if="!rules.length" class="empty-state">还没有补号策略</div>
@@ -48,23 +48,38 @@
               </div>
               <small>{{ rule.product }} · {{ platformText(rule.platform) }} · {{ groupSummary(rule.targetGroupIds) }}</small>
               <div class="rule-facts">
-                <template v-if="rule.triggerStrategy !== 'fixed_schedule'">
+                <template v-if="rule.triggerStrategy === 'inventory_threshold'">
                   <span>有效 {{ rule.lastInventorySnapshot?.effectiveAccounts ?? '--' }}</span>
                   <span>低于 {{ rule.minAvailableAccounts }} 触发</span>
                   <span>补到 {{ rule.targetAvailableAccounts }}</span>
                   <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
+                </template>
+                <template v-else-if="rule.triggerStrategy === 'smart_forecast'">
+                  <span>有效 {{ rule.lastForecastSnapshot?.effectiveAccounts ?? '--' }}</span>
+                  <span>预测需求 {{ usageValue(rule.lastForecastSnapshot?.forecastUsage) }}</span>
+                  <span>剩余容量 {{ usageValue(rule.lastForecastSnapshot?.currentRemainingCapacity) }}</span>
+                  <span>建议补 {{ rule.lastForecastSnapshot?.recommendedQuantity ?? '--' }}</span>
                 </template>
                 <span v-else>每次固定购买 {{ rule.replenishQuantity }}</span>
                 <span>补号时段 {{ rule.scheduleStartTime }}-{{ rule.scheduleEndTime }}</span>
                 <span>补号间隔 {{ duration(rule.scheduleIntervalSeconds) }}</span>
                 <span>修复策略 {{ recoveryPolicyFor(rule).enabled ? (recoveryPolicyFor(rule).mode === 'auto' ? '自动' : '手动') : '停用' }}</span>
               </div>
-              <div v-if="rule.triggerStrategy !== 'fixed_schedule' && rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
+              <div v-if="rule.triggerStrategy === 'inventory_threshold' && rule.lastInventorySnapshot?.capturedAt" class="inventory-strip">
                 <span>跟踪 {{ rule.lastInventorySnapshot.trackedAccounts || 0 }}</span>
                 <span>低额度 {{ rule.lastInventorySnapshot.lowQuotaAccounts || 0 }}</span>
                 <span>修复中 {{ rule.lastInventorySnapshot.repairingAccounts || 0 }}</span>
                 <span>在途 {{ rule.lastInventorySnapshot.pendingAccounts || 0 }}</span>
                 <small>{{ dateTime(rule.lastInventorySnapshot.capturedAt) }}</small>
+              </div>
+              <div v-else-if="rule.triggerStrategy === 'smart_forecast' && rule.lastForecastSnapshot?.capturedAt" class="inventory-strip forecast-strip">
+                <span>近1小时 {{ usageValue(rule.lastForecastSnapshot.observedUsage1h) }}</span>
+                <span>近6小时 {{ usageValue(rule.lastForecastSnapshot.observedUsage6h) }}</span>
+                <span>在途容量 {{ usageValue(rule.lastForecastSnapshot.inFlightCapacity) }}</span>
+                <span>容量缺口 {{ usageValue(rule.lastForecastSnapshot.capacityGap) }}</span>
+                <span>单号P25 {{ usageValue(rule.lastForecastSnapshot.conservativeAccountCapacity) }}</span>
+                <span>样本 {{ rule.lastForecastSnapshot.capacitySampleCount || 0 }}</span>
+                <small>{{ dateTime(rule.lastForecastSnapshot.capturedAt) }}</small>
               </div>
             </div>
             <div class="row-actions">
@@ -73,7 +88,7 @@
                 <Pause v-if="rule.enabled" :size="15" />
                 <Play v-else :size="15" />
               </button>
-              <button class="icon-button" :title="rule.triggerStrategy === 'fixed_schedule' ? '立即执行一次' : '立即检查库存'" :disabled="actioningId === `rule-${rule.id}`" @click="trigger(rule)"><Zap :size="15" /></button>
+              <button class="icon-button" :title="triggerActionLabel(rule)" :disabled="actioningId === `rule-${rule.id}`" @click="trigger(rule)"><Zap :size="15" /></button>
               <button class="icon-button" title="编辑策略" @click="editRule(rule)"><Settings2 :size="15" /></button>
               <button class="icon-button danger-action" title="删除策略" :disabled="actioningId === `rule-${rule.id}`" @click="removeRule(rule)"><Trash2 :size="15" /></button>
             </div>
@@ -277,20 +292,31 @@
           <label class="full-field">策略名称<input v-model.trim="editor.name" placeholder="OAuth 30D 主账号池" /></label>
           <label>商品映射<select v-model.number="editor.productMappingId" @change="onRuleMappingChange"><option :value="null" disabled>请选择商品映射</option><option v-for="mapping in mappings" :key="mapping.id" :value="mapping.id">{{ mapping.product }} · {{ platformText(mapping.platform) }} · {{ groupSummary(mapping.targetGroupIds) }}</option></select></label>
           <label>运行模式<select v-model="editor.mode"><option value="observe">观察模式</option><option value="approval">审批模式</option><option value="auto">全自动模式</option></select></label>
-          <label>补号方式<select v-model="editor.triggerStrategy"><option value="inventory_threshold">按库存补号</option><option value="fixed_schedule">定时定量补号</option></select></label>
-          <template v-if="editor.triggerStrategy !== 'fixed_schedule'">
+          <label>补号方式<select v-model="editor.triggerStrategy" @change="onTriggerStrategyChange"><option value="inventory_threshold">按库存补号</option><option value="smart_forecast">智能预测补号</option><option value="fixed_schedule">定时定量补号</option></select></label>
+          <template v-if="editor.triggerStrategy === 'inventory_threshold'">
             <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /></label>
             <label>目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
             <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
             <label>额度消耗阈值<input v-model.number="editor.quotaUsedThresholdPercent" type="number" min="0" max="100" step="1" /></label>
             <label>额度判断窗口<select v-model="editor.quotaWindow"><option value="any">任一窗口</option><option value="short">短窗口（5小时）</option><option value="long">长窗口（7天）</option></select></label>
             <label>额度未知处理<select v-model="editor.quotaUnknownPolicy"><option value="warn">计入库存并告警</option><option value="low">按低额度处理</option><option value="ignore">计入库存且忽略</option></select></label>
-            <label>修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
+          </template>
+          <template v-else-if="editor.triggerStrategy === 'smart_forecast'">
+            <label>最低有效库存<input v-model.number="editor.minAvailableAccounts" type="number" min="1" /><small class="field-hint">低于该数量时立即按目标库存兜底。</small></label>
+            <label>紧急目标库存<input v-model.number="editor.targetAvailableAccounts" type="number" min="1" /></label>
+            <label>单次最多购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
+            <label>预测回看（小时）<input v-model.number="editor.forecastLookbackHours" type="number" min="24" max="720" /></label>
+            <label>到账后保障（小时）<input v-model.number="editor.forecastCoverageHours" type="number" min="1" max="168" /></label>
+            <label>预测安全系数<input v-model.number="editor.forecastSafetyFactor" type="number" min="1" max="3" step="0.05" /></label>
+            <label>缺省采购提前期（小时）<input v-model.number="editor.forecastFallbackLeadTimeHours" type="number" min="0.25" max="168" step="0.25" /><small class="field-hint">历史订单不足时使用，正常情况下自动采用P90耗时。</small></label>
+            <label>缺省单账号容量<input v-model.number="editor.forecastDefaultAccountCapacity" type="number" min="0" step="0.01" placeholder="留空自动估算" /><small class="field-hint">没有可用容量样本时才使用。</small></label>
+            <div class="form-note full-field">智能预测固定使用不可恢复的7天额度。需求按目标分组账号的 <code>total_cost</code> 计算，修复账号只有成功导入后才计入容量。</div>
           </template>
           <label v-else>每次固定购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
+          <label v-if="editor.triggerStrategy !== 'fixed_schedule'">修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
           <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
           <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
-          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" /></label>
+          <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" :min="editor.triggerStrategy === 'smart_forecast' ? 300 : 3" max="86400" /><small v-if="editor.triggerStrategy === 'smart_forecast'" class="field-hint">智能预测最低5分钟，避免重复聚合查询。</small></label>
           <label class="full-field">独立修复策略
             <span class="policy-editor">
               <select v-model="recoveryEditor.mode"><option value="manual">手动修复</option><option value="auto">自动修复</option></select>
@@ -453,6 +479,7 @@ const filteredRuleModels = computed(() => {
 });
 const money = (value: any) => value === null || value === undefined ? '--' : `¥${Number(value || 0).toFixed(2)}`;
 const moneyFen = (value: any) => value === null || value === undefined ? '--' : money(Number(value) / 100);
+const usageValue = (value: any) => value === null || value === undefined ? '--' : Number(value || 0).toFixed(2);
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 const dateTimeWithSeconds = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '--';
 const duration = (seconds: any) => Number(seconds) >= 3600
@@ -461,7 +488,16 @@ const duration = (seconds: any) => Number(seconds) >= 3600
     ? `${Math.round(Number(seconds) / 60)} 分钟`
     : `${Number(seconds) || 0} 秒`;
 const modeLabel = (value: string) => ({ observe: '观察', approval: '审批', auto: '全自动' } as Record<string, string>)[value] || value;
-const triggerStrategyLabel = (value: string) => value === 'fixed_schedule' ? '定时定量' : '按库存';
+const triggerStrategyLabel = (value: string) => ({
+  inventory_threshold: '按库存',
+  smart_forecast: '智能预测',
+  fixed_schedule: '定时定量',
+} as Record<string, string>)[value] || value;
+const triggerActionLabel = (rule: any) => rule.triggerStrategy === 'fixed_schedule'
+  ? '立即执行一次'
+  : rule.triggerStrategy === 'smart_forecast'
+    ? '立即预测容量'
+    : '立即检查库存';
 const quotaWindowLabel = (value: string) => ({ short: '5小时', long: '7天', any: '任一窗口' } as Record<string, string>)[value] || value;
 const orderStatusLabel = (value: string) => ({ approval_required: '待审批', ordering: '创建订单', queued: '排队中', processing: '处理中', ready_to_collect: '待取货', importing: '导入验号', import_retry: '等待修复', completed: '已完成', partial_failed: '部分失败', failed: '失败' } as Record<string, string>)[value] || value;
 const orderStatusOptions = Object.entries({
@@ -486,6 +522,7 @@ const recoveryCompletionLabel = (recovery: any) => ({
 } as Record<string, string>)[recovery.completionSource] || '系统修复并导入';
 const eventTypeLabel = (value: string) => ({
   inventory_healthy: '库存正常', order_skipped: '已跳过', rule_blocked: '已阻止',
+  forecast_healthy: '容量充足', forecast_insufficient: '预测样本不足',
   observed_replenishment: '观察记录', rule_execution_failed: '执行失败',
   rule_enabled: '策略启动', rule_disabled: '策略暂停',
   approval_required: '等待审批', order_planned: '准备下单', order_created: '订单已创建',
@@ -499,7 +536,7 @@ const eventTypeLabel = (value: string) => ({
   recovery_supplier_claim_observed: '供应商领取状态',
 } as Record<string, string>)[value] || value || '操作记录';
 const eventTone = (value: string) => ['rule_execution_failed', 'import_failed', 'recovery_manual_required'].includes(value)
-  ? 'danger' : ['rule_blocked', 'order_skipped', 'approval_required', 'recovery_retry_scheduled', 'account_recovery_detected', 'rule_disabled'].includes(value)
+  ? 'danger' : ['forecast_insufficient', 'rule_blocked', 'order_skipped', 'approval_required', 'recovery_retry_scheduled', 'account_recovery_detected', 'rule_disabled'].includes(value)
     ? 'warning' : 'success';
 const triggerLabel = (value: string) => value === 'manual' ? '手动执行' : value === 'scheduled' ? '自动执行' : '系统任务';
 const platformText = (value: string) => ({ openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', composite: 'Composite' } as Record<string, string>)[value] || value || '--';
@@ -524,8 +561,8 @@ function eventAction(event: any) {
   if (recovery?.ready && recovery.status !== 'recovered') return { type: 'recovery', label: '立即重试', target: recovery };
   const rule = relatedRule(event);
   if (event?.eventType === 'rule_disabled' && rule && !rule.enabled) return { type: 'enable', label: '启动策略', target: rule };
-  if (rule?.enabled && ['inventory_healthy', 'order_skipped', 'rule_blocked', 'observed_replenishment', 'rule_execution_failed'].includes(event?.eventType)) {
-    return { type: 'trigger', label: rule.triggerStrategy === 'fixed_schedule' ? '立即执行一次' : '立即检查库存', target: rule };
+  if (rule?.enabled && ['inventory_healthy', 'forecast_healthy', 'forecast_insufficient', 'order_skipped', 'rule_blocked', 'observed_replenishment', 'rule_execution_failed'].includes(event?.eventType)) {
+    return { type: 'trigger', label: triggerActionLabel(rule), target: rule };
   }
   return null;
 }
@@ -544,6 +581,7 @@ function eventDetailEntries(event: any) {
     quotedCny: '报价（CNY）', reason: '原因代码', remoteStatus: '供应商状态',
     supplierAvailable: '供应商可售数量', trigger: '触发方式',
     triggerStrategy: '补号方式', scheduledFor: '计划执行时间', projectedInventory: '投影库存',
+    forecast: '智能预测明细',
   };
   return Object.entries(event?.details || {})
     .filter(([key]) => key !== 'trigger')
@@ -798,6 +836,8 @@ function newRule() {
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
     repairGraceSeconds: 900, recoveryRetryLimit: null,
     scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
+    forecastLookbackHours: 168, forecastCoverageHours: 24, forecastSafetyFactor: 1.2,
+    forecastFallbackLeadTimeHours: 2, forecastDefaultAccountCapacity: null,
     maxOrderAmountCny: null, maxDailyAmountCny: null, concurrency: 5, loadFactor: null, proxyId: null, priority: 20,
     rateMultiplier: 1, autoPauseOnExpired: true,
     verificationModel: 'gpt-5.6-luna',
@@ -813,6 +853,14 @@ function editRule(rule: any) {
     ...rule,
     kind: 'rule',
     triggerStrategy: rule.triggerStrategy || 'inventory_threshold',
+    forecastLookbackHours: rule.forecastLookbackHours ?? 168,
+    forecastCoverageHours: rule.forecastCoverageHours ?? 24,
+    forecastSafetyFactor: rule.forecastSafetyFactor ?? 1.2,
+    forecastFallbackLeadTimeHours: rule.forecastFallbackLeadTimeHours ?? 2,
+    forecastDefaultAccountCapacity: rule.forecastDefaultAccountCapacity ?? null,
+    scheduleIntervalSeconds: rule.triggerStrategy === 'smart_forecast'
+      ? Math.max(300, Number(rule.scheduleIntervalSeconds || 300))
+      : rule.scheduleIntervalSeconds,
     loadFactor: rule.loadFactor ?? null,
     proxyId: rule.proxyId ?? null,
     rateMultiplier: rule.rateMultiplier ?? 1,
@@ -825,6 +873,11 @@ function editRule(rule: any) {
 function editMapping(mapping: any) { editorError.value = ''; editor.value = { ...mapping, kind: 'mapping', targetGroupIds: [...(mapping.targetGroupIds || [])] }; }
 function onMappingPlatformChange() { editor.value.targetGroupIds = []; editorError.value = ''; }
 function onRuleMappingChange() { editor.value.modelWhitelist = []; modelSearch.value = ''; }
+function onTriggerStrategyChange() {
+  if (editor.value.triggerStrategy !== 'smart_forecast') return;
+  editor.value.quotaWindow = 'long';
+  editor.value.scheduleIntervalSeconds = Math.max(300, Number(editor.value.scheduleIntervalSeconds || 300));
+}
 
 function validateEditor() {
   if (editor.value.kind === 'mapping') {
@@ -841,6 +894,20 @@ function validateEditor() {
   if (!Number.isInteger(Number(editor.value.replenishQuantity))
     || Number(editor.value.replenishQuantity) < 1 || Number(editor.value.replenishQuantity) > 1000) {
     return '购买数量必须在 1 到 1000 之间。';
+  }
+  if (editor.value.triggerStrategy === 'smart_forecast') {
+    if (!Number.isInteger(Number(editor.value.forecastLookbackHours))
+      || Number(editor.value.forecastLookbackHours) < 24 || Number(editor.value.forecastLookbackHours) > 720) {
+      return '预测回看时长必须在 24 到 720 小时之间。';
+    }
+    if (!Number.isInteger(Number(editor.value.forecastCoverageHours))
+      || Number(editor.value.forecastCoverageHours) < 1 || Number(editor.value.forecastCoverageHours) > 168) {
+      return '到账后保障时长必须在 1 到 168 小时之间。';
+    }
+    if (Number(editor.value.forecastSafetyFactor) < 1 || Number(editor.value.forecastSafetyFactor) > 3) {
+      return '预测安全系数必须在 1 到 3 之间。';
+    }
+    if (Number(editor.value.scheduleIntervalSeconds) < 300) return '智能预测补号的轮询间隔不能低于 300 秒。';
   }
   const loadFactor = editor.value.loadFactor;
   if (loadFactor !== null && loadFactor !== undefined && loadFactor !== ''
@@ -891,7 +958,11 @@ async function trigger(rule: any) {
   actioningId.value = `rule-${rule.id}`;
   try {
     await send('/replenishment/trigger', 'POST', { ruleId: rule.id });
-    emit('toast', rule.triggerStrategy === 'fixed_schedule' ? '已执行一次' : '库存检查已完成');
+    emit('toast', rule.triggerStrategy === 'fixed_schedule'
+      ? '已执行一次'
+      : rule.triggerStrategy === 'smart_forecast'
+        ? '容量预测已完成'
+        : '库存检查已完成');
     await load();
   }
   catch (err: any) { error.value = err.message || '执行补号失败'; }

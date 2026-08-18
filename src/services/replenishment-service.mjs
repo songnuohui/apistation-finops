@@ -1,4 +1,8 @@
 import { SupplierCredentialVault } from './supplier-credentials.mjs';
+import {
+  estimateFiniteQuotaCapacity,
+  forecastHourlyDemand,
+} from './replenishment-forecast.mjs';
 
 const ACTIVE_STATUSES = new Set(['ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
 
@@ -257,6 +261,30 @@ function selectedQuota(quota, window) {
   return values.sort((left, right) => right.value - left.value)[0] || { value: null, window: '' };
 }
 
+function accountGroupIds(account) {
+  return (account?.group_ids || account?.groups || account?.account_groups || [])
+    .map((entry) => Number(entry?.group_id ?? entry?.id ?? entry))
+    .filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+function accountMatchesRule(account, rule) {
+  const groups = accountGroupIds(account);
+  return String(account?.platform || '').trim().toLowerCase()
+      === String(rule.platform || '').trim().toLowerCase()
+    && (rule.targetGroupIds || []).every((id) => groups.includes(Number(id)));
+}
+
+function bounded(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, Number(value)));
+}
+
+function rounded(value, digits = 6) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const scale = 10 ** digits;
+  return Math.round(parsed * scale) / scale;
+}
+
 function retryDelayMs(attempt) {
   return Math.min(15 * 60_000, 15_000 * (2 ** Math.max(0, attempt - 1)));
 }
@@ -424,6 +452,8 @@ export class ReplenishmentService {
   constructor(repository, oauthSupplyAuthService, sub2ApiGateway, config, logger = console, {
     client,
     ledgerRepository = null,
+    sourceUsageRepository = null,
+    accountReader = null,
     now = () => Date.now(),
   } = {}) {
     this.repository = repository;
@@ -433,6 +463,8 @@ export class ReplenishmentService {
     this.logger = logger;
     this.client = client;
     this.ledgerRepository = ledgerRepository;
+    this.sourceUsageRepository = sourceUsageRepository;
+    this.accountReader = accountReader;
     this.now = now;
     this.vault = new SupplierCredentialVault(config.supplierCredentialsKey);
     this.timer = null;
@@ -559,6 +591,7 @@ export class ReplenishmentService {
       nextImportRetryAt: null,
       errorMessage: '',
       repairCompletionSource: 'manual_compensation',
+      capacityStartedAt: completedAt,
       metadata: metadataWithoutExpiration(orderItem.metadata),
     });
     const completed = await this.repository.completeRecovery(job.id, {
@@ -601,6 +634,7 @@ export class ReplenishmentService {
       nextImportRetryAt: null,
       errorMessage: '',
       repairCompletionSource: 'manual_compensation',
+      capacityStartedAt: completedAt,
       metadata: metadataWithoutExpiration(orderItem.metadata),
     });
     const order = await this.refreshOrderCompletion(orderItem.orderId);
@@ -679,6 +713,7 @@ export class ReplenishmentService {
       await this.repository.updateOrderItem(item.id, {
         status: 'imported', verificationStatus: 'passed', sub2apiAccountId: account?.id || item.sub2apiAccountId,
         importAttemptCount: Number(item.importAttemptCount || 0) + 1, nextImportRetryAt: null, errorMessage: '',
+        capacityStartedAt: new Date(this.now()).toISOString(),
         metadata: metadataWithoutExpiration(item.metadata),
       });
       const order = await this.repository.getOrder(item.order.id);
@@ -1020,6 +1055,7 @@ export class ReplenishmentService {
         sub2apiAccountId: targetAccountId,
         credentialVersion,
         credentialCiphertext: encryptedCredentials,
+        capacityStartedAt: new Date(this.now()).toISOString(),
         metadata: metadataWithoutExpiration(orderItem?.metadata),
         errorMessage: '',
         lastHealthAt: new Date(this.now()).toISOString(),
@@ -1228,8 +1264,7 @@ export class ReplenishmentService {
         openByItem.set(tracked.id, recoveryJob);
       }
       const repairing = Boolean(recoveryJob);
-      const accountGroups = (account?.group_ids || account?.groups || [])
-        .map((entry) => Number(entry?.id ?? entry));
+      const accountGroups = accountGroupIds(account);
       const groupMatched = rule.targetGroupIds.every((id) => accountGroups.includes(Number(id)));
       const platformMatched = String(account?.platform || rule.platform) === rule.platform;
       const schedule = scheduleSnapshot(account, {
@@ -1307,6 +1342,8 @@ export class ReplenishmentService {
         healthStatus,
         quotaUsedPercent: selected.value,
         quotaWindow: selected.window,
+        quotaShortUsedPercent: quota.short,
+        quotaLongUsedPercent: quota.long,
         sourceStatus: account?.status || '',
         status: account?.status || '',
         sourceSchedulable: schedule.sourceSchedulable,
@@ -1322,6 +1359,7 @@ export class ReplenishmentService {
         expired,
         staleHealthy,
         expiresAt,
+        createdAt: tracked.createdAt || null,
         readError,
         lastError: readError || account?.error_message || account?.errorMessage || '',
       });
@@ -1343,12 +1381,184 @@ export class ReplenishmentService {
     return snapshot;
   }
 
+  async forecastRuleCapacity(rule, inventorySnapshot) {
+    if (!this.sourceUsageRepository || !this.accountReader) {
+      throw new Error('智能预测所需的 Sub2API 只读数据源未配置');
+    }
+    const [trackedItems, sourceAccounts, planning] = await Promise.all([
+      this.repository.listTrackedItemsForPool(rule.targetPoolKey),
+      this.accountReader.listAllAccounts({ platform: rule.platform, status: '' }),
+      this.repository.getPoolPlanningStats(rule.targetPoolKey),
+    ]);
+    const poolAccounts = (sourceAccounts || []).filter((account) => accountMatchesRule(account, rule));
+    const trackedByAccountId = new Map(trackedItems
+      .filter((item) => Number.isSafeInteger(Number(item.sub2apiAccountId)))
+      .map((item) => [Number(item.sub2apiAccountId), item]));
+    const inventoryByAccountId = new Map((inventorySnapshot?.accounts || [])
+      .map((account) => [Number(account.sub2apiAccountId), account]));
+    const repairingAccountIds = new Set((inventorySnapshot?.accounts || [])
+      .filter((account) => account.healthStatus === 'repairing')
+      .map((account) => Number(account.sub2apiAccountId)));
+    const accountStates = [];
+    const sourceIds = new Set();
+
+    for (const account of poolAccounts) {
+      const accountId = Number(account?.id);
+      if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
+      sourceIds.add(accountId);
+      const tracked = trackedByAccountId.get(accountId);
+      const inventoryAccount = inventoryByAccountId.get(accountId);
+      const expiresAt = epochSeconds(account?.expires_at ?? account?.expiresAt);
+      const expired = expiresAt !== null && expiresAt * 1000 <= this.now();
+      const schedule = scheduleSnapshot(account, {
+        expired,
+        repairing: repairingAccountIds.has(accountId),
+        status: account?.status || '',
+        platformMatched: true,
+        groupMatched: true,
+        nowMs: this.now(),
+      });
+      const liveQuota = quotaSnapshot(account, null).long;
+      const fallbackQuota = inventoryAccount?.quotaLongUsedPercent
+        ?? (tracked?.quotaWindow === 'long' ? tracked.quotaUsedPercent : null);
+      accountStates.push({
+        accountId,
+        quotaUsedPercent: liveQuota ?? fallbackQuota,
+        available: String(account?.status || '').toLowerCase() === 'active'
+          && account?.schedulable === true
+          && schedule.state === 'schedulable'
+          && !expired
+          && !repairingAccountIds.has(accountId),
+        capacityStartedAt: tracked?.capacityStartedAt
+          || tracked?.createdAt || account?.created_at || account?.createdAt || null,
+      });
+    }
+
+    for (const tracked of trackedItems) {
+      const accountId = Number(tracked.sub2apiAccountId);
+      if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
+      sourceIds.add(accountId);
+      if (accountStates.some((entry) => entry.accountId === accountId)) continue;
+      const inventoryAccount = inventoryByAccountId.get(accountId);
+      accountStates.push({
+        accountId,
+        quotaUsedPercent: inventoryAccount?.quotaLongUsedPercent
+          ?? (tracked.quotaWindow === 'long' ? tracked.quotaUsedPercent : null),
+        available: false,
+        capacityStartedAt: tracked.capacityStartedAt || tracked.createdAt || null,
+      });
+    }
+
+    const lookbackHours = Number(rule.forecastLookbackHours || 168);
+    const completedEndMs = Math.floor(this.now() / 3_600_000) * 3_600_000;
+    const usageRows = await this.sourceUsageRepository.getHourlyAccountStats({
+      start: new Date(completedEndMs - lookbackHours * 3_600_000),
+      end: new Date(completedEndMs),
+      accountIds: [...sourceIds],
+    });
+    const historicalSuccessRate = planning.historicalSuccessRate === null
+      || planning.historicalSuccessRate === undefined
+      ? 0.8
+      : bounded(planning.historicalSuccessRate, 0.1, 1);
+    const leadTimeHours = Number(planning.leadTimeHoursP90) > 0
+      ? Number(planning.leadTimeHoursP90)
+      : Number(rule.forecastFallbackLeadTimeHours || 2);
+    const coverageHours = Number(rule.forecastCoverageHours || 24);
+    const horizonHours = Math.max(1, Math.ceil(leadTimeHours + coverageHours));
+    const demand = forecastHourlyDemand(usageRows, {
+      nowMs: this.now(),
+      lookbackHours,
+      horizonHours,
+      safetyFactor: Number(rule.forecastSafetyFactor || 1.2),
+      timezone: this.config.timezone,
+    });
+    const capacity = estimateFiniteQuotaCapacity({
+      accountStates,
+      usageRows,
+      defaultAccountCapacity: rule.forecastDefaultAccountCapacity,
+      minimumSamples: 3,
+    });
+    const accountCapacity = capacity.conservativeAccountCapacity;
+    const pendingAccounts = Number(planning.pendingQuantity || 0);
+    const inFlightCapacity = accountCapacity === null
+      ? 0
+      : pendingAccounts * accountCapacity * historicalSuccessRate;
+    const forecastUsage = Number(demand.forecastUsage || 0);
+    const capacityGap = Math.max(
+      0,
+      forecastUsage - Number(capacity.currentRemainingCapacity || 0) - inFlightCapacity,
+    );
+    const deliveredAccountCapacity = accountCapacity === null
+      ? null
+      : accountCapacity * historicalSuccessRate;
+    const predictedQuantity = deliveredAccountCapacity && capacityGap > 0
+      ? Math.ceil(capacityGap / deliveredAccountCapacity)
+      : 0;
+    const projectedEffectiveAccounts = capacity.effectiveAccounts
+      + Math.floor(pendingAccounts * historicalSuccessRate);
+    const emergencyQuantity = capacity.effectiveAccounts < Number(rule.minAvailableAccounts || 0)
+      ? Math.max(0, Number(rule.targetAvailableAccounts || 0) - projectedEffectiveAccounts)
+      : 0;
+    const uncappedRecommendedQuantity = Math.max(predictedQuantity, emergencyQuantity);
+    const recommendedQuantity = Math.max(
+      0,
+      Math.min(uncappedRecommendedQuantity, Number(rule.replenishQuantity || 1), 1000),
+    );
+    const insufficient = demand.confidence === 'insufficient' || accountCapacity === null;
+    const status = recommendedQuantity > 0
+      ? emergencyQuantity > predictedQuantity
+        ? 'emergency_replenishment'
+        : 'replenishment_needed'
+      : insufficient
+        ? 'insufficient_data'
+        : 'capacity_healthy';
+    const snapshot = {
+      capturedAt: new Date(this.now()).toISOString(),
+      status,
+      lookbackHours: demand.lookbackHours,
+      horizonHours: demand.horizonHours,
+      leadTimeHours: rounded(leadTimeHours, 3),
+      coverageHours,
+      safetyFactor: demand.safetyFactor,
+      observedUsage1h: demand.observedUsage1h,
+      observedUsage6h: demand.observedUsage6h,
+      observedUsage24h: demand.observedUsage24h,
+      recentHourlyRate: demand.recentHourlyRate,
+      trendFactor: demand.trendFactor,
+      forecastUsage: demand.forecastUsage,
+      currentRemainingCapacity: capacity.currentRemainingCapacity,
+      inFlightCapacity: rounded(inFlightCapacity),
+      capacityGap: rounded(capacityGap),
+      conservativeAccountCapacity: accountCapacity,
+      capacitySampleCount: capacity.sampleCount,
+      capacityConfidence: capacity.confidence,
+      demandConfidence: demand.confidence,
+      effectiveAccounts: capacity.effectiveAccounts,
+      exhaustedAccounts: capacity.exhaustedAccounts,
+      unknownQuotaAccounts: capacity.unknownQuotaAccounts,
+      pendingAccounts,
+      pendingSuccessRate: rounded(historicalSuccessRate, 4),
+      historicalOrderCount: Number(planning.historicalOrderCount || 0),
+      emergencyQuantity,
+      predictedQuantity,
+      uncappedRecommendedQuantity,
+      recommendedQuantity,
+      sourceAccountCount: poolAccounts.length,
+      trackedAccountCount: trackedItems.length,
+    };
+    await this.repository.saveForecastSnapshot(rule.id, snapshot);
+    return { snapshot, hasActiveOrder: Boolean(planning.hasActiveOrder) };
+  }
+
   async createOrderForRule(rule, {
     trigger = 'scheduled', actor = 'system', force = false, scheduledFor = null,
   } = {}) {
     if (!rule?.enabled && !force) return { status: 'disabled' };
     const triggerStrategy = rule.triggerStrategy || 'inventory_threshold';
-    const intervalMs = Math.max(1, Number(rule.scheduleIntervalSeconds || 300)) * 1000;
+    const configuredIntervalSeconds = Math.max(1, Number(rule.scheduleIntervalSeconds || 300));
+    const intervalMs = (triggerStrategy === 'smart_forecast'
+      ? Math.max(300, configuredIntervalSeconds)
+      : configuredIntervalSeconds) * 1000;
     const slotMs = Math.floor(this.now() / intervalMs) * intervalMs;
     const effectiveScheduledFor = trigger === 'scheduled'
       ? scheduledFor || new Date(slotMs).toISOString()
@@ -1371,9 +1581,36 @@ export class ReplenishmentService {
         throw errorWithStatus('补号策略缺少商品映射', 400);
       }
       const inventoryStrategy = triggerStrategy === 'inventory_threshold';
-      const snapshot = inventoryStrategy ? await this.inspectRuleInventory(rule) : null;
-      const hasActiveOrder = await this.repository.hasActiveOrder(rule.id);
-      if (!inventoryStrategy && hasActiveOrder) {
+      const smartStrategy = triggerStrategy === 'smart_forecast';
+      const dynamicStrategy = inventoryStrategy || smartStrategy;
+      const snapshot = dynamicStrategy ? await this.inspectRuleInventory(rule) : null;
+      let smartForecast = null;
+      let smartForecastError = '';
+      let smartHasActiveOrder = false;
+      if (smartStrategy) {
+        try {
+          const result = await this.forecastRuleCapacity(rule, snapshot);
+          smartForecast = result.snapshot;
+          smartHasActiveOrder = result.hasActiveOrder;
+        } catch (error) {
+          smartForecastError = String(error?.message || error);
+          smartForecast = {
+            capturedAt: new Date(this.now()).toISOString(),
+            status: 'read_failed',
+            recommendedQuantity: 0,
+            effectiveAccounts: Number(snapshot?.effectiveAccounts || 0),
+            pendingAccounts: Number(snapshot?.pendingAccounts || 0),
+            error: smartForecastError,
+          };
+          await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
+            error: `智能预测读取失败：${smartForecastError}`,
+          });
+        }
+      }
+      const hasActiveOrder = smartStrategy
+        ? smartHasActiveOrder || await this.repository.hasActiveOrder(rule.id)
+        : await this.repository.hasActiveOrder(rule.id);
+      if (!dynamicStrategy && hasActiveOrder) {
         await recordDecision('order_skipped', '已有进行中的补号订单，本轮不重复下单', {
           reason: 'already_active',
         });
@@ -1444,6 +1681,68 @@ export class ReplenishmentService {
           };
         }
         quantity = Math.max(1, Math.min(desired, rule.replenishQuantity, 1000));
+      } else if (smartStrategy) {
+        if (hasActiveOrder) {
+          await recordDecision('order_skipped', '目标账号池已有进行中的补号订单，本轮不重复下单', {
+            reason: 'pool_order_active',
+            forecast: smartForecast,
+            inventory: snapshot,
+          });
+          return {
+            status: 'already_active',
+            forecast: smartForecast,
+            inventory: snapshot,
+          };
+        }
+        if (smartForecastError) {
+          const effectiveAccounts = Number(snapshot?.effectiveAccounts || 0);
+          const pendingAccounts = Number(snapshot?.pendingAccounts || 0);
+          const projectedInventory = effectiveAccounts + pendingAccounts;
+          const emergencyQuantity = effectiveAccounts < Number(rule.minAvailableAccounts || 0)
+            ? Math.max(0, Number(rule.targetAvailableAccounts || 0) - projectedInventory)
+            : 0;
+          if (!emergencyQuantity) {
+            await recordDecision('forecast_insufficient', '智能预测数据读取失败，当前库存未触发紧急兜底，本轮不下单', {
+              reason: 'forecast_read_failed',
+              error: smartForecastError,
+              forecast: smartForecast,
+              inventory: snapshot,
+            });
+            return {
+              status: 'forecast_unavailable',
+              forecast: smartForecast,
+              inventory: snapshot,
+            };
+          }
+          quantity = Math.max(1, Math.min(emergencyQuantity, Number(rule.replenishQuantity || 1), 1000));
+          smartForecast = {
+            ...smartForecast,
+            status: 'emergency_fallback',
+            emergencyQuantity,
+            recommendedQuantity: quantity,
+          };
+          await this.repository.saveForecastSnapshot(rule.id, smartForecast, {
+            error: `智能预测读取失败，已按最低库存兜底：${smartForecastError}`,
+          });
+        } else {
+          quantity = Number(smartForecast?.recommendedQuantity || 0);
+          if (quantity <= 0) {
+            const insufficient = smartForecast?.status === 'insufficient_data';
+            const message = insufficient
+              ? '智能预测样本不足且未触发最低库存兜底，本轮不下单'
+              : `智能预测完成：未来 ${smartForecast.horizonHours} 小时需求 ${smartForecast.forecastUsage || 0}，当前及在途容量可覆盖，无需补号`;
+            await recordDecision(insufficient ? 'forecast_insufficient' : 'forecast_healthy', message, {
+              reason: insufficient ? 'forecast_samples_insufficient' : 'forecast_capacity_healthy',
+              forecast: smartForecast,
+              inventory: snapshot,
+            });
+            return {
+              status: insufficient ? 'forecast_insufficient' : 'healthy',
+              forecast: smartForecast,
+              inventory: snapshot,
+            };
+          }
+        }
       } else {
         quantity = Math.max(1, Math.min(Number(rule.replenishQuantity), 1000));
       }
@@ -1459,7 +1758,7 @@ export class ReplenishmentService {
         return { status: 'blocked_supplier_inventory', supplierAvailable, ...(snapshot ? { inventory: snapshot } : {}) };
       }
       if (supplierAvailable < quantity) {
-        if (!inventoryStrategy) {
+        if (!dynamicStrategy) {
           const message = `供应商仅有 ${supplierAvailable} 个账号，少于固定购买数量 ${quantity}`;
           await this.repository.markRuleError(rule.id, message);
           await recordDecision('rule_blocked', `${message}，本轮不下单`, {
@@ -1500,9 +1799,11 @@ export class ReplenishmentService {
         return { status: 'blocked_daily_cost', dailySpend, quotedCny };
       }
       if (rule.mode === 'observe') {
-        const message = inventoryStrategy
-          ? `观察模式：有效 ${snapshot.effectiveAccounts}、进行中订单待补 ${snapshot.pendingAccounts}、修复等待 ${snapshot.graceRepairingAccounts}，投影库存 ${snapshot.effectiveAccounts + snapshot.graceRepairingAccounts + snapshot.pendingAccounts}，计划补充 ${quantity} 个账号，未创建订单`
-          : `观察模式：建议购买 ${quantity} 个账号，未创建订单`;
+        const message = smartStrategy
+          ? `观察模式：未来 ${smartForecast.horizonHours || 0} 小时预测用量 ${smartForecast.forecastUsage || 0}，容量缺口 ${smartForecast.capacityGap || 0}，建议补充 ${quantity} 个账号，未创建订单`
+          : inventoryStrategy
+            ? `观察模式：有效 ${snapshot.effectiveAccounts}、进行中订单待补 ${snapshot.pendingAccounts}、修复等待 ${snapshot.graceRepairingAccounts}，投影库存 ${snapshot.effectiveAccounts + snapshot.graceRepairingAccounts + snapshot.pendingAccounts}，计划补充 ${quantity} 个账号，未创建订单`
+            : `观察模式：建议购买 ${quantity} 个账号，未创建订单`;
         if (snapshot) await this.repository.saveInventorySnapshot(rule.id, snapshot, { error: message });
         else await this.repository.markRuleError(rule.id, message);
         await recordDecision('observed_replenishment', message, {
@@ -1516,12 +1817,14 @@ export class ReplenishmentService {
               + snapshot.pendingAccounts,
             targetAvailableAccounts: Number(rule.targetAvailableAccounts || 0),
           } : {}),
+          ...(smartStrategy ? { forecast: smartForecast } : {}),
           quotedCny,
           quantity,
           ...(snapshot ? { inventory: snapshot } : {}),
         });
         return {
           status: 'observed_need', available: snapshot?.effectiveAccounts ?? null, quotedCny, quantity,
+          ...(smartStrategy ? { forecast: smartForecast } : {}),
           ...(snapshot ? { inventory: snapshot } : {}),
         };
       }
@@ -1544,7 +1847,9 @@ export class ReplenishmentService {
         rule,
         trigger,
         quantity,
-        availableBefore: snapshot?.effectiveAccounts ?? null,
+        availableBefore: smartStrategy
+          ? smartForecast?.effectiveAccounts ?? null
+          : snapshot?.effectiveAccounts ?? null,
         quotedAmountCny: quotedCny,
         actor,
         status: rule.mode === 'approval' ? 'approval_required' : 'ordering',
@@ -1579,6 +1884,7 @@ export class ReplenishmentService {
               + snapshot.pendingAccounts,
             targetAvailableAccounts: Number(rule.targetAvailableAccounts || 0),
           } : {}),
+          ...(smartStrategy ? { forecast: smartForecast } : {}),
           quantity,
           quotedCny,
           trigger,
@@ -1809,6 +2115,7 @@ export class ReplenishmentService {
           status: 'imported',
           verificationStatus: 'passed',
           sub2apiAccountId: account?.id,
+          capacityStartedAt: new Date(this.now()).toISOString(),
           metadata: {
             ...metadataWithoutExpiration(current.metadata),
             ...(expiresAt === null ? {} : { expiresAt }),
@@ -1998,9 +2305,12 @@ export class ReplenishmentService {
       }
       for (const rule of await this.repository.listRules({ enabledOnly: true })) {
         const nowMs = this.now();
+        const scheduleIntervalSeconds = (rule.triggerStrategy || 'inventory_threshold') === 'smart_forecast'
+          ? Math.max(300, Number(rule.scheduleIntervalSeconds || 300))
+          : Number(rule.scheduleIntervalSeconds || 300);
         if (!insideSchedule(rule, nowMs, this.config.timezone)
-          || !intervalElapsed(rule.lastScheduledAt, rule.scheduleIntervalSeconds, nowMs)) continue;
-        const intervalMs = Math.max(1, Number(rule.scheduleIntervalSeconds || 300)) * 1000;
+          || !intervalElapsed(rule.lastScheduledAt, scheduleIntervalSeconds, nowMs)) continue;
+        const intervalMs = Math.max(1, scheduleIntervalSeconds) * 1000;
         const scheduledFor = new Date(Math.floor(nowMs / intervalMs) * intervalMs).toISOString();
         await this.repository.markRuleScheduled(rule.id, new Date(nowMs).toISOString());
         try {
