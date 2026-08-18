@@ -4,6 +4,7 @@ import {
   deriveAdaptiveForecastParameters,
   deriveRealtimeProtection,
   estimateFiniteQuotaCapacity,
+  estimateRealtimeCapacity,
   forecastHourlyDemand,
 } from '../src/services/replenishment-forecast.mjs';
 
@@ -139,4 +140,31 @@ test('realtime protection keeps short-lived account buffers in minutes', () => {
   assert.ok(result.bufferHours <= 13 / 60);
   assert.ok(result.protectionHours < 0.7);
   assert.equal(result.accountValidityHours, 0.833);
+});
+
+test('realtime capacity keeps a repairing account during its repair validity window', () => {
+  const result = estimateRealtimeCapacity({
+    accountStates: [
+      {
+        accountId: 1,
+        quotaUsedPercent: 50,
+        quotaCurrent: true,
+        available: true,
+      },
+      {
+        accountId: 2,
+        quotaUsedPercent: 40,
+        quotaCurrent: true,
+        available: true,
+        repairGraceActive: true,
+      },
+    ],
+    usageTotals: [
+      { accountId: 1, usage: 50 },
+    ],
+  });
+
+  assert.equal(result.effectiveAccounts, 2);
+  assert.equal(result.currentRemainingCapacity, 110);
+  assert.equal(result.accounts[1].estimatedRemainingCapacity, 60);
 });

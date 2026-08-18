@@ -105,7 +105,7 @@ test('replenishment trigger strategy is validated and stored', async () => {
   );
 });
 
-test('smart replenishment keeps the configured polling interval while normalizing forecast controls', async () => {
+test('smart replenishment keeps polling and repair validity while normalizing forecast controls', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const current = await repository.getRule(1);
 
@@ -124,7 +124,7 @@ test('smart replenishment keeps the configured polling interval while normalizin
   });
 
   assert.equal(saved.targetAvailableAccounts, 3);
-  assert.equal(saved.repairGraceSeconds, 0);
+  assert.equal(saved.repairGraceSeconds, 900);
   assert.equal(saved.scheduleIntervalSeconds, 30);
   assert.equal(saved.forecastLookbackHours, 168);
   assert.equal(saved.forecastDefaultAccountCapacity, null);

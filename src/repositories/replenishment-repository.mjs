@@ -95,7 +95,7 @@ function rule(row) {
     quotaUsedThresholdPercent: Number(row.quota_used_threshold_percent ?? 80),
     quotaWindow: row.quota_window || 'any',
     quotaUnknownPolicy: row.quota_unknown_policy || 'warn',
-    repairGraceSeconds: Number(row.repair_grace_seconds ?? 900),
+    repairGraceSeconds: Number(row.repair_grace_seconds ?? 300),
     recoveryRetryLimit: row.recovery_retry_limit === null || row.recovery_retry_limit === undefined
       ? null : Number(row.recovery_retry_limit),
     maxOrderAmountCny: number(row.max_order_amount_cny),
@@ -321,6 +321,7 @@ function compactInventorySnapshot(snapshot = {}) {
     unavailableAccounts: Number(snapshot.unavailableAccounts || 0),
     unknownQuotaAccounts: Number(snapshot.unknownQuotaAccounts || 0),
     graceRepairingAccounts: Number(snapshot.graceRepairingAccounts || 0),
+    repairGraceSeconds: Number(snapshot.repairGraceSeconds || 0),
   };
 }
 
@@ -364,11 +365,15 @@ function compactForecastSnapshot(snapshot = {}) {
     demandConfidence: snapshot.demandConfidence || '',
     predictiveDataReady: Boolean(snapshot.predictiveDataReady),
     effectiveAccounts: Number(snapshot.effectiveAccounts || 0),
+    emergencyAvailableAccounts: Number(snapshot.emergencyAvailableAccounts || 0),
+    projectedAvailableAccounts: Number(snapshot.projectedAvailableAccounts || 0),
     exhaustedAccounts: Number(snapshot.exhaustedAccounts || 0),
     limitedAccounts: Number(snapshot.limitedAccounts || 0),
     errorAccounts: Number(snapshot.errorAccounts || 0),
     unavailableAccounts: Number(snapshot.unavailableAccounts || 0),
     repairingAccounts: Number(snapshot.repairingAccounts || 0),
+    graceRepairingAccounts: Number(snapshot.graceRepairingAccounts || 0),
+    repairGraceSeconds: Number(snapshot.repairGraceSeconds || 0),
     staleQuotaAccounts: Number(snapshot.staleQuotaAccounts || 0),
     unknownQuotaAccounts: Number(snapshot.unknownQuotaAccounts || 0),
     pendingAccounts: Number(snapshot.pendingAccounts || 0),
@@ -416,7 +421,7 @@ function normalizeRuleInput(input) {
     quotaUsedThresholdPercent: Number(input.quotaUsedThresholdPercent ?? 80),
     quotaWindow: String(input.quotaWindow || 'any'),
     quotaUnknownPolicy: String(input.quotaUnknownPolicy || 'warn'),
-    repairGraceSeconds: Number(input.repairGraceSeconds ?? 900),
+    repairGraceSeconds: Number(input.repairGraceSeconds ?? 300),
     recoveryRetryLimit: input.recoveryRetryLimit === null
       || input.recoveryRetryLimit === undefined
       || input.recoveryRetryLimit === ''
@@ -453,7 +458,6 @@ function normalizeRuleInput(input) {
   if (values.triggerStrategy === 'smart_forecast') {
     values.quotaWindow = 'long';
     values.targetAvailableAccounts = values.minAvailableAccounts;
-    values.repairGraceSeconds = 0;
     values.forecastLookbackHours = 168;
     values.forecastCoverageHours = 24;
     values.forecastSafetyFactor = 1.2;
@@ -496,7 +500,7 @@ function normalizeRuleInput(input) {
   if (!['short', 'long', 'any'].includes(values.quotaWindow)) throw badRequest('额度判断窗口无效');
   if (!['warn', 'low', 'ignore'].includes(values.quotaUnknownPolicy)) throw badRequest('额度未知处理方式无效');
   if (!Number.isSafeInteger(values.repairGraceSeconds) || values.repairGraceSeconds < 0 || values.repairGraceSeconds > 86400) {
-    throw badRequest('修复等待时间必须在 0 到 86400 秒之间');
+    throw badRequest('修复有效期必须在 0 到 86400 秒之间');
   }
   if (values.recoveryRetryLimit !== null
     && (!Number.isSafeInteger(values.recoveryRetryLimit)
@@ -586,7 +590,7 @@ export class ReplenishmentRepository {
       quotaUsedThresholdPercent: 80,
       quotaWindow: 'any',
       quotaUnknownPolicy: 'warn',
-      repairGraceSeconds: 900,
+      repairGraceSeconds: 300,
       recoveryRetryLimit: null,
       maxOrderAmountCny: 100,
       maxDailyAmountCny: 300,
@@ -1224,7 +1228,7 @@ export class ReplenishmentRepository {
     return result.rows.map(item);
   }
 
-  async listOpenRecoveryAccountIdsForPool(targetPoolKey) {
+  async listOpenRecoveriesForPool(targetPoolKey) {
     const openStatuses = [
       'detected', 'waiting_supplier', 'claimable', 'credentials_saved',
       'updating_sub2api', 'verifying', 'retry_wait', 'manual_required',
@@ -1236,21 +1240,40 @@ export class ReplenishmentRepository {
       const itemIds = new Set(this.items
         .filter((entry) => orderIds.has(entry.orderId))
         .map((entry) => entry.id));
-      return [...new Set(this.recoveries
-        .filter((entry) => itemIds.has(entry.orderItemId) && openStatuses.includes(entry.status))
-        .map((entry) => Number(entry.sub2apiAccountId))
-        .filter((value) => Number.isSafeInteger(value) && value > 0))];
+      const byAccountId = new Map();
+      for (const entry of this.recoveries) {
+        const accountId = Number(entry.sub2apiAccountId);
+        if (!itemIds.has(entry.orderItemId)
+          || !openStatuses.includes(entry.status)
+          || !Number.isSafeInteger(accountId)
+          || accountId <= 0) continue;
+        const current = byAccountId.get(accountId);
+        if (!current || Date.parse(entry.firstSeenAt || '') < Date.parse(current.firstSeenAt || '')) {
+          byAccountId.set(accountId, {
+            sub2apiAccountId: accountId,
+            firstSeenAt: entry.firstSeenAt || null,
+            status: entry.status,
+          });
+        }
+      }
+      return [...byAccountId.values()];
     }
     const result = await this.pool.query(`
-      SELECT DISTINCT rr.sub2api_account_id
+      SELECT DISTINCT ON (rr.sub2api_account_id)
+        rr.sub2api_account_id,rr.first_seen_at,rr.status
       FROM ${this.schema}.replenishment_recoveries rr
       JOIN ${this.schema}.oauth_supply_order_items i ON i.id=rr.order_item_id
       JOIN ${this.schema}.oauth_supply_orders o ON o.id=i.order_id
       WHERE o.target_pool_key=$1
-        AND rr.status=ANY($2::text[])`, [targetPoolKey, openStatuses]);
+        AND rr.status=ANY($2::text[])
+      ORDER BY rr.sub2api_account_id,rr.first_seen_at ASC,rr.id ASC`, [targetPoolKey, openStatuses]);
     return result.rows
-      .map((row) => Number(row.sub2api_account_id))
-      .filter((value) => Number.isSafeInteger(value) && value > 0);
+      .map((row) => ({
+        sub2apiAccountId: Number(row.sub2api_account_id),
+        firstSeenAt: row.first_seen_at || null,
+        status: row.status || '',
+      }))
+      .filter((entry) => Number.isSafeInteger(entry.sub2apiAccountId) && entry.sub2apiAccountId > 0);
   }
 
   async upsertRecovery(input) {

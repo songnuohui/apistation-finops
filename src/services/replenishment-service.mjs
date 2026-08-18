@@ -133,6 +133,21 @@ function latestRecoveryByItem(entries, predicate = () => true) {
   return result;
 }
 
+function repairGraceState(recovery, repairGraceSeconds, nowMs) {
+  if (!recovery) return { active: false, expiresAt: null, remainingSeconds: 0 };
+  const graceSeconds = Math.max(0, Number(repairGraceSeconds || 0));
+  const firstSeenMs = Date.parse(recovery.firstSeenAt || '');
+  if (!graceSeconds || !Number.isFinite(firstSeenMs)) {
+    return { active: false, expiresAt: null, remainingSeconds: 0 };
+  }
+  const expiresMs = firstSeenMs + graceSeconds * 1000;
+  return {
+    active: nowMs < expiresMs,
+    expiresAt: new Date(expiresMs).toISOString(),
+    remainingSeconds: Math.max(0, Math.ceil((expiresMs - nowMs) / 1000)),
+  };
+}
+
 function textIncludesAuthFailure(...values) {
   return values.some((value) => /(?:^|\D)401(?:\D|$)|unauth|invalid[_ -]?token|token[_ -]?invalidated|token.*expired|needs[_ -]?reauth/i.test(String(value || '')));
 }
@@ -1401,8 +1416,9 @@ export class ReplenishmentService {
       if (repairing) {
         healthStatus = 'repairing';
         repairingAccounts += 1;
-        const ageMs = this.now() - Date.parse(recoveryJob.firstSeenAt || new Date(this.now()).toISOString());
-        if (ageMs < rule.repairGraceSeconds * 1000) graceRepairingAccounts += 1;
+        if (repairGraceState(recoveryJob, rule.repairGraceSeconds, this.now()).active) {
+          graceRepairingAccounts += 1;
+        }
       } else if (!healthyStatus && !staleHealthy) {
         healthStatus = 'unavailable';
         unavailableAccounts += 1;
@@ -1472,6 +1488,7 @@ export class ReplenishmentService {
       unavailableAccounts,
       repairingAccounts,
       graceRepairingAccounts,
+      repairGraceSeconds: Number(rule.repairGraceSeconds || 0),
       unknownQuotaAccounts,
       pendingAccounts,
       accounts,
@@ -1621,11 +1638,11 @@ export class ReplenishmentService {
     if (this.runtimeInflight.has(cacheKey)) return this.runtimeInflight.get(cacheKey);
 
     const load = (async () => {
-      const [trackedItems, sourceAccounts, planning, openRecoveryIds] = await Promise.all([
+      const [trackedItems, sourceAccounts, planning, openRecoveries] = await Promise.all([
         this.repository.listTrackedItemsForPool(rule.targetPoolKey),
         this.accountReader.listAllAccounts({ platform: rule.platform, status: '' }),
         this.repository.getPoolPlanningStats(rule.targetPoolKey),
-        this.repository.listOpenRecoveryAccountIdsForPool(rule.targetPoolKey),
+        this.repository.listOpenRecoveriesForPool(rule.targetPoolKey),
       ]);
       const poolAccounts = (sourceAccounts || []).filter((account) => accountMatchesRule(account, rule));
       const trackedByAccountId = new Map();
@@ -1637,7 +1654,10 @@ export class ReplenishmentService {
           trackedByAccountId.set(accountId, item);
         }
       }
-      const repairingAccountIds = new Set(openRecoveryIds.map(Number));
+      const recoveryByAccountId = new Map(openRecoveries.map((entry) => [
+        Number(entry.sub2apiAccountId),
+        entry,
+      ]));
       const accountIds = poolAccounts.map((account) => Number(account.id))
         .filter((value) => Number.isSafeInteger(value) && value > 0);
       const accountStates = poolAccounts.map((account) => {
@@ -1656,7 +1676,9 @@ export class ReplenishmentService {
           explicitExpiresAt: epochSeconds(account?.expires_at ?? account?.expiresAt),
         });
         const expired = expiresAt !== null && expiresAt * 1000 <= now;
-        const repairing = repairingAccountIds.has(accountId);
+        const recovery = recoveryByAccountId.get(accountId) || null;
+        const repairing = Boolean(recovery);
+        const repairGrace = repairGraceState(recovery, rule.repairGraceSeconds, now);
         const authFailed = textIncludesAuthFailure(account?.error_message, account?.errorMessage);
         const schedule = scheduleSnapshot(account, {
           expired,
@@ -1675,12 +1697,12 @@ export class ReplenishmentService {
         const quotaCurrent = quota.long !== null
           && Number.isFinite(quotaObservedMs)
           && !quotaWindowExpired;
-        const available = String(account?.status || '').toLowerCase() === 'active'
+        const available = repairGrace.active || (String(account?.status || '').toLowerCase() === 'active'
           && account?.schedulable === true
           && schedule.state === 'schedulable'
           && !expired
           && !repairing
-          && !authFailed;
+          && !authFailed);
         return {
           accountId,
           accountName: displayName,
@@ -1690,6 +1712,9 @@ export class ReplenishmentService {
           scheduleReason: schedule.reason,
           authFailed,
           repairing,
+          repairGraceActive: repairGrace.active,
+          repairGraceExpiresAt: repairGrace.expiresAt,
+          repairGraceRemainingSeconds: repairGrace.remainingSeconds,
           expired,
           expiresAt,
           validityHours,
@@ -1754,7 +1779,9 @@ export class ReplenishmentService {
         let runtimeReason = account.scheduleReason || '账号当前不可调度';
         if (account.repairing) {
           runtimeStatus = 'repairing';
-          runtimeReason = '账号正在修复，成功导入前不计入容量';
+          runtimeReason = account.repairGraceActive
+            ? `账号正在修复，未来 ${account.repairGraceRemainingSeconds} 秒内仍计入补号容量`
+            : '账号正在修复，已超出修复有效期，不再计入补号容量';
         } else if (account.authFailed || account.scheduleState === 'authentication_failed') {
           runtimeStatus = 'error';
           runtimeReason = account.lastError || account.scheduleReason || '账号凭据或运行状态异常';
@@ -1789,6 +1816,9 @@ export class ReplenishmentService {
           schedulable: account.sourceSchedulable,
           scheduleState: account.scheduleState,
           repairing: account.repairing,
+          repairGraceActive: account.repairGraceActive,
+          repairGraceExpiresAt: account.repairGraceExpiresAt,
+          repairGraceRemainingSeconds: account.repairGraceRemainingSeconds,
           expired: account.expired,
           expiresAt: account.expiresAt,
           validityHours: account.validityHours,
@@ -1824,9 +1854,10 @@ export class ReplenishmentService {
         result[account.runtimeStatus] = (result[account.runtimeStatus] || 0) + 1;
         return result;
       }, {});
+      const graceRepairingAccounts = accounts.filter((account) => account.repairGraceActive).length;
       const emergencyAvailableAccounts = accounts.filter((account) => (
         ['effective', 'quota_unknown', 'stale_quota'].includes(account.runtimeStatus)
-      )).length;
+      )).length + graceRepairingAccounts;
       const unknownOrStaleAccounts = Number(counts.quota_unknown || 0) + Number(counts.stale_quota || 0);
       const historicalSuccessRate = planning.historicalSuccessRate === null
         || planning.historicalSuccessRate === undefined
@@ -1916,7 +1947,7 @@ export class ReplenishmentService {
           : currentHourlyRate <= 0
             ? '最近完整观测窗口没有实际消耗，最低有效账号数满足时不补号'
             : `当前速度 ${rounded(currentHourlyRate, 2)}/小时，按账号累计成本增量生成最近完整 5 分钟桶`,
-        `当前剩余容量 ${rounded(capacity.currentRemainingCapacity, 2)}，在途折算容量 ${rounded(inFlightCapacity, 2)}`,
+        `当前剩余容量 ${rounded(capacity.currentRemainingCapacity, 2)}，在途折算容量 ${rounded(inFlightCapacity, 2)}，修复有效期内账号 ${graceRepairingAccounts}`,
         `账号有效期 P25 ${protection.accountValidityHours || '--'} 小时，采购 P90 ${protection.leadTimeHoursP90} 小时 + 分钟级缓冲 ${protection.bufferHours} 小时，保护窗口 ${protection.protectionHours} 小时`,
         !predictiveDataReady
           ? unknownOrStaleAccounts > 0
@@ -1978,11 +2009,14 @@ export class ReplenishmentService {
         predictiveDataReady,
         effectiveAccounts: Number(counts.effective || 0),
         emergencyAvailableAccounts,
+        projectedAvailableAccounts,
         exhaustedAccounts: Number(counts.exhausted || 0),
         limitedAccounts: Number(counts.rate_limited || 0),
         errorAccounts: Number(counts.error || 0),
         unavailableAccounts: Number(counts.unavailable || 0),
         repairingAccounts: Number(counts.repairing || 0),
+        graceRepairingAccounts,
+        repairGraceSeconds: Number(rule.repairGraceSeconds || 0),
         staleQuotaAccounts: Number(counts.stale_quota || 0),
         unknownQuotaAccounts: Number(counts.quota_unknown || 0),
         pendingAccounts,
@@ -2076,6 +2110,7 @@ export class ReplenishmentService {
         targetGroupIds: rule.targetGroupIds,
         minAvailableAccounts: rule.minAvailableAccounts,
         maxPurchaseQuantity: rule.replenishQuantity,
+        repairGraceSeconds: rule.repairGraceSeconds,
       },
       accounts: filtered.slice(offset, offset + normalizedPageSize),
       page: normalizedPage,

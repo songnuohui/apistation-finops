@@ -53,7 +53,7 @@
       <div v-else-if="runtimeLoading && !runtimeLoaded" class="empty-state">正在读取 Sub2API 实时额度与用量...</div>
       <template v-else>
         <div class="runtime-kpi-grid">
-          <div><span>实时有效账号</span><strong>{{ runtimeData.effectiveAccounts || 0 }}</strong><small>最低兜底 {{ runtimeData.rule?.minAvailableAccounts || 0 }}</small></div>
+          <div><span>补号计入账号</span><strong>{{ runtimeData.emergencyAvailableAccounts || 0 }}</strong><small>正常 {{ runtimeData.effectiveAccounts || 0 }} · 修复有效 {{ runtimeData.graceRepairingAccounts || 0 }}</small></div>
           <div><span>当前剩余容量</span><strong>{{ usageValue(runtimeData.currentRemainingCapacity) }}</strong><small>按每个账号 7 天剩余额度折算</small></div>
           <div><span>当前用量速度</span><strong>{{ usageValue(runtimeData.currentHourlyRate) }}/h</strong><small>最近完整 5 分钟桶 EWMA</small></div>
           <div><span>预计续航</span><strong>{{ hoursValue(runtimeData.runwayHours) }}</strong><small>含在途 {{ hoursValue(runtimeData.protectedRunwayHours) }}</small></div>
@@ -65,7 +65,7 @@
           <span><i class="exhausted" />耗尽 {{ runtimeData.exhaustedAccounts || 0 }}</span>
           <span><i class="limited" />限流 {{ runtimeData.limitedAccounts || 0 }}</span>
           <span><i class="error" />异常 {{ runtimeData.errorAccounts || 0 }}</span>
-          <span><i class="repairing" />修复 {{ runtimeData.repairingAccounts || 0 }}</span>
+          <span><i class="repairing" />修复 {{ runtimeData.repairingAccounts || 0 }} · 有效期内 {{ runtimeData.graceRepairingAccounts || 0 }}</span>
           <span><i class="pending" />在途 {{ runtimeData.pendingAccounts || 0 }}</span>
           <span><i class="unknown" />额度未知/滞后 {{ (runtimeData.unknownQuotaAccounts || 0) + (runtimeData.staleQuotaAccounts || 0) }}</span>
         </div>
@@ -96,6 +96,7 @@
               <div><dt>保护窗口</dt><dd>{{ hoursValue(runtimeData.protectionHours) }}</dd></div>
               <div><dt>所需容量</dt><dd>{{ usageValue(runtimeData.requiredCapacity) }}</dd></div>
               <div><dt>容量缺口</dt><dd>{{ usageValue(runtimeData.capacityGap) }}</dd></div>
+              <div><dt>修复有效期</dt><dd>{{ duration(runtimeData.repairGraceSeconds || 0) }}</dd></div>
             </dl>
           </div>
         </div>
@@ -190,7 +191,8 @@
                   <span>额度 {{ quotaWindowLabel(rule.quotaWindow) }} ≥ {{ rule.quotaUsedThresholdPercent }}%</span>
                 </template>
                 <template v-else-if="rule.triggerStrategy === 'smart_forecast'">
-                  <span>有效 {{ rule.lastForecastSnapshot?.effectiveAccounts ?? '--' }}</span>
+                  <span>补号计入 {{ rule.lastForecastSnapshot?.emergencyAvailableAccounts ?? '--' }}</span>
+                  <span>修复有效 {{ rule.lastForecastSnapshot?.graceRepairingAccounts ?? 0 }}</span>
                   <span>实时速度 {{ usageValue(rule.lastForecastSnapshot?.recentHourlyRate) }}/h</span>
                   <span>保护窗口 {{ hoursValue(rule.lastForecastSnapshot?.protectionHours) }}</span>
                   <span>安全余量 {{ safetyPercent(rule.lastForecastSnapshot?.safetyFactor) }}</span>
@@ -207,6 +209,7 @@
                 <span>跟踪 {{ rule.lastInventorySnapshot.trackedAccounts || 0 }}</span>
                 <span>低额度 {{ rule.lastInventorySnapshot.lowQuotaAccounts || 0 }}</span>
                 <span>修复中 {{ rule.lastInventorySnapshot.repairingAccounts || 0 }}</span>
+                <span>修复有效 {{ rule.lastInventorySnapshot.graceRepairingAccounts || 0 }}</span>
                 <span>在途 {{ rule.lastInventorySnapshot.pendingAccounts || 0 }}</span>
                 <small>{{ dateTime(rule.lastInventorySnapshot.capturedAt) }}</small>
               </div>
@@ -447,7 +450,7 @@
             <div class="form-note full-field">系统按最近完整 60 分钟的实时速度和当前 Team 剩余额度计算补号数量；采购 P90、动态缓冲、安全系数、单号容量、在途成功率和检查频率均自动调整。额度未知或滞后时禁止预测下单，只保留最低有效账号数兜底。</div>
           </template>
           <label v-else>每次固定购买<input v-model.number="editor.replenishQuantity" type="number" min="1" max="1000" /></label>
-          <label v-if="editor.triggerStrategy === 'inventory_threshold'">修复等待（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" /></label>
+          <label v-if="editor.triggerStrategy !== 'fixed_schedule'">修复有效期（秒）<input v-model.number="editor.repairGraceSeconds" type="number" min="0" max="86400" step="1" /><small class="field-hint">待修复账号在此时间内仍计入有效库存和智能补号容量，默认 300 秒。</small></label>
           <label>自动补号开始<input v-model="editor.scheduleStartTime" type="time" /></label>
           <label>自动补号结束<input v-model="editor.scheduleEndTime" type="time" /><small class="field-hint">开始和结束相同表示全天执行；跨午夜时段也支持。</small></label>
           <label>自动补号轮询间隔（秒）<input v-model.number="editor.scheduleIntervalSeconds" type="number" min="3" max="86400" step="1" /><small class="field-hint">智能预测也按此间隔重新读取实时额度、用量和供应商库存，最短 3 秒。</small></label>
@@ -1112,7 +1115,7 @@ function newRule() {
     triggerStrategy: 'inventory_threshold',
     minAvailableAccounts: 2, targetAvailableAccounts: 5, replenishQuantity: 3,
     quotaUsedThresholdPercent: 80, quotaWindow: 'any', quotaUnknownPolicy: 'warn',
-    repairGraceSeconds: 900, recoveryRetryLimit: null,
+    repairGraceSeconds: 300, recoveryRetryLimit: null,
     scheduleStartTime: '00:00', scheduleEndTime: '00:00', scheduleIntervalSeconds: 300,
     forecastLookbackHours: 168, forecastCoverageHours: 24, forecastSafetyFactor: 1.2,
     forecastFallbackLeadTimeHours: 2, forecastDefaultAccountCapacity: null,
@@ -1136,6 +1139,7 @@ function editRule(rule: any) {
     forecastSafetyFactor: rule.forecastSafetyFactor ?? 1.2,
     forecastFallbackLeadTimeHours: rule.forecastFallbackLeadTimeHours ?? 2,
     forecastDefaultAccountCapacity: rule.forecastDefaultAccountCapacity ?? null,
+    repairGraceSeconds: rule.repairGraceSeconds ?? 300,
     scheduleIntervalSeconds: Math.max(3, Number(rule.scheduleIntervalSeconds || 300)),
     loadFactor: rule.loadFactor ?? null,
     proxyId: rule.proxyId ?? null,
@@ -1153,7 +1157,7 @@ function onTriggerStrategyChange() {
   if (editor.value.triggerStrategy !== 'smart_forecast') return;
   editor.value.quotaWindow = 'long';
   editor.value.targetAvailableAccounts = Number(editor.value.minAvailableAccounts || 1);
-  editor.value.repairGraceSeconds = 0;
+  editor.value.repairGraceSeconds = Number(editor.value.repairGraceSeconds ?? 300);
 }
 
 function validateEditor() {
@@ -1179,6 +1183,12 @@ function validateEditor() {
     || Number(editor.value.scheduleIntervalSeconds) < 3
     || Number(editor.value.scheduleIntervalSeconds) > 86400) {
     return '自动补号轮询间隔必须是 3 到 86400 秒之间的整数。';
+  }
+  if (editor.value.triggerStrategy !== 'fixed_schedule'
+    && (!Number.isInteger(Number(editor.value.repairGraceSeconds))
+      || Number(editor.value.repairGraceSeconds) < 0
+      || Number(editor.value.repairGraceSeconds) > 86400)) {
+    return '修复有效期必须是 0 到 86400 秒之间的整数。';
   }
   const loadFactor = editor.value.loadFactor;
   if (loadFactor !== null && loadFactor !== undefined && loadFactor !== ''
