@@ -4342,7 +4342,7 @@ export class PostgresRepository {
                 peak_rate_enabled,peak_rate_multiplier,applied_peak_multiplier,timezone,snapshot_data,supplier_key_id)
               SELECT $1,$2,'supplier_direct_probe','ok','token',$3,NOW(),
                 NOW()+($4*2)*INTERVAL '1 second',NOW(),NOW()+$4*INTERVAL '1 second',0,$5,'',
-                $6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15
+                $6,$7,$8,$9,$10,$11,$12,$13::varchar(80),$14::jsonb,$15
               WHERE NOT EXISTS (
                 SELECT 1
                 FROM (
@@ -4364,7 +4364,7 @@ export class PostgresRepository {
                   AND previous.peak_rate_enabled IS NOT DISTINCT FROM $10
                   AND previous.peak_rate_multiplier IS NOT DISTINCT FROM $11
                   AND previous.applied_peak_multiplier IS NOT DISTINCT FROM $12
-                  AND previous.timezone IS NOT DISTINCT FROM $13
+                  AND previous.timezone IS NOT DISTINCT FROM $13::varchar(80)
                   AND previous.snapshot_data->>'peak_start'
                     IS NOT DISTINCT FROM $14::jsonb->>'peak_start'
                   AND previous.snapshot_data->>'peak_end'

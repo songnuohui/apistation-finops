@@ -161,6 +161,9 @@ test('supplier key sync pins the status parameter to text in every SQL context',
           rowCount: 1,
         };
       }
+      if (text.includes('SELECT source_account_id FROM "finops".supplier_account_links')) {
+        return { rows: [{ source_account_id: '42' }], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     },
     release() {},
@@ -189,12 +192,32 @@ test('supplier key sync pins the status parameter to text in every SQL context',
       lastUsedAt: null,
       sourceData: {},
     }],
-  }, []);
+  }, [{
+    externalId: '596',
+    status: 'ok',
+    method: 'billing_metadata',
+    httpStatus: 200,
+    latencyMs: 12,
+    billing: {
+      observed_at: new Date().toISOString(),
+      group_rate_multiplier: 0.8,
+      user_rate_multiplier: 0.9,
+      resolved_rate_multiplier: 0.85,
+      effective_rate_multiplier: 0.85,
+      peak_rate_enabled: false,
+      peak_rate_multiplier: null,
+      applied_peak_multiplier: null,
+      timezone: 'Asia/Shanghai',
+    },
+  }]);
 
   const keyInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".supplier_keys'));
+  const rateObservationInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".account_rate_observations'));
   assert.ok(queries.some((query) => query.text.includes('pg_advisory_xact_lock')));
   assert.match(keyInsert.text, /VALUES\(\$1,\$2,\$3,\$4,\$5,\$6::text,\$7/);
   assert.match(keyInsert.text, /CASE WHEN \$6::text IN/);
+  assert.match(rateObservationInsert.text, /\$13::varchar\(80\)/);
+  assert.match(rateObservationInsert.text, /previous\.timezone IS NOT DISTINCT FROM \$13::varchar\(80\)/);
   assert.equal(queries.some((query) => query.text.includes("'supplier_key_changed'")), false);
 });
 
