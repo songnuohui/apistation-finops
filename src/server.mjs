@@ -349,9 +349,9 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/summary')return json(res,200,await cached('summary',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getSummary(range())));
   if(request.method==='GET'&&url.pathname==='/api/overview-dashboard')return json(res,200,await cached('overview',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getOverviewDashboard(range())));
   if(request.method==='GET'&&url.pathname==='/api/trend')return json(res,200,await cached('trend',config.dashboardCacheTtlSeconds,()=>sourceUsageService.getTrend(range())));
-  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>sourceUsageService.getUsageBreakdown({...range(),...page(),...usageSort(url.searchParams)})));
+  if(request.method==='GET'&&url.pathname==='/api/usage/models')return json(res,200,await cached('usage',config.listCacheTtlSeconds,()=>sourceUsageService.getUsageBreakdown({...range(),...page(),...usageSort(url.searchParams),search:searchTerm(url.searchParams)})));
   if(request.method==='GET'&&url.pathname==='/api/usage/users')return json(res,200,await cached('usage-users',config.listCacheTtlSeconds,()=>sourceUsageService.listUsers({
-    ...range(),...page(),...userSort(url.searchParams),consumptionOnly:true,
+    ...range(),...page(),...userSort(url.searchParams),consumptionOnly:true,search:searchTerm(url.searchParams),
   })));
   if(request.method==='GET'&&url.pathname==='/api/usage/events')return json(res,200,await cached('usage-events',config.listCacheTtlSeconds,()=>sourceUsageService.listUsageEvents({...range(),...page(),search:searchTerm(url.searchParams)})));
   const userDetails=/^\/api\/users\/(\d+)\/details$/.exec(url.pathname);

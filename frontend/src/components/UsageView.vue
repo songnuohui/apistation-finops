@@ -16,7 +16,9 @@ const data = ref<AnyRecord>({});
 const loading = ref(false);
 let searchTimer: number | undefined;
 let loadRequestId = 0;
-const money = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value || 0));
+const money = (value: any) => value === null || value === undefined || value === ''
+  ? '--'
+  : new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value));
 const usd = (value: any) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(Number(value || 0));
 const compact = (value: any) => new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
 const percent = (value: any) => value === null || value === undefined ? '--' : `${(Number(value) * 100).toFixed(1)}%`;
@@ -63,8 +65,8 @@ onMounted(load);
       </thead><tbody>
         <tr v-if="loading && !(data.items || []).length"><td :colspan="tab === 'events' ? 8 : 7" class="table-empty">正在读取消费数据</td></tr>
         <tr v-for="row in data.items || []" :key="row.sourceUsageId || row.id || row.name">
-          <template v-if="tab !== 'events'"><td><strong>{{ row.name || row.email || row.username || `用户 #${row.id}` }}</strong><small v-if="row.id">ID {{ row.id }}</small></td><td class="number">{{ compact(row.requests) }}</td><td class="number">{{ compact(row.tokens) }}</td><td class="number">{{ money(row.userChargeCny) }}</td><td class="number">{{ money(row.bookedCostCny || row.effectiveCostCny) }}</td><td class="number positive">{{ money(row.bookedProfitCny || row.profitCny) }}</td><td class="number">{{ percent(row.grossMargin || row.margin) }}</td></template>
-          <template v-else><td>{{ dateTime(row.occurredAt) }}</td><td><strong>{{ row.requestId || `#${row.sourceUsageId}` }}</strong><small>{{ row.email || row.username || `用户 #${row.userId}` }}</small></td><td>{{ row.model || row.requestedModel || '未标注模型' }}<small v-if="row.upstreamModel && row.upstreamModel !== row.model">上游 {{ row.upstreamModel }}</small></td><td>{{ row.accountName || `#${row.accountId || '--'}` }}<small>组 #{{ row.groupId || '--' }} · 渠道 #{{ row.channelId || '--' }}</small></td><td class="number">{{ compact(row.totalTokens || row.tokens) }}</td><td class="number">{{ money(row.userChargeCny || row.actualCostCny) }}<small>{{ usd(row.standardCostUsdReference) }} 目录价</small></td><td class="number">{{ money(row.calculatedCostCny || row.bookedCostCny) }}</td><td><span class="status-pill" :class="statusClass(row.costStatus)">{{ row.costStatus || '已同步' }}</span></td></template>
+          <template v-if="tab !== 'events'"><td><strong>{{ row.name || row.email || row.username || `用户 #${row.id}` }}</strong><small v-if="row.id">ID {{ row.id }}</small></td><td class="number">{{ compact(row.requests) }}</td><td class="number">{{ compact(row.tokens) }}</td><td class="number">{{ money(row.userChargeCny) }}</td><td class="number">{{ money(row.bookedCostCny ?? row.effectiveCostCny) }}</td><td class="number positive">{{ money(row.bookedProfitCny ?? row.profitCny) }}</td><td class="number">{{ percent(row.grossMargin ?? row.margin) }}</td></template>
+          <template v-else><td>{{ dateTime(row.occurredAt) }}</td><td><strong>{{ row.requestId || `#${row.sourceUsageId}` }}</strong><small>{{ row.email || row.username || `用户 #${row.userId}` }}</small></td><td>{{ row.model || row.requestedModel || '未标注模型' }}<small v-if="row.upstreamModel && row.upstreamModel !== row.model">上游 {{ row.upstreamModel }}</small></td><td>{{ row.accountName || `#${row.accountId || '--'}` }}<small>组 #{{ row.groupId || '--' }} · 渠道 #{{ row.channelId || '--' }}</small></td><td class="number">{{ compact(row.totalTokens ?? row.tokens) }}</td><td class="number">{{ money(row.userChargeCny ?? row.actualCostCny) }}<small>{{ usd(row.standardCostUsdReference) }} 目录价</small></td><td class="number">{{ money(row.calculatedCostCny ?? row.bookedCostCny) }}</td><td><span class="status-pill" :class="statusClass(row.costStatus)">{{ row.costStatus || '已同步' }}</span></td></template>
         </tr>
         <tr v-if="!loading && !(data.items || []).length"><td :colspan="tab === 'events' ? 8 : 7" class="table-empty">暂无消费数据</td></tr>
       </tbody></table></div>
