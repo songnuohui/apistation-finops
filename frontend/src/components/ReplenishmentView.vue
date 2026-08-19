@@ -14,7 +14,7 @@
     <div v-if="error" class="error-banner">{{ error }}</div>
 
     <section class="metric-grid replenishment-metrics">
-      <div class="metric-card"><span>期间有效库存</span><strong>{{ dashboard.summary?.effectiveAccounts || 0 }}</strong><small>筛选期间采购，当前健康且额度充足</small></div>
+      <div class="metric-card"><span>当前有效库存</span><strong>{{ currentEffectiveInventory }}</strong><small>实时智能预测池；期间本地健康记录 {{ dashboard.summary?.effectiveAccounts || 0 }}</small></div>
       <div class="metric-card warning"><span>期间低额度账号</span><strong>{{ dashboard.summary?.lowQuotaAccounts || 0 }}</strong><small>筛选期间采购，当前达到额度阈值</small></div>
       <div class="metric-card danger"><span>期间不可用账号</span><strong>{{ dashboard.summary?.unavailableAccounts || 0 }}</strong><small>筛选期间采购，当前停用、过期或异常</small></div>
       <div class="metric-card"><span>期间修复中</span><strong>{{ dashboard.summary?.repairingAccounts || 0 }}</strong><small>筛选期间采购，当前等待认领或重试</small></div>
@@ -613,6 +613,9 @@ let runtimeTimer: number | null = null;
 
 const connected = computed(() => Boolean(dashboard.value.oauthSupply?.balance && !dashboard.value.oauthSupply.balance.error));
 const smartRules = computed(() => rules.value.filter((rule) => rule.triggerStrategy === 'smart_forecast'));
+const currentEffectiveInventory = computed(() => runtimeLoaded.value && runtimeRuleId.value
+  ? Number(runtimeData.value.effectiveAccounts || 0)
+  : Number(dashboard.value.summary?.effectiveAccounts || 0));
 const selectedRule = computed(() => selectedOrder.value ? rules.value.find((rule) => rule.id === selectedOrder.value.ruleId) : null);
 const groupById = computed<Map<number, any>>(() => new Map((catalog.value.groups || []).map((group: any) => [Number(group.id), group])));
 const mappingGroups = computed(() => !editor.value?.platform ? [] : (catalog.value.groups || []).filter((group: any) => group.platform === editor.value.platform));
