@@ -254,6 +254,45 @@ export class SourceUsageService {
     this.config = config;
     this.sourceUsageRepository = sourceUsageRepository;
     this.logger = logger;
+    this.sourceEconomicsInflight = new Map();
+    this.dashboardUsageInflight = new Map();
+  }
+
+  usageRangeKey(input) {
+    return `${new Date(input.start).toISOString()}:${new Date(input.end).toISOString()}`;
+  }
+
+  async getDashboardUsageRows(input) {
+    const key = this.usageRangeKey(input);
+    if (this.dashboardUsageInflight.has(key)) return this.dashboardUsageInflight.get(key);
+
+    const load = (async () => {
+      if (typeof this.sourceUsageRepository.getDailyAccountAndModelStats === 'function') {
+        const result = await this.sourceUsageRepository.getDailyAccountAndModelStats({
+          start: input.start,
+          end: input.end,
+        });
+        return {
+          accounts: Array.isArray(result?.accounts) ? result.accounts : [],
+          models: Array.isArray(result?.models) ? result.models : [],
+        };
+      }
+      const [accounts, models] = await Promise.all([
+        this.sourceUsageRepository.getDailyAccountGroupStats({
+          start: input.start,
+          end: input.end,
+        }),
+        this.sourceUsageRepository.getDailyDimensionStats({
+          start: input.start,
+          end: input.end,
+          dimension: 'model',
+        }),
+      ]);
+      return { accounts, models };
+    })().finally(() => this.dashboardUsageInflight.delete(key));
+
+    this.dashboardUsageInflight.set(key, load);
+    return load;
   }
 
   sourceSnapshot(input, filters = {}) {
@@ -878,11 +917,13 @@ export class SourceUsageService {
   }
 
   async getDimensionEconomics(input, dimension) {
-    const rows = await this.sourceUsageRepository.getDailyDimensionStats({
-      start: input.start,
-      end: input.end,
-      dimension,
-    });
+    const rows = dimension === 'model'
+      ? (await this.getDashboardUsageRows(input)).models
+      : await this.sourceUsageRepository.getDailyDimensionStats({
+        start: input.start,
+        end: input.end,
+        dimension,
+      });
     const accountIds = [...new Set(rows.map((row) => number(row.accountId)).filter((id) => id > 0))];
     const [accounts, timelines] = await Promise.all([
       this.repository.getAccountCostingProfiles({
@@ -1118,7 +1159,7 @@ export class SourceUsageService {
     return { cost: null, costKnown: false, unpricedRevenue: number(stats.total_actual_cost) };
   }
 
-  async getSourceEconomics(input) {
+  async computeSourceEconomics(input) {
     if (!this.sourceUsageRepository) {
       const stats = summarizeModels(await this.sourceSnapshot(input));
       return {
@@ -1130,10 +1171,7 @@ export class SourceUsageService {
         by_day: new Map(),
       };
     }
-    const rows = await this.sourceUsageRepository.getDailyAccountGroupStats({
-      start: input.start,
-      end: input.end,
-    });
+    const { accounts: rows } = await this.getDashboardUsageRows(input);
     const dailyByAccount = this.dailyAccountStats(rows);
     const accountIds = [...dailyByAccount.keys()].filter((id) => id > 0);
     const [accounts, timelines] = await Promise.all([
@@ -1214,6 +1252,15 @@ export class SourceUsageService {
       }
     }
     return summary;
+  }
+
+  async getSourceEconomics(input) {
+    const key = this.usageRangeKey(input);
+    if (this.sourceEconomicsInflight.has(key)) return this.sourceEconomicsInflight.get(key);
+    const load = this.computeSourceEconomics(input)
+      .finally(() => this.sourceEconomicsInflight.delete(key));
+    this.sourceEconomicsInflight.set(key, load);
+    return load;
   }
 
   calculateAccountCost(account, stats) {

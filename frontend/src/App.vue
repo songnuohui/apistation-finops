@@ -97,6 +97,12 @@ const showRangeControl = computed(() => (
   page.value !== 'oauth-supply'
   && (page.value !== 'suppliers' || supplierTab.value === 'quality')
 ));
+const customRangeError = computed(() => {
+  if (range.value !== 'custom') return '';
+  if (!customStart.value || !customEnd.value) return '请选择开始日期和结束日期';
+  if (customStart.value > customEnd.value) return '开始日期不能晚于结束日期';
+  return '';
+});
 
 function showToast(message: string) {
   toast.value = message;
@@ -280,7 +286,9 @@ async function logout() {
 }
 
 watch(page, () => { search.value = ''; });
-watch([range, customStart, customEnd], () => { if (range.value !== 'custom' || (customStart.value && customEnd.value)) loadPage(); });
+watch([range, customStart, customEnd], () => {
+  if (!customRangeError.value) loadPage();
+});
 watch(search, () => {
   const timer = window.setTimeout(() => {
     if (page.value === 'users') loadUsers();
@@ -362,10 +370,11 @@ function syncBodyScrollLock() {
               <button class="custom-range-trigger" type="button" :class="{ active: range === 'custom' }" title="自定义时间" @click="range = 'custom'"><CalendarDays :size="14" />自定义</button>
             </div>
           </div>
-          <div v-if="showRangeControl && range === 'custom'" class="custom-range-fields">
-            <label><span>开始</span><input v-model="customStart" type="date" /></label>
+          <div v-if="showRangeControl && range === 'custom'" class="custom-range-fields" :class="{ invalid: customRangeError }">
+            <label><span>开始</span><input v-model="customStart" type="date" :aria-invalid="customRangeError ? true : undefined" /></label>
             <span class="custom-range-separator">至</span>
-            <label><span>结束</span><input v-model="customEnd" type="date" /></label>
+            <label><span>结束</span><input v-model="customEnd" type="date" :aria-invalid="customRangeError ? true : undefined" /></label>
+            <span v-if="customRangeError" class="custom-range-error" role="alert">{{ customRangeError }}</span>
           </div>
           <button class="icon-button" type="button" title="刷新" aria-label="刷新" @click="refresh"><RefreshCw :size="18" :class="{ spin: loading }" /></button>
           <div class="user-chip">

@@ -8,6 +8,10 @@ export class SourceUsageRepository {
     this.schema = `"${config.sourceSchema}"`;
     this.timezone = config.timezone || 'Asia/Shanghai';
     this.ttlMs = (config.sub2apiUsageCacheTtlSeconds || 30) * 1_000;
+    this.staleTtlMs = Math.max(
+      this.ttlMs,
+      (config.sub2apiUsageStaleCacheTtlSeconds || 300) * 1_000,
+    );
     this.cache = new Map();
     this.inflight = new Map();
   }
@@ -23,7 +27,7 @@ export class SourceUsageRepository {
 
   pruneCache(now = Date.now()) {
     for (const [key, entry] of this.cache) {
-      if (entry.expiresAt <= now) this.cache.delete(key);
+      if ((entry.staleExpiresAt || entry.expiresAt) <= now) this.cache.delete(key);
     }
     while (this.cache.size > 40) this.cache.delete(this.cache.keys().next().value);
   }
@@ -178,6 +182,102 @@ export class SourceUsageRepository {
         actualCost: number(row.actual_cost),
       }));
       this.cache.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+      this.pruneCache();
+      return value;
+    })().finally(() => this.inflight.delete(key));
+
+    this.inflight.set(key, load);
+    return load;
+  }
+
+  async getDailyAccountAndModelStats({ start, end }) {
+    const key = this.cacheKey({ start, end, dimension: 'account-model' });
+    const now = Date.now();
+    const cached = this.cache.get(key);
+    if (cached?.expiresAt > now) return cached.value;
+    if (this.inflight.has(key)) return this.inflight.get(key);
+
+    const load = (async () => {
+      let client;
+      let result;
+      try {
+        client = await this.pool.connect();
+        await client.query('BEGIN TRANSACTION READ ONLY');
+        result = await client.query(`
+          WITH scoped_usage AS (
+            SELECT
+              COALESCE(ul.account_id,0)::bigint AS account_id,
+              (ul.created_at AT TIME ZONE $3)::date::text AS day,
+              COALESCE(NULLIF(BTRIM(COALESCE(ul.requested_model,ul.model)),''),'unlabeled') AS model_key,
+              ul.input_tokens,
+              ul.output_tokens,
+              ul.cache_creation_tokens,
+              ul.cache_read_tokens,
+              ul.total_cost,
+              ul.actual_cost
+            FROM ${this.schema}.usage_logs ul
+            WHERE ul.created_at >= $1 AND ul.created_at < $2
+          )
+          SELECT
+            account_id,
+            day,
+            CASE WHEN GROUPING(model_key)=1 THEN NULL ELSE model_key END AS model_key,
+            GROUPING(model_key)::integer AS model_grouped,
+            COUNT(*)::bigint AS requests,
+            COALESCE(SUM(input_tokens),0) AS input_tokens,
+            COALESCE(SUM(output_tokens),0) AS output_tokens,
+            COALESCE(SUM(cache_creation_tokens+cache_read_tokens),0) AS cache_tokens,
+            COALESCE(SUM(
+              input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens
+            ),0) AS total_tokens,
+            COALESCE(SUM(total_cost),0) AS cost,
+            COALESCE(SUM(actual_cost),0) AS actual_cost
+          FROM scoped_usage
+          GROUP BY GROUPING SETS (
+            (account_id,day),
+            (account_id,day,model_key)
+          )
+          ORDER BY account_id,day,model_grouped,model_key
+        `, [start, end, this.timezone]);
+        await client.query('COMMIT');
+      } catch (error) {
+        if (client) await client.query('ROLLBACK').catch(() => {});
+        if (cached?.staleExpiresAt > Date.now()) {
+          return cached.value;
+        }
+        throw error;
+      } finally {
+        client?.release();
+      }
+      const value = { accounts: [], models: [] };
+      for (const row of result.rows) {
+        const item = {
+          accountId: number(row.account_id),
+          day: row.day || '',
+          requests: number(row.requests),
+          inputTokens: number(row.input_tokens),
+          outputTokens: number(row.output_tokens),
+          cacheTokens: number(row.cache_tokens),
+          totalTokens: number(row.total_tokens),
+          cost: number(row.cost),
+          actualCost: number(row.actual_cost),
+        };
+        if (number(row.model_grouped) === 1) {
+          value.accounts.push(item);
+        } else {
+          value.models.push({
+            ...item,
+            dimensionKey: String(row.model_key || 'unlabeled'),
+            dimensionName: String(row.model_key || 'unlabeled'),
+          });
+        }
+      }
+      const loadedAt = Date.now();
+      this.cache.set(key, {
+        value,
+        expiresAt: loadedAt + this.ttlMs,
+        staleExpiresAt: loadedAt + this.staleTtlMs,
+      });
       this.pruneCache();
       return value;
     })().finally(() => this.inflight.delete(key));

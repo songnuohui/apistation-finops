@@ -80,8 +80,13 @@ async function load() {
       await nextTick();
       await drawChart();
     }),
-    assign(get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`), (value) => { models.value = value; modelsLoading.value = false; }),
   ]);
+  if (requestId === loadRequestId) {
+    await assign(
+      get(`/usage/models?${params}&page_size=8&sort=userChargeCny&direction=desc`),
+      (value) => { models.value = value; modelsLoading.value = false; },
+    );
+  }
   if (requestId === loadRequestId) {
     dashboardLoading.value = false;
     trendLoading.value = false;

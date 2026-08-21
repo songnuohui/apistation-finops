@@ -13,6 +13,9 @@
 .custom-range-fields{display:flex;align-items:flex-end;gap:7px;padding:3px 8px;background:#f4f7fb;border:1px solid var(--line);border-radius:7px}
 .custom-range-fields label{display:grid;gap:2px;color:var(--muted);font-size:10px}
 .custom-range-fields input{height:30px;padding:0 7px;border:1px solid var(--line);border-radius:5px;background:#fff;color:#35445a;font-size:12px}
+.custom-range-fields.invalid{border-color:#e1a0aa;background:#fff7f8}
+.custom-range-fields input[aria-invalid="true"]{border-color:#d96575;box-shadow:0 0 0 2px rgba(217,101,117,.1)}
+.custom-range-error{align-self:center;color:var(--red);font-size:11px;white-space:nowrap}
 .custom-range-separator{padding-bottom:7px;color:var(--muted);font-size:12px}
 .metric-action{display:block;width:100%;text-align:left;border:1px solid var(--line);cursor:pointer}
 .metric-action:hover{border-color:#9ebbea;background:#f7faff}
