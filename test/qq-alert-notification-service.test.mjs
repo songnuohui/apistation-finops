@@ -89,5 +89,33 @@ test('QQ alert delivery failures are recorded without failing the monitoring cyc
   assert.equal(deliveries[0][0], 10);
   assert.equal(deliveries[0][1], 'payload-2');
   assert.equal(deliveries[0][2].delivered, false);
-  assert.match(deliveries[0][2].error, /recipient unavailable/);
+  assert.equal(deliveries[0][2].error, 'QQ 消息发送失败，请检查机器人登录状态和接收 QQ 号');
+});
+
+test('QQ alert service uses the server-managed OneBot endpoint and token when configured', async () => {
+  const requests = [];
+  const service = new QqAlertNotificationService({
+    async getAlertNotificationSettings() {
+      return {
+        enabled: true,
+        qqNumber: '123456789',
+        onebotEndpoint: 'http://legacy.example.test:3000',
+        accessTokenCiphertext: '',
+      };
+    },
+  }, {
+    ...config,
+    onebotEndpoint: 'http://napcat:3000',
+    onebotAccessToken: 'server-only-token',
+  }, {
+    fetchImpl: async (url, options) => {
+      requests.push({ url: String(url), options });
+      return new Response(JSON.stringify({ status: 'ok', retcode: 0 }), { status: 200 });
+    },
+  });
+
+  await service.test();
+
+  assert.equal(requests[0].url, 'http://napcat:3000/send_private_msg');
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer server-only-token');
 });

@@ -60,6 +60,7 @@ import {
 import { SyncService } from './services/sync-service.mjs';
 import { SupplierMonitorService } from './services/supplier-monitor-service.mjs';
 import { QqAlertNotificationService } from './services/qq-alert-notification-service.mjs';
+import { NapcatService } from './services/napcat-service.mjs';
 import { normalizeSupplierBaseUrl } from './services/supplier-adapters.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -72,6 +73,7 @@ const repository=config.demoMode?new DemoRepository(config):new PostgresReposito
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
 const qqAlertNotificationService=new QqAlertNotificationService(repository,config);
+const napcatService=new NapcatService(config);
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
@@ -224,6 +226,12 @@ function payloadItems(payload) {
   if (Array.isArray(payload?.data)) return payload.data;
   if (Array.isArray(payload?.accounts)) return payload.accounts;
   return [];
+}
+
+function publicAlertNotificationSettings(settings) {
+  const result = { ...settings, onebotManaged: Boolean(config.onebotEndpoint) };
+  if (config.onebotEndpoint) result.onebotEndpoint = '';
+  return result;
 }
 
 function supplierGroupItem(group, local = {}) {
@@ -720,7 +728,16 @@ async function api(request,res,url){
     return json(res,200,await repository.acknowledgeSupplierAlert(Number(supplierAlertAck[1]),auth.actor));
   }
   if(request.method==='GET'&&url.pathname==='/api/alert-notification-settings'){
-    return json(res,200,await repository.getAlertNotificationSettings());
+    return json(res,200,publicAlertNotificationSettings(await repository.getAlertNotificationSettings()));
+  }
+  if(request.method==='GET'&&url.pathname==='/api/qq-bot/status'){
+    return json(res,200,await napcatService.status());
+  }
+  if(request.method==='POST'&&url.pathname==='/api/qq-bot/refresh'){
+    return json(res,200,await napcatService.refresh());
+  }
+  if(request.method==='POST'&&url.pathname==='/api/qq-bot/logout'){
+    return json(res,200,await napcatService.logout());
   }
   if(request.method==='GET'&&url.pathname==='/api/sub2api-service-auth'){
     await sub2ApiServiceAuthService.loadSettings();
@@ -963,13 +980,23 @@ async function api(request,res,url){
     return json(res,200,sub2ApiServiceAuthService.status());
   }
   if(request.method==='PATCH'&&url.pathname==='/api/alert-notification-settings'){
-    const input=normalizeAlertNotificationSettings(await body(request));
+    const raw=await body(request);
+    const current=await repository.getAlertNotificationSettings({ includeCiphertext:true });
+    if (Boolean(raw.enabled) && !config.onebotEndpoint && !current.onebotEndpoint) {
+      throw Object.assign(new Error('QQ 机器人服务尚未配置，暂时不能启用 QQ 告警'), { statusCode: 503 });
+    }
+    const input=normalizeAlertNotificationSettings({
+      ...raw,
+      onebotEndpoint:config.onebotEndpoint||raw.onebotEndpoint||current.onebotEndpoint,
+    });
     const accessTokenCiphertext=input.clearAccessToken
       ? ''
       : input.accessToken
         ? config.demoMode?'':qqAlertNotificationService.encryptAccessToken(input.accessToken)
         : undefined;
-    return json(res,200,await repository.updateAlertNotificationSettings(input,accessTokenCiphertext,auth.actor));
+    return json(res,200,publicAlertNotificationSettings(
+      await repository.updateAlertNotificationSettings(input,accessTokenCiphertext,auth.actor),
+    ));
   }
   if(request.method==='POST'&&url.pathname==='/api/alert-notification-settings/test'){
     if(config.demoMode)return json(res,200,{ok:true,demo:true});

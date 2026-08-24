@@ -90,34 +90,39 @@ export class QqAlertNotificationService {
   }
 
   async send(settings, message) {
-    const accessToken = this.decryptAccessToken(settings.accessTokenCiphertext);
+    const endpoint = this.config.onebotEndpoint || settings.onebotEndpoint;
+    const accessToken = this.config.onebotAccessToken || this.decryptAccessToken(settings.accessTokenCiphertext);
     const headers = { 'Content-Type': 'application/json' };
     if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-    const response = await this.fetch(oneBotUrl(settings.onebotEndpoint), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        user_id: Number(settings.qqNumber),
-        message,
-      }),
-      signal: AbortSignal.timeout(this.config.qqAlertRequestTimeoutMs),
-    });
+    let response;
+    try {
+      response = await this.fetch(oneBotUrl(endpoint), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          user_id: Number(settings.qqNumber),
+          message,
+        }),
+        signal: AbortSignal.timeout(this.config.qqAlertRequestTimeoutMs),
+      });
+    } catch {
+      throw Object.assign(new Error('QQ 消息通道暂时不可用，请检查机器人登录状态'), { statusCode: 503 });
+    }
     const raw = await limitedText(response, this.config.qqAlertMaxResponseBytes);
     let result = {};
     if (raw) {
       try { result = JSON.parse(raw); }
-      catch { throw new Error(`OneBot returned invalid JSON (HTTP ${response.status})`); }
+      catch { throw new Error('QQ 消息通道返回了无效数据'); }
     }
     if (!response.ok || (result.retcode !== undefined && Number(result.retcode) !== 0) || result.status === 'failed') {
-      const detail = result.message || result.wording || raw || `HTTP ${response.status}`;
-      throw new Error(`OneBot send failed: ${String(detail).slice(0, 500)}`);
+      throw new Error('QQ 消息发送失败，请检查机器人登录状态和接收 QQ 号');
     }
     return { ok: true };
   }
 
   async test() {
     const settings = await this.repository.getAlertNotificationSettings({ includeCiphertext: true });
-    if (!settings.qqNumber || !settings.onebotEndpoint) {
+    if (!settings.qqNumber || !(this.config.onebotEndpoint || settings.onebotEndpoint)) {
       throw Object.assign(new Error('请先配置接收 QQ 号和 OneBot HTTP 地址'), { statusCode: 400 });
     }
     await this.send(settings, `[ApiStation FinOps]\nQQ 告警通道测试成功\n时间：${new Intl.DateTimeFormat('zh-CN', {
@@ -134,7 +139,7 @@ export class QqAlertNotificationService {
     this.running = true;
     try {
       const settings = await this.repository.getAlertNotificationSettings({ includeCiphertext: true });
-      if (!settings.enabled || !settings.qqNumber || !settings.onebotEndpoint) return;
+      if (!settings.enabled || !settings.qqNumber || !(this.config.onebotEndpoint || settings.onebotEndpoint)) return;
       const alerts = await this.repository.listPendingSupplierAlertDeliveries(20);
       for (const alert of alerts) {
         try {

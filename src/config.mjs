@@ -53,6 +53,11 @@ function httpUrl(value, name) {
   return parsed.origin;
 }
 
+function optionalHttpUrl(value, name) {
+  const raw = String(value || '').trim();
+  return raw ? httpUrl(raw, name) : '';
+}
+
 function redisUrl(value, name) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -232,6 +237,12 @@ export function loadConfig(env = process.env) {
     qqAlertDeliveryIntervalSeconds: intValue(env.QQ_ALERT_DELIVERY_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
     qqAlertRequestTimeoutMs: intValue(env.QQ_ALERT_REQUEST_TIMEOUT_MS, 5_000, { min: 1_000, max: 30_000 }),
     qqAlertMaxResponseBytes: intValue(env.QQ_ALERT_MAX_RESPONSE_BYTES, 65_536, { min: 4_096, max: 1_048_576 }),
+    napcatWebuiUrl: optionalHttpUrl(env.NAPCAT_WEBUI_URL, 'NAPCAT_WEBUI_URL'),
+    napcatWebuiToken: String(env.NAPCAT_WEBUI_TOKEN || '').trim(),
+    napcatWebuiTimeoutMs: intValue(env.NAPCAT_WEBUI_TIMEOUT_MS, 5_000, { min: 1_000, max: 30_000 }),
+    onebotEndpoint: optionalHttpUrl(env.ONEBOT_ENDPOINT, 'ONEBOT_ENDPOINT'),
+    onebotAccessToken: String(env.ONEBOT_ACCESS_TOKEN || '').trim(),
+    onebotRequestTimeoutMs: intValue(env.ONEBOT_REQUEST_TIMEOUT_MS, 5_000, { min: 1_000, max: 30_000 }),
     sessionSecret,
     sessionTtlSeconds: intValue(env.SESSION_TTL_SECONDS, 43_200, { min: 900, max: 86_400 }),
     sessionCookieSecure,
