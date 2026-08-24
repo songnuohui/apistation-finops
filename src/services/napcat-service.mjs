@@ -2,9 +2,24 @@ import { createHash } from 'node:crypto';
 import QRCode from 'qrcode';
 
 const MAX_QR_BYTES = 1_048_576;
+const QR_REFRESH_POLL_INTERVAL_MS = 500;
+const QR_REFRESH_POLL_ATTEMPTS = 6;
+const QR_RESTART_POLL_ATTEMPTS = 20;
 
 function text(value) {
   return String(value || '').trim();
+}
+
+function qrSource(data) {
+  return text(data?.qrcodeurl || data?.qrcode || data?.url);
+}
+
+function loggedIn(data) {
+  return Boolean(data?.isLogin ?? data?.is_login);
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function apiUrl(baseUrl, pathname) {
@@ -27,9 +42,10 @@ function responseData(payload) {
 }
 
 export class NapcatService {
-  constructor(config, { fetchImpl = globalThis.fetch } = {}) {
+  constructor(config, { fetchImpl = globalThis.fetch, sleepImpl = sleep } = {}) {
     this.config = config;
     this.fetch = fetchImpl;
+    this.sleep = sleepImpl;
     this.credential = '';
     this.qrCache = null;
   }
@@ -94,13 +110,32 @@ export class NapcatService {
   async getQrSource() {
     const result = await this.request('/QQLogin/GetQQLoginQrcode');
     const data = responseData(result);
-    return text(data.qrcode || data.qrcodeurl || data.url);
+    return qrSource(data);
   }
 
   async refreshQrSource() {
     const result = await this.request('/QQLogin/RefreshQRcode');
     const data = responseData(result);
-    return text(data.qrcode || data.qrcodeurl || data.url);
+    return qrSource(data);
+  }
+
+  async getLoginStatus() {
+    return responseData(await this.request('/QQLogin/CheckLoginStatus'));
+  }
+
+  async waitForNewQr(previousSource, attempts) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) await this.sleep(QR_REFRESH_POLL_INTERVAL_MS);
+      try {
+        const data = await this.getLoginStatus();
+        if (loggedIn(data)) return '';
+        const source = qrSource(data) || await this.getQrSource();
+        if (source && source !== previousSource) return source;
+      } catch {
+        // NapCat is briefly unavailable while its login process is restarted.
+      }
+    }
+    return '';
   }
 
   async qrImage(source) {
@@ -143,7 +178,7 @@ export class NapcatService {
     }
   }
 
-  async status() {
+  async status({ qrSource: preferredQrSource = '' } = {}) {
     const base = {
       configured: this.configured(),
       available: false,
@@ -160,11 +195,10 @@ export class NapcatService {
       return base;
     }
     try {
-      const result = await this.request('/QQLogin/CheckLoginStatus');
-      const data = responseData(result);
+      const data = await this.getLoginStatus();
       base.available = true;
-      base.loggedIn = Boolean(data.isLogin ?? data.is_login);
-      let qrSource = text(data.qrcodeurl || data.qrcode || data.url);
+      base.loggedIn = loggedIn(data);
+      let currentQrSource = text(preferredQrSource) || qrSource(data);
       if (base.loggedIn) {
         try {
           const info = responseData(await this.request('/QQLogin/GetQQLoginInfo'));
@@ -175,8 +209,8 @@ export class NapcatService {
         }
         base.onebotReady = await this.checkOnebot();
       } else {
-        if (!qrSource) qrSource = await this.getQrSource();
-        base.qrcode = await this.qrImage(qrSource);
+        if (!currentQrSource) currentQrSource = await this.getQrSource();
+        base.qrcode = await this.qrImage(currentQrSource);
       }
     } catch (error) {
       base.error = text(error?.message) || 'QQ 机器人管理服务暂时不可用';
@@ -185,9 +219,27 @@ export class NapcatService {
   }
 
   async refresh() {
+    const current = await this.getLoginStatus();
+    if (loggedIn(current)) return this.status();
+
     this.qrCache = null;
-    await this.refreshQrSource();
-    return this.status();
+    const previousSource = qrSource(current) || await this.getQrSource();
+    const refreshSource = await this.refreshQrSource();
+    let refreshedSource = refreshSource && refreshSource !== previousSource
+      ? refreshSource
+      : await this.waitForNewQr(previousSource, QR_REFRESH_POLL_ATTEMPTS);
+
+    if (!refreshedSource) {
+      await this.request('/QQLogin/RestartNapCat');
+      this.credential = '';
+      this.qrCache = null;
+      refreshedSource = await this.waitForNewQr(previousSource, QR_RESTART_POLL_ATTEMPTS);
+    }
+
+    if (!refreshedSource) {
+      throw apiError('未能生成新的 QQ 登录二维码，请稍候后重试', 503);
+    }
+    return this.status({ qrSource: refreshedSource });
   }
 
   async logout() {

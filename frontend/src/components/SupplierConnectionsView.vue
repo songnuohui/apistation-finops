@@ -810,11 +810,22 @@ function startQqBotPolling() {
 
 async function refreshQqBotQr() {
   qqBotAction.value = true;
+  qqBotStatus.value = {
+    ...(qqBotStatus.value || {}),
+    qrcode: '',
+    error: '正在生成新的 QQ 登录二维码，请稍候。',
+  };
   try {
     qqBotStatus.value = await send('/qq-bot/refresh', 'POST', {});
-    notify('QQ 登录二维码已刷新');
+    notify('已生成新的 QQ 登录二维码');
   } catch (error: any) {
-    notify(error.message);
+    const message = error.message || '新的 QQ 登录二维码暂时生成失败，请稍候重试';
+    qqBotStatus.value = {
+      ...(qqBotStatus.value || {}),
+      qrcode: '',
+      error: message,
+    };
+    notify(message);
   } finally {
     qqBotAction.value = false;
   }

@@ -90,6 +90,7 @@ test('NapCat service reads the logged-in QQ information and verifies private One
 
 test('NapCat service refreshes QR codes and restarts NapCat for a new login', async () => {
   const requests = [];
+  let restarted = false;
   const service = new NapcatService(config, {
     fetchImpl: async (url, options = {}) => {
       requests.push({ url: String(url), options });
@@ -97,16 +98,29 @@ test('NapCat service refreshes QR codes and restarts NapCat for a new login', as
         return json({ code: 0, data: { Credential: 'webui-credential' } });
       }
       if (String(url) === 'http://napcat:6099/api/QQLogin/RefreshQRcode') {
-        return json({ code: 0, data: { qrcode: 'https://qq.example.test/fresh' } });
+        return json({ code: 0, data: {} });
       }
       if (String(url) === 'http://napcat:6099/api/QQLogin/CheckLoginStatus') {
-        return json({ code: 0, data: { isLogin: false, qrcodeurl: 'https://qq.example.test/fresh' } });
+        return json({
+          code: 0,
+          data: {
+            isLogin: false,
+            qrcodeurl: restarted
+              ? 'https://qq.example.test/fresh'
+              : 'https://qq.example.test/expired',
+          },
+        });
+      }
+      if (String(url) === 'http://napcat:6099/api/QQLogin/GetQQLoginQrcode') {
+        return json({ code: 0, data: { qrcode: 'https://qq.example.test/expired' } });
       }
       if (String(url) === 'http://napcat:6099/api/QQLogin/RestartNapCat') {
+        restarted = true;
         return json({ code: 0, data: {} });
       }
       throw new Error(`unexpected request: ${url}`);
     },
+    sleepImpl: async () => {},
   });
 
   const refreshed = await service.refresh();
