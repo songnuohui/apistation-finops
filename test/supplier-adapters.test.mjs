@@ -92,7 +92,7 @@ test('supplier redirects identify the migrated host without forwarding credentia
       && error.code === 'supplier_redirect'
       && error.statusCode === 422
       && error.httpStatus === 301
-      && /GET \/api\/v1\/auth\/me/.test(error.message)
+      && /供应商接口地址发生跳转/.test(error.message)
       && /https:\/\/new-supplier\.example\.test/.test(error.message),
   );
   assert.deepEqual(request, {
@@ -116,7 +116,7 @@ test('non-JSON supplier errors include the request stage and response type', asy
     (error) => error instanceof SupplierAdapterError
       && error.code === 'invalid_json'
       && error.httpStatus === 502
-      && error.message === 'GET /api/v1/groups/rates: supplier returned text/html with HTTP 502',
+      && error.message === '供应商返回了非 JSON 数据（HTTP 502），请检查接口地址',
   );
 });
 
@@ -371,7 +371,7 @@ test('NewAPI cookie login fails clearly when the legacy user ID is missing', asy
       { adapterType: 'newapi', authMode: 'password', baseUrl: 'https://supplier.example.test' },
       { username: 'legacy', password: 'secret' },
     ),
-    (error) => error.code === 'authentication_failed' && /user ID required/.test(error.message),
+    (error) => error.code === 'authentication_failed' && /缺少用户标识/.test(error.message),
   );
 });
 

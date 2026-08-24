@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { Activity, ArrowDownUp, Check, CheckSquare, ChevronDown, ChevronUp, ExternalLink, KeyRound, Layers3, Pencil, RefreshCw, Search, Square, Trash2, Users, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
+import { supplierAlertMessage, supplierAlertTitle, supplierMessage } from '../supplier-messages';
 
 type AnyRecord = Record<string, any>;
 const props = defineProps<{ refreshToken?: number }>();
@@ -101,7 +102,7 @@ const keyBatchMinimumSaleMultiplier = computed(() => {
   return upstream / (1 - margin);
 });
 
-function notify(message: string) { emit('toast', message); }
+function notify(message: string) { emit('toast', supplierMessage(message)); }
 function dateTime(value: any) {
   if (!value) return '--';
   return new Intl.DateTimeFormat('zh-CN', {
@@ -175,6 +176,7 @@ function statusClass(value: any) {
 function statusLabel(value: any) {
   return ({
     active: '可用', ok: '正常', failed: '失败', pending: '待检查', removed: '已移除', warning: '需关注',
+    degraded: '已降级', unavailable: '不可用', error: '错误', unsupported: '暂不支持', skipped: '已跳过',
   } as AnyRecord)[String(value || '').toLowerCase()] || String(value || '--');
 }
 function marginText(policy: AnyRecord | null) {
@@ -565,7 +567,7 @@ onMounted(() => {
               <tr v-for="account in groupDetail.accounts" :key="account.id">
                 <td><strong>{{ account.name || `账号 #${account.id}` }}</strong><small>{{ platformText(account.platform) }} · ID {{ account.id }}</small></td>
                 <td><strong>并发 {{ account.concurrency }}</strong><small>优先级 {{ account.priority }} · 当前 {{ account.currentConcurrency }}</small></td>
-                <td><span class="status-pill" :class="statusClass(account.status)">{{ statusLabel(account.status) }}</span><small>{{ account.schedulable ? '可调度' : '不可调度' }}<template v-if="account.errorMessage"> · {{ account.errorMessage }}</template></small></td>
+                <td><span class="status-pill" :class="statusClass(account.status)">{{ statusLabel(account.status) }}</span><small>{{ account.schedulable ? '可调度' : '不可调度' }}<template v-if="account.errorMessage"> · {{ supplierMessage(account.errorMessage, account.errorCode) }}</template></small></td>
                 <td>
                   <div v-if="account.keys.length" class="group-key-list">
                     <button v-for="key in account.keys" :key="key.id" class="group-key-item" @click="openDetails(key.id)">
@@ -590,9 +592,9 @@ onMounted(() => {
         <template v-else-if="detail">
           <div class="supplier-metrics"><div><span>上游倍率</span><strong>{{ multiplier(detail.key.rateMultiplier) }}</strong><small>{{ detail.key.groupName || '未分组' }}</small></div><div><span>额度剩余</span><strong>{{ quota(detail.key) }}</strong><small>{{ detail.key.expiresAt ? `到期 ${dateTime(detail.key.expiresAt)}` : '无到期信息' }}</small></div><div><span>关联账号</span><strong>{{ detail.accounts.length }}</strong><small>{{ selectedEnabledCount }} 个已选账号已启用利润控制</small></div><div><span>最近巡检</span><strong>{{ statusLabel(detail.key.lastCheckStatus) }}</strong><small>{{ dateTime(detail.key.lastCheckAt) }}</small></div></div>
           <div class="detail-actionbar"><div><span class="status-pill" :class="statusClass(detail.key.status)">{{ statusLabel(detail.key.status) }}</span></div><div class="row-actions"><button class="secondary-button" @click="openConnection(detail.key.connectionId)"><ExternalLink :size="16" />打开供应商连接</button><button class="secondary-button" :disabled="!selectedCount" @click="openBatchEditor"><CheckSquare :size="16" />批量利润控制（{{ selectedCount }}）</button><button class="secondary-button danger-action" @click="deleteKey(detail.key)"><Trash2 :size="16" />删除密钥</button></div></div>
-          <section class="detail-section"><div class="detail-section-head"><div><h3>关联账号、所有分组与利润控制</h3><p>点击账号名称查看该账号当前所有分组和销售倍率；勾选多个账号可统一配置利润保护和自动归组。</p></div></div><div class="table-wrap compact-table"><table><thead><tr><th><button class="icon-button mini-action" title="全选关联账号" @click="toggleAllAccounts"><CheckSquare v-if="allSelected" :size="16" /><Square v-else :size="16" /></button></th><th>系统账号</th><th>平台</th><th>状态</th><th>利润控制 / 自动归组</th><th>操作</th></tr></thead><tbody><tr v-for="account in detail.accounts" :key="account.id"><td><input type="checkbox" :checked="selectedAccountIds.includes(Number(account.id))" @change="toggleAccount(account.id)" /></td><td><button class="link-button" @click="openAccountGroups(account)">{{ account.name || `账号 #${account.id}` }}</button><small>ID {{ account.id }}</small></td><td>{{ account.platform || '--' }}</td><td><span class="status-pill" :class="statusClass(account.status)">{{ account.status || '--' }}</span></td><td><span :class="{ 'profit-guard-on': account.profitGuard?.enabled }">{{ marginText(account.profitGuard) }}</span><small v-if="account.profitGuard?.lastError" class="error-text">{{ account.profitGuard.lastError }}</small></td><td><button class="small-button" @click="openAccountGroups(account)">查看分组</button></td></tr><tr v-if="!detail.accounts.length"><td colspan="6" class="table-empty">当前没有关联账号</td></tr></tbody></table></div></section>
-          <section class="detail-section"><div class="detail-section-head"><div><h3>巡检记录</h3></div></div><div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>结果</th><th>方式</th><th>HTTP</th><th>错误</th></tr></thead><tbody><tr v-for="item in detail.checks" :key="item.id"><td>{{ dateTime(item.checkedAt) }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span></td><td>{{ item.method || '--' }}</td><td>{{ item.httpStatus || '--' }}</td><td>{{ item.errorMessage || item.errorCode || '--' }}</td></tr><tr v-if="!detail.checks.length"><td colspan="5" class="table-empty">暂无巡检记录</td></tr></tbody></table></div></section>
-          <section v-if="detail.alerts.length" class="detail-section"><div class="detail-section-head"><div><h3>相关告警</h3></div></div><div class="alert-detail-list"><article v-for="alert in detail.alerts" :key="alert.id" :class="['alert-detail', alert.severity]"><div><strong>{{ alert.title }}</strong><p>{{ alert.message }}</p><small>{{ dateTime(alert.lastSeenAt) }} · {{ alert.status }}</small></div></article></div></section>
+          <section class="detail-section"><div class="detail-section-head"><div><h3>关联账号、所有分组与利润控制</h3><p>点击账号名称查看该账号当前所有分组和销售倍率；勾选多个账号可统一配置利润保护和自动归组。</p></div></div><div class="table-wrap compact-table"><table><thead><tr><th><button class="icon-button mini-action" title="全选关联账号" @click="toggleAllAccounts"><CheckSquare v-if="allSelected" :size="16" /><Square v-else :size="16" /></button></th><th>系统账号</th><th>平台</th><th>状态</th><th>利润控制 / 自动归组</th><th>操作</th></tr></thead><tbody><tr v-for="account in detail.accounts" :key="account.id"><td><input type="checkbox" :checked="selectedAccountIds.includes(Number(account.id))" @change="toggleAccount(account.id)" /></td><td><button class="link-button" @click="openAccountGroups(account)">{{ account.name || `账号 #${account.id}` }}</button><small>ID {{ account.id }}</small></td><td>{{ account.platform || '--' }}</td><td><span class="status-pill" :class="statusClass(account.status)">{{ statusLabel(account.status) }}</span></td><td><span :class="{ 'profit-guard-on': account.profitGuard?.enabled }">{{ marginText(account.profitGuard) }}</span><small v-if="account.profitGuard?.lastError" class="error-text">{{ supplierMessage(account.profitGuard.lastError, account.profitGuard.errorCode) }}</small></td><td><button class="small-button" @click="openAccountGroups(account)">查看分组</button></td></tr><tr v-if="!detail.accounts.length"><td colspan="6" class="table-empty">当前没有关联账号</td></tr></tbody></table></div></section>
+          <section class="detail-section"><div class="detail-section-head"><div><h3>巡检记录</h3></div></div><div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>结果</th><th>方式</th><th>HTTP</th><th>错误</th></tr></thead><tbody><tr v-for="item in detail.checks" :key="item.id"><td>{{ dateTime(item.checkedAt) }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span></td><td>{{ item.method || '--' }}</td><td>{{ item.httpStatus || '--' }}</td><td>{{ supplierMessage(item.errorMessage || item.errorCode, item.errorCode) }}</td></tr><tr v-if="!detail.checks.length"><td colspan="5" class="table-empty">暂无巡检记录</td></tr></tbody></table></div></section>
+          <section v-if="detail.alerts.length" class="detail-section"><div class="detail-section-head"><div><h3>相关告警</h3></div></div><div class="alert-detail-list"><article v-for="alert in detail.alerts" :key="alert.id" :class="['alert-detail', alert.severity]"><div><strong>{{ supplierAlertTitle(alert) }}</strong><p>{{ supplierAlertMessage(alert) }}</p><small>{{ dateTime(alert.lastSeenAt) }} · {{ statusLabel(alert.status) }}</small></div></article></div></section>
         </template>
       </section>
     </div>

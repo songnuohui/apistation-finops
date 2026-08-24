@@ -2,6 +2,7 @@ import { inTransaction } from '../db.mjs';
 import Decimal from 'decimal.js/decimal.mjs';
 import { calculateMultiplierCostCny, splitFixedCostCny } from '../services/cost-accounting.mjs';
 import { buildSupplierQualityScores, normalizeQualityStatus } from '../services/supplier-quality.mjs';
+import { profitGuardAlertCopy, supplierUserMessage } from '../services/supplier-messages.mjs';
 
 function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
@@ -3936,6 +3937,11 @@ export class PostgresRepository {
         WHERE id=$1 FOR UPDATE`, [targetId]);
       if (!target.rowCount) throw httpError('supplier quality target not found', 404);
       const status = normalizeQualityStatus(observation.status);
+      const errorMessage = observation.errorMessage || observation.errorCode
+        ? supplierUserMessage(observation.errorMessage || observation.errorCode || '', {
+          code: observation.errorCode || '', httpStatus: observation.httpStatus || 0,
+        })
+        : '';
       await client.query(`
         INSERT INTO ${this.schema}.supplier_quality_observations(
           connection_id,supplier_key_id,target_id,source_kind,external_observation_id,model,group_name,
@@ -3953,13 +3959,13 @@ export class PostgresRepository {
         observation.pingLatencyMs === null || observation.pingLatencyMs === undefined ? null : Math.max(0, Math.round(Number(observation.pingLatencyMs))),
         observation.rateMultiplier === null || observation.rateMultiplier === undefined ? null : observation.rateMultiplier,
         observation.observedAt || new Date().toISOString(),
-        JSON.stringify({ errorCode: observation.errorCode || '', errorMessage: observation.errorMessage || '', ...(observation.metadata || {}) }),
+        JSON.stringify({ errorCode: observation.errorCode || '', errorMessage, ...(observation.metadata || {}) }),
       ]);
       await client.query(`
         UPDATE ${this.schema}.supplier_quality_targets
         SET last_probe_at=NOW(),last_status=$2,last_error=$3,
             next_probe_at=NOW()+interval_seconds*INTERVAL '1 second',updated_at=NOW()
-        WHERE id=$1`, [targetId,status,String(observation.errorMessage || observation.errorCode || '').slice(0, 1000)]);
+        WHERE id=$1`, [targetId,status,errorMessage.slice(0, 1000)]);
       return Number(targetId);
     });
     return this.getSupplierQualityTargetContext(resultTargetId);
@@ -4204,13 +4210,16 @@ export class PostgresRepository {
 
   async recordSupplierSyncFailure(connectionId, error) {
     return inTransaction(this.pool, async (client) => {
+      const message = supplierUserMessage(error?.message || '供应商同步失败', {
+        code: error?.code || 'sync_failed', httpStatus: error?.httpStatus || 0,
+      });
       const result = await client.query(`
         UPDATE ${this.schema}.supplier_connections SET
           connection_status=CASE WHEN $2='unsupported_site' OR $2='adapter_required' THEN 'unsupported' ELSE 'failed' END,
           last_sync_at=NOW(),consecutive_failures=consecutive_failures+1,last_error=$3,
           next_sync_at=NOW()+LEAST(INTERVAL '24 hours',
             inventory_interval_seconds*INTERVAL '1 second' * POWER(2,LEAST(consecutive_failures+1,6))),updated_at=NOW()
-        WHERE id=$1 RETURNING *`, [connectionId,error.code || 'sync_failed',String(error.message || '供应商同步失败').slice(0,1000)]);
+        WHERE id=$1 RETURNING *`, [connectionId,error.code || 'sync_failed',message.slice(0,1000)]);
       if (!result.rowCount) return;
       await client.query(`
         INSERT INTO ${this.schema}.supplier_alert_events(
@@ -4219,7 +4228,7 @@ export class PostgresRepository {
         ON CONFLICT(connection_id,dedupe_key) DO UPDATE SET
           status='open',severity='critical',message=EXCLUDED.message,details=EXCLUDED.details,
           last_seen_at=NOW(),occurrence_count=supplier_alert_events.occurrence_count+1,
-          resolved_at=NULL`, [connectionId,String(error.message || '供应商同步失败').slice(0,1000),JSON.stringify({ code: error.code || 'sync_failed', httpStatus: error.httpStatus || 0 })]);
+          resolved_at=NULL`, [connectionId,message.slice(0,1000),JSON.stringify({ code: error.code || 'sync_failed', httpStatus: error.httpStatus || 0 })]);
     });
   }
 
@@ -4318,16 +4327,21 @@ export class PostgresRepository {
 
         const check = checks.find((candidate) => candidate.externalId === item.externalId);
         if (check) {
+          const checkMessage = check.errorMessage || check.errorCode
+            ? supplierUserMessage(check.errorMessage || check.errorCode || '', {
+              code: check.errorCode || '', httpStatus: check.httpStatus || 0,
+            })
+            : '';
           await client.query(`INSERT INTO ${this.schema}.supplier_key_checks(
             supplier_key_id,status,method,http_status,latency_ms,error_code,error_message)
             VALUES($1,$2,$3,$4,$5,$6,$7)`,
-          [key.id,check.status,check.method,check.httpStatus || 0,check.latencyMs ?? null,check.errorCode || '',String(check.errorMessage || '').slice(0,1000)]);
+          [key.id,check.status,check.method,check.httpStatus || 0,check.latencyMs ?? null,check.errorCode || '',checkMessage.slice(0,1000)]);
           await client.query(`UPDATE ${this.schema}.supplier_keys SET
             last_check_status=$2,last_check_method=$3,last_check_at=NOW(),last_check_error=$4,updated_at=NOW()
-            WHERE id=$1`, [key.id,check.status,check.method,String(check.errorMessage || '').slice(0,1000)]);
+            WHERE id=$1`, [key.id,check.status,check.method,checkMessage.slice(0,1000)]);
           if (check.status === 'failed') await alert({
             keyId:key.id,dedupeKey:`key:${key.id}:check`,type:'key_check_failed',severity:'critical',title:'密钥巡检失败',
-            message:`${item.name || item.maskedKey}：${check.errorMessage || check.errorCode || '不可用'}`,
+            message:`${item.name || item.maskedKey}：${checkMessage}`,
             details:{ method:check.method,httpStatus:check.httpStatus || 0,errorCode:check.errorCode || '' },
           });
           if (check.status === 'ok') await resolveAlert(`key:${key.id}:check`);
@@ -5393,6 +5407,14 @@ export class PostgresRepository {
         UPDATE ${this.schema}.account_profit_guard_policies
         SET last_action_at=NOW(),updated_at=NOW()
         WHERE source_account_id=$1`, [candidate.accountId]);
+      const alertCopy = profitGuardAlertCopy({
+        action: details.action,
+        groupName: details.groupName,
+        groupId: details.groupId,
+        accountName: candidate.accountName,
+        accountId: candidate.accountId,
+        reason: details.reason,
+      });
       await client.query(`
         INSERT INTO ${this.schema}.supplier_alert_events(
           connection_id,supplier_key_id,dedupe_key,alert_type,severity,title,message,details)
@@ -5404,8 +5426,8 @@ export class PostgresRepository {
           resolved_at=NULL`, [
         candidate.connectionId,candidate.supplierKeyId,
         `profit-guard:${candidate.accountId}:${details.groupId}:${details.action}`,
-        details.action === 'remove_group' ? '已自动移除低利润销售分组' : '利润保护无法移除分组',
-        `${candidate.accountName || `账号 ${candidate.accountId}`}：${details.reason}`,
+        alertCopy.title,
+        alertCopy.message,
         JSON.stringify({
           accountId: candidate.accountId, accountName: candidate.accountName,
           supplierKeyId: candidate.supplierKeyId, supplier: candidate.supplierName,

@@ -6,6 +6,7 @@ import {
   Send, ServerCog, Settings2, ShieldCheck, Trash2, Unlink, X,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
+import { supplierAlertMessage, supplierAlertTitle, supplierMessage } from '../supplier-messages';
 
 type AnyRecord = Record<string, any>;
 type DetailTab = 'keys' | 'quality' | 'balances' | 'checks' | 'alerts';
@@ -79,6 +80,9 @@ const statusLabels: Record<string, string> = {
   acknowledged: '已确认',
   resolved: '已恢复',
   success: '成功',
+  degraded: '已降级',
+  unavailable: '不可用',
+  error: '错误',
 };
 const qualityModeLabels: Record<string, string> = {
   off: '关闭',
@@ -131,7 +135,7 @@ const availableAccounts = computed(() => {
 });
 
 function notify(message: string) {
-  emit('toast', message);
+  emit('toast', supplierMessage(message));
 }
 
 function adapterLabel(value: any) {
@@ -212,7 +216,7 @@ function connectionProfitGuardHint(item: AnyRecord) {
 }
 
 function connectionHint(item: AnyRecord) {
-  if (item.connectionStatus === 'failed' && item.lastError) return item.lastError;
+  if (item.connectionStatus === 'failed' && item.lastError) return supplierMessage(item.lastError, item.lastErrorCode);
   if (item.consecutiveFailures) return `连续失败 ${item.consecutiveFailures} 次`;
   if (!item.enabled) return '已停用，不参与自动同步';
   return item.detectedAdapterType ? `已识别 ${adapterLabel(item.detectedAdapterType)}` : `配置 ${adapterLabel(item.adapterType)}`;
@@ -1079,7 +1083,7 @@ onMounted(async () => {
                     <td><span class="status-pill" :class="statusClass(key.removedAt ? 'removed' : key.status)">{{ statusLabel(key.removedAt ? 'removed' : key.status) }}</span></td>
                     <td><strong>{{ key.groupName || '未分组' }}</strong><small>{{ key.rateMultiplier === null || key.rateMultiplier === undefined ? '未提供倍率' : `${key.rateMultiplier}x` }}</small></td>
                     <td><strong>{{ quotaText(key) }}</strong><small>{{ key.expiresAt ? `到期 ${dateTime(key.expiresAt)}` : key.lastUsedAt ? `最近使用 ${dateTime(key.lastUsedAt)}` : '无到期或使用记录' }}</small></td>
-                    <td><span class="status-pill" :class="statusClass(key.lastCheckStatus)">{{ statusLabel(key.lastCheckStatus || 'pending') }}</span><small>{{ key.lastCheckMethod || '等待巡检' }} · {{ dateTime(key.lastCheckAt) }}</small><small v-if="key.lastCheckError" class="error-text">{{ key.lastCheckError }}</small></td>
+                    <td><span class="status-pill" :class="statusClass(key.lastCheckStatus)">{{ statusLabel(key.lastCheckStatus || 'pending') }}</span><small>{{ key.lastCheckMethod || '等待巡检' }} · {{ dateTime(key.lastCheckAt) }}</small><small v-if="key.lastCheckError" class="error-text">{{ supplierMessage(key.lastCheckError) }}</small></td>
                     <td>
                       <div class="account-links">
                         <span v-for="link in key.accountLinks" :key="link.accountId">
@@ -1134,7 +1138,7 @@ onMounted(async () => {
 
           <section v-else-if="detailTab === 'checks'" class="detail-section">
             <div class="detail-section-head"><div><h3>密钥巡检记录</h3><p>巡检只验证密钥状态，不会修改上游配置。</p></div></div>
-            <div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>密钥</th><th>结果</th><th>方式</th><th>HTTP</th><th>错误</th></tr></thead><tbody><tr v-for="item in detail.checks" :key="item.id"><td>{{ dateTime(item.checkedAt) }}</td><td>{{ item.keyName || item.maskedKey }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span></td><td>{{ item.method || '--' }}</td><td>{{ item.httpStatus || '--' }}</td><td>{{ item.errorMessage || item.errorCode || '--' }}</td></tr><tr v-if="!detail.checks.length"><td colspan="6" class="table-empty">暂无巡检记录</td></tr></tbody></table></div>
+             <div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>密钥</th><th>结果</th><th>方式</th><th>HTTP</th><th>错误</th></tr></thead><tbody><tr v-for="item in detail.checks" :key="item.id"><td>{{ dateTime(item.checkedAt) }}</td><td>{{ item.keyName || item.maskedKey }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabel(item.status) }}</span></td><td>{{ item.method || '--' }}</td><td>{{ item.httpStatus || '--' }}</td><td>{{ supplierMessage(item.errorMessage || item.errorCode, item.errorCode) }}</td></tr><tr v-if="!detail.checks.length"><td colspan="6" class="table-empty">暂无巡检记录</td></tr></tbody></table></div>
           </section>
 
           <section v-else class="detail-section">
@@ -1142,7 +1146,7 @@ onMounted(async () => {
             <div class="alert-detail-list">
               <article v-for="alert in detail.alerts" :key="alert.id" :class="['alert-detail', alert.severity]">
                 <AlertTriangle :size="18" />
-                <div><strong>{{ alert.title }}</strong><p>{{ alert.message }}</p><small>{{ dateTime(alert.lastSeenAt) }} · 出现 {{ alert.occurrenceCount }} 次 · {{ statusLabel(alert.status) }}</small></div>
+                <div><strong>{{ supplierAlertTitle(alert) }}</strong><p>{{ supplierAlertMessage(alert) }}</p><small>{{ dateTime(alert.lastSeenAt) }} · 出现 {{ alert.occurrenceCount }} 次 · {{ statusLabel(alert.status) }}</small></div>
                 <button v-if="alert.status === 'open'" class="small-button" :disabled="acknowledgingAlertId === alert.id" @click="acknowledgeAlert(alert.id)"><RefreshCw v-if="acknowledgingAlertId === alert.id" :size="14" class="spin" /><Check v-else :size="14" />确认</button>
               </article>
               <div v-if="!detail.alerts.length" class="table-empty">当前没有供应商告警</div>
@@ -1299,7 +1303,7 @@ onMounted(async () => {
       <section class="modal form-modal sub2api-service-auth-modal">
         <header><div><h2>Sub2API 自动认证</h2><p>后台同步与利润保护使用独立服务账号，不依赖当前网页登录状态。</p></div><button class="icon-button" @click="serviceAuthEditor = null"><X :size="19" /></button></header>
         <div class="supplier-metrics">
-          <div><span>认证状态</span><strong :class="{ 'service-auth-ready': serviceAuthEditor.authenticated }">{{ serviceAuthEditor.authenticated ? '已认证' : serviceAuthEditor.enabled ? '待认证' : '未启用' }}</strong><small>{{ serviceAuthEditor.lastError || '访问 Token 仅保存在服务内存中' }}</small></div>
+           <div><span>认证状态</span><strong :class="{ 'service-auth-ready': serviceAuthEditor.authenticated }">{{ serviceAuthEditor.authenticated ? '已认证' : serviceAuthEditor.enabled ? '待认证' : '未启用' }}</strong><small>{{ serviceAuthEditor.lastError ? supplierMessage(serviceAuthEditor.lastError) : '访问 Token 仅保存在服务内存中' }}</small></div>
           <div><span>上次认证</span><strong>{{ dateTime(serviceAuthEditor.lastAuthenticatedAt) }}</strong><small>服务重启后会自动重新登录</small></div>
           <div><span>Token 到期</span><strong>{{ dateTime(serviceAuthEditor.tokenExpiresAt) }}</strong><small>到期前自动续期，401/403 自动重试</small></div>
           <div><span>更新人</span><strong>{{ serviceAuthEditor.updatedBy || '--' }}</strong><small>{{ dateTime(serviceAuthEditor.updatedAt) }}</small></div>

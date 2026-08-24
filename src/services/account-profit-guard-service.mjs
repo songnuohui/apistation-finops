@@ -29,6 +29,11 @@ function groupPlatform(group) {
   return normalizedPlatform(group?.platform ?? group?.channel_type ?? group?.channelType);
 }
 
+function groupName(group, id) {
+  const name = String(group?.name || '').trim();
+  return name || (id ? `分组 #${id}` : '未命名分组');
+}
+
 function groupShouldBeAdded(
   upstreamMultiplier,
   group,
@@ -56,14 +61,15 @@ function groupShouldBeAdded(
   return margin + epsilon >= targetMarginMin && margin - epsilon <= targetMarginMax;
 }
 
-function removalReason({ upstreamMultiplier, groupRateMultiplier, minimumMargin, thresholdMode, minimumSaleMultiplier }) {
+function removalReason({ groupName: name, upstreamMultiplier, groupRateMultiplier, minimumMargin, thresholdMode, minimumSaleMultiplier }) {
+  const label = `分组“${name || '未命名分组'}”`;
   if (groupRateMultiplier !== null && groupRateMultiplier <= upstreamMultiplier) {
-    return `分组售价倍率 ${groupRateMultiplier}x 不高于上游成本倍率 ${upstreamMultiplier}x`;
+    return `${label}售价倍率 ${groupRateMultiplier}x 不高于上游成本倍率 ${upstreamMultiplier}x`;
   }
   if (thresholdMode === 'minimum_sale_multiplier') {
-    return `上游成本倍率 ${upstreamMultiplier}x 已达到触发倍率 ${minimumSaleMultiplier}x，分组售价倍率 ${groupRateMultiplier}x 不高于触发倍率`;
+    return `${label}售价倍率 ${groupRateMultiplier}x 不高于触发倍率；上游成本倍率 ${upstreamMultiplier}x 已达到触发倍率 ${minimumSaleMultiplier}x`;
   }
-  return `上游成本倍率 ${upstreamMultiplier}x 导致预计毛利率低于 ${minimumMargin * 100}%`;
+  return `${label}预计毛利率低于 ${minimumMargin * 100}%；上游成本倍率为 ${upstreamMultiplier}x`;
 }
 
 export function minimumSaleMultiplierForMargin(upstreamMultiplier, minimumMargin) {
@@ -165,7 +171,7 @@ export class AccountProfitGuardService {
         await this.repository.recordProfitGuardEvaluation(candidate, {
           action: 'blocked_last_group',
           groupId: id,
-          groupName: group?.name || '',
+          groupName: groupName(group, id),
           upstreamMultiplier: upstream,
           groupMultiplier: groupMultiplier(group),
           thresholdMode: candidate.thresholdMode,
@@ -173,6 +179,7 @@ export class AccountProfitGuardService {
           beforeGroupIds,
           afterGroupIds: beforeGroupIds,
           reason: `${removalReason({
+            groupName: groupName(group, id),
             upstreamMultiplier: upstream,
             groupRateMultiplier: groupMultiplier(group),
             minimumMargin: candidate.minimumMargin,
@@ -225,7 +232,7 @@ export class AccountProfitGuardService {
         await this.repository.recordProfitGuardEvaluation(candidate, {
           action: 'blocked_last_group',
           groupId: id,
-          groupName: group?.name || '',
+          groupName: groupName(group, id),
           upstreamMultiplier: upstream,
           groupMultiplier: groupMultiplier(group),
           thresholdMode: candidate.thresholdMode,
@@ -233,12 +240,13 @@ export class AccountProfitGuardService {
           beforeGroupIds: latestGroupIds,
           afterGroupIds: latestGroupIds,
           reason: `${removalReason({
+            groupName: groupName(group, id),
             upstreamMultiplier: upstream,
             groupRateMultiplier: groupMultiplier(group),
             minimumMargin: candidate.minimumMargin,
             thresholdMode: candidate.thresholdMode,
             minimumSaleMultiplier: candidate.minimumSaleMultiplier,
-          })}; update blocked to preserve the last sales group`,
+          })}；为避免账号完全失去销售分组，未执行移除`,
         });
       }
       return { changed: false, blocked: true };
@@ -249,7 +257,7 @@ export class AccountProfitGuardService {
       await this.repository.recordProfitGuardEvaluation(candidate, {
         action: 'remove_group',
         groupId: id,
-        groupName: group?.name || '',
+        groupName: groupName(group, id),
         upstreamMultiplier: upstream,
         groupMultiplier: groupMultiplier(group),
         thresholdMode: candidate.thresholdMode,
@@ -257,6 +265,7 @@ export class AccountProfitGuardService {
         beforeGroupIds: latestGroupIds,
         afterGroupIds,
         reason: removalReason({
+          groupName: groupName(group, id),
           upstreamMultiplier: upstream,
           groupRateMultiplier: groupMultiplier(group),
           minimumMargin: candidate.minimumMargin,
@@ -271,14 +280,14 @@ export class AccountProfitGuardService {
       await this.repository.recordProfitGuardEvaluation(candidate, {
         action: 'add_group',
         groupId: id,
-        groupName: group?.name || '',
+        groupName: groupName(group, id),
         upstreamMultiplier: upstream,
         groupMultiplier: groupMultiplier(group),
         thresholdMode: candidate.thresholdMode,
         minimumSaleMultiplier: candidate.minimumSaleMultiplier,
         beforeGroupIds: latestGroupIds,
         afterGroupIds,
-        reason: `group margin ${(margin * 100).toFixed(2)}% is within target range ${(candidate.targetMarginMin * 100).toFixed(2)}%-${(candidate.targetMarginMax * 100).toFixed(2)}% and platform matches ${candidate.platform}`,
+        reason: `分组“${groupName(group, id)}”预计毛利率 ${(margin * 100).toFixed(2)}%，位于目标范围 ${(candidate.targetMarginMin * 100).toFixed(2)}%-${(candidate.targetMarginMax * 100).toFixed(2)}%，且平台匹配${candidate.platform}`,
       });
     }
     return {

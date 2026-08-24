@@ -56,6 +56,8 @@ test('profit guard re-reads the account and sends only group_ids on a safe updat
   });
   assert.deepEqual(readOptions, [{ fresh: true }, { fresh: true }]);
   assert.equal(calls.filter((item) => item.kind === 'record').length, 1);
+  assert.equal(calls.find((item) => item.kind === 'record').details.groupName, 'cheap');
+  assert.match(calls.find((item) => item.kind === 'record').details.reason, /分组“cheap”/);
 });
 
 test('profit guard auto-assigns only platform-matched groups within the inclusive margin range', async () => {
@@ -83,6 +85,8 @@ test('profit guard auto-assigns only platform-matched groups within the inclusiv
   assert.equal(result.changed, true);
   assert.deepEqual(calls.find((item) => item.action === 'update'), { action: 'update', groupIds: [10, 20, 30] });
   assert.deepEqual(calls.filter((item) => item.action === 'add_group').map((item) => item.groupId), [20, 30]);
+  assert.deepEqual(calls.filter((item) => item.action === 'add_group').map((item) => item.groupName), ['boundary-low', 'boundary-high']);
+  assert.ok(calls.filter((item) => item.action === 'add_group').every((item) => /分组“/.test(item.reason)));
 });
 
 test('target margin range adds preferred groups without removing a safe existing group below the target range', async () => {

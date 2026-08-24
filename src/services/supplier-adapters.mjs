@@ -3,10 +3,11 @@ import https from 'node:https';
 import net from 'node:net';
 import { maskSecret, totpCode } from './supplier-credentials.mjs';
 import { normalizeQualityStatus } from './supplier-quality.mjs';
+import { supplierUserMessage } from './supplier-messages.mjs';
 
 export class SupplierAdapterError extends Error {
   constructor(code, message, { statusCode = 502, httpStatus = 0 } = {}) {
-    super(message);
+    super(supplierUserMessage(message, { code, httpStatus }));
     this.name = 'SupplierAdapterError';
     this.code = code;
     this.statusCode = statusCode;
