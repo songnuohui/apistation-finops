@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import QRCode from 'qrcode';
 
 const MAX_QR_BYTES = 1_048_576;
 
@@ -110,18 +111,14 @@ export class NapcatService {
     try {
       const parsed = new URL(source);
       if (!['http:', 'https:'].includes(parsed.protocol)) return '';
-      const response = await this.fetch(parsed, {
-        method: 'GET',
-        headers: { Accept: 'image/*' },
-        signal: AbortSignal.timeout(this.config.napcatWebuiTimeoutMs),
+      const value = await QRCode.toDataURL(source, {
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        width: 280,
       });
-      const contentType = text(response.headers.get('content-type')).split(';')[0].toLowerCase();
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (response.ok && contentType.startsWith('image/') && bytes.length <= MAX_QR_BYTES) {
-        const value = `data:${contentType};base64,${bytes.toString('base64')}`;
-        this.qrCache = { source, value, expiresAt: Date.now() + 60_000 };
-        return value;
-      }
+      if (Buffer.byteLength(value) > MAX_QR_BYTES) return '';
+      this.qrCache = { source, value, expiresAt: Date.now() + 60_000 };
+      return value;
     } catch {
       // The QR credential must not be sent to the browser as a remote URL.
     }

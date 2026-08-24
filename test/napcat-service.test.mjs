@@ -33,12 +33,6 @@ test('NapCat service returns a proxied QR image without exposing its source URL'
           data: { isLogin: false, qrcodeurl: 'https://qq.example.test/qr-secret' },
         });
       }
-      if (String(url) === 'https://qq.example.test/qr-secret') {
-        return new Response(Buffer.from('qr-image'), {
-          status: 200,
-          headers: { 'Content-Type': 'image/png' },
-        });
-      }
       throw new Error(`unexpected request: ${url}`);
     },
   });
@@ -50,6 +44,7 @@ test('NapCat service returns a proxied QR image without exposing its source URL'
   assert.equal(status.loggedIn, false);
   assert.match(status.qrcode, /^data:image\/png;base64,/);
   assert.equal(status.qrcode.includes('qq.example.test'), false);
+  assert.equal(requests.some((request) => request.url === 'https://qq.example.test/qr-secret'), false);
   assert.equal(
     JSON.parse(requests[0].options.body).hash,
     createHash('sha256').update('webui-secret.napcat').digest('hex'),
@@ -106,12 +101,6 @@ test('NapCat service refreshes QR codes and restarts NapCat for a new login', as
       }
       if (String(url) === 'http://napcat:6099/api/QQLogin/CheckLoginStatus') {
         return json({ code: 0, data: { isLogin: false, qrcodeurl: 'https://qq.example.test/fresh' } });
-      }
-      if (String(url) === 'https://qq.example.test/fresh') {
-        return new Response(Buffer.from('fresh-qr'), {
-          status: 200,
-          headers: { 'Content-Type': 'image/png' },
-        });
       }
       if (String(url) === 'http://napcat:6099/api/QQLogin/RestartNapCat') {
         return json({ code: 0, data: {} });
