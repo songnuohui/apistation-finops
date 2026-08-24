@@ -36,6 +36,7 @@ function supplierConnection(row, { includeCiphertext = false } = {}) {
     credentialLabel: row.credential_label || '',
     credentialsConfigured: Boolean(row.credentials_ciphertext),
     enabled: Boolean(row.enabled),
+    alertEnabled: row.alert_enabled === undefined ? true : Boolean(row.alert_enabled),
     inventoryIntervalSeconds: Number(row.inventory_interval_seconds || (Number(row.inventory_interval_minutes || 10) * 60)),
     inventoryIntervalMinutes: Number(row.inventory_interval_minutes || Math.ceil(Number(row.inventory_interval_seconds || 600) / 60)),
     activeCheckEnabled: Boolean(row.active_check_enabled),
@@ -3464,12 +3465,12 @@ export class PostgresRepository {
         result = await client.query(`
           INSERT INTO ${this.schema}.supplier_connections(
             supplier_id,name,adapter_type,base_url,auth_mode,credential_label,credentials_ciphertext,
-            enabled,inventory_interval_seconds,inventory_interval_minutes,active_check_enabled,active_check_limit,
+            enabled,alert_enabled,inventory_interval_seconds,inventory_interval_minutes,active_check_enabled,active_check_limit,
             quality_monitor_mode,low_balance_threshold,balance_currency,created_by,updated_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
           RETURNING *`, [
           supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
+          credentialsCiphertext,input.enabled,input.alertEnabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
           input.activeCheckLimit,input.qualityMonitorMode,input.lowBalanceThreshold,input.balanceCurrency,actor,actor,
         ]);
       } catch (error) {
@@ -3497,14 +3498,14 @@ export class PostgresRepository {
         result = await client.query(`
           UPDATE ${this.schema}.supplier_connections SET
             supplier_id=$2,name=$3,adapter_type=$4,base_url=$5,auth_mode=$6,credential_label=$7,
-            credentials_ciphertext=$8,enabled=$9,inventory_interval_seconds=$10,inventory_interval_minutes=$11,
-            active_check_enabled=$12,active_check_limit=$13,quality_monitor_mode=$14,
-            low_balance_threshold=$15,
-            balance_currency=$16,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
-            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$17,updated_at=NOW()
+            credentials_ciphertext=$8,enabled=$9,alert_enabled=$10,inventory_interval_seconds=$11,inventory_interval_minutes=$12,
+            active_check_enabled=$13,active_check_limit=$14,quality_monitor_mode=$15,
+            low_balance_threshold=$16,
+            balance_currency=$17,connection_status=CASE WHEN $9 THEN 'pending' ELSE 'disabled' END,
+            next_sync_at=CASE WHEN $9 THEN NOW() ELSE next_sync_at END,last_error='',updated_by=$18,updated_at=NOW()
           WHERE id=$1 RETURNING *`, [
           connectionId,supplierId,input.name,input.adapterType,input.baseUrl,input.authMode,input.credentialLabel,
-          credentialsCiphertext,input.enabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
+          credentialsCiphertext,input.enabled,input.alertEnabled,input.inventoryIntervalSeconds,Math.max(5, Math.ceil(input.inventoryIntervalSeconds / 60)),input.activeCheckEnabled,
           input.activeCheckLimit,input.qualityMonitorMode,input.lowBalanceThreshold,input.balanceCurrency,actor,
         ]);
       } catch (error) {
@@ -3512,10 +3513,45 @@ export class PostgresRepository {
         throw error;
       }
       const row = { ...result.rows[0], supplier_name: input.supplierName };
+      if (!input.alertEnabled) {
+        await client.query(`UPDATE ${this.schema}.supplier_alert_events
+          SET status='resolved',resolved_at=NOW(),last_seen_at=NOW()
+          WHERE connection_id=$1 AND status='open'`, [connectionId]);
+      }
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'update_supplier_connection','supplier_connection',$2,$3::jsonb)`,
-      [actor,String(connectionId),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl, enabled: input.enabled })]);
+      [actor,String(connectionId),JSON.stringify({ supplierName: input.supplierName, name: input.name, adapterType: input.adapterType, baseUrl: input.baseUrl, enabled: input.enabled, alertEnabled: input.alertEnabled })]);
       return supplierConnection(row);
+    });
+  }
+
+  async setSupplierConnectionAlertEnabled(connectionId, enabled, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const current = await client.query(`
+        SELECT c.*,s.name AS supplier_name
+        FROM ${this.schema}.supplier_connections c
+        JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
+        WHERE c.id=$1
+        FOR UPDATE OF c`, [connectionId]);
+      if (!current.rowCount) throw httpError('supplier connection not found', 404);
+      const updated = await client.query(`UPDATE ${this.schema}.supplier_connections
+        SET alert_enabled=$2,updated_by=$3,updated_at=NOW()
+        WHERE id=$1
+        RETURNING *`, [connectionId,enabled,actor]);
+      let resolvedAlertCount = 0;
+      if (!enabled) {
+        const resolved = await client.query(`UPDATE ${this.schema}.supplier_alert_events
+          SET status='resolved',resolved_at=NOW(),last_seen_at=NOW()
+          WHERE connection_id=$1 AND status='open'`, [connectionId]);
+        resolvedAlertCount = resolved.rowCount;
+      }
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update_supplier_connection_alert_enabled','supplier_connection',$2,$3::jsonb)`,
+      [actor,String(connectionId),JSON.stringify({ alertEnabled: enabled, resolvedAlertCount })]);
+      return {
+        connection: supplierConnection({ ...updated.rows[0], supplier_name: current.rows[0].supplier_name }),
+        resolvedAlertCount,
+      };
     });
   }
 
@@ -4221,6 +4257,7 @@ export class PostgresRepository {
             inventory_interval_seconds*INTERVAL '1 second' * POWER(2,LEAST(consecutive_failures+1,6))),updated_at=NOW()
         WHERE id=$1 RETURNING *`, [connectionId,error.code || 'sync_failed',message.slice(0,1000)]);
       if (!result.rowCount) return;
+      if (result.rows[0].alert_enabled === false) return;
       await client.query(`
         INSERT INTO ${this.schema}.supplier_alert_events(
           connection_id,dedupe_key,alert_type,severity,title,message,details)
@@ -4247,6 +4284,7 @@ export class PostgresRepository {
       const previousByExternalId = new Map(previousResult.rows.map((row) => [row.external_key_id, row]));
       const seen = [];
       const alert = async ({ keyId = null, dedupeKey, type, severity = 'warning', title, message = '', details = {} }) => {
+        if (connection.alert_enabled === false) return;
         await client.query(`
           INSERT INTO ${this.schema}.supplier_alert_events(
             connection_id,supplier_key_id,dedupe_key,alert_type,severity,title,message,details)
@@ -5418,7 +5456,9 @@ export class PostgresRepository {
       await client.query(`
         INSERT INTO ${this.schema}.supplier_alert_events(
           connection_id,supplier_key_id,dedupe_key,alert_type,severity,title,message,details)
-        VALUES($1,$2,$3,'account_profit_guard','critical',$4,$5,$6::jsonb)
+        SELECT c.id,$2,$3,'account_profit_guard','critical',$4,$5,$6::jsonb
+        FROM ${this.schema}.supplier_connections c
+        WHERE c.id=$1 AND c.alert_enabled
         ON CONFLICT(connection_id,dedupe_key) DO UPDATE SET
           supplier_key_id=EXCLUDED.supplier_key_id,status='open',severity='critical',
           title=EXCLUDED.title,message=EXCLUDED.message,details=EXCLUDED.details,
@@ -5590,7 +5630,7 @@ export class PostgresRepository {
       JOIN ${this.schema}.suppliers s ON s.id=c.supplier_id
       LEFT JOIN ${this.schema}.supplier_alert_deliveries d
         ON d.alert_event_id=e.id AND d.channel='qq_onebot'
-      WHERE e.status='open' AND (
+      WHERE e.status='open' AND c.alert_enabled AND (
         d.alert_event_id IS NULL
         OR d.last_payload_hash IS DISTINCT FROM MD5(CONCAT_WS('|',e.severity,e.title,e.message,e.details::text))
         OR (d.status='failed' AND d.next_attempt_at<=NOW())

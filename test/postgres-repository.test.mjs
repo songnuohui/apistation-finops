@@ -74,6 +74,84 @@ test('supplier connection profit guard coverage includes linked account policies
   assert.equal(connection.profitGuardConfiguredAccountCount, 1);
   assert.equal(connection.profitGuardAccountCount, 1);
   assert.equal(connection.profitGuardFullyEnabled, true);
+  assert.equal(connection.alertEnabled, true);
+});
+
+test('supplier alert switch updates FinOps state and archives open alerts', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT c.*,s.name AS supplier_name')) {
+        return {
+          rows: [{
+            id: '9', supplier_id: '4', supplier_name: 'Provider A', name: 'main',
+            adapter_type: 'sub2api', base_url: 'https://provider.example', auth_mode: 'password',
+            enabled: true, alert_enabled: true, inventory_interval_seconds: 600,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('UPDATE "finops".supplier_connections')) {
+        return {
+          rows: [{
+            id: '9', supplier_id: '4', name: 'main', adapter_type: 'sub2api',
+            base_url: 'https://provider.example', auth_mode: 'password',
+            enabled: true, alert_enabled: false, inventory_interval_seconds: 600,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('UPDATE "finops".supplier_alert_events')) return { rows: [], rowCount: 2 };
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+
+  const result = await repository.setSupplierConnectionAlertEnabled(9, false, 'operator');
+
+  assert.equal(result.connection.alertEnabled, false);
+  assert.equal(result.resolvedAlertCount, 2);
+  assert.ok(queries.some((query) => query.text.includes('FOR UPDATE OF c')));
+  assert.ok(queries.some((query) => query.text.includes('SET alert_enabled=$2')));
+  assert.ok(queries.some((query) => query.text.includes('status=\'resolved\'')));
+  assert.ok(queries.some((query) => query.text.includes('update_supplier_connection_alert_enabled')));
+});
+
+test('pending QQ deliveries exclude suppliers with alerts disabled', async () => {
+  let statement = '';
+  const repository = new PostgresRepository({
+    async query(text) {
+      statement = text;
+      return { rows: [], rowCount: 0 };
+    },
+  }, config);
+
+  await repository.listPendingSupplierAlertDeliveries();
+
+  assert.match(statement, /e\.status='open' AND c\.alert_enabled AND/);
+});
+
+test('supplier sync failures do not create alerts when the supplier alert switch is off', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('UPDATE "finops".supplier_connections SET')) {
+        return { rows: [{ id: '9', alert_enabled: false }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+
+  await repository.recordSupplierSyncFailure(9, { code: 'sync_failed', message: 'connection failed' });
+
+  assert.equal(queries.some((query) => query.text.includes('INSERT INTO "finops".supplier_alert_events')), false);
 });
 
 test('supplier connection details reuse one checked-out client and defer account candidates', async () => {

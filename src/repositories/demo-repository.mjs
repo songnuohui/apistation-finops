@@ -199,7 +199,7 @@ export class DemoRepository {
       supplierNotes: '',
       id: 1, supplierId: 1, supplierName: 'Cloud Seats', name: '主账号', adapterType: 'sub2api',
       detectedAdapterType: 'sub2api', baseUrl: 'https://supplier.example.com', authMode: 'access_token',
-      credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true,
+      credentialLabel: 'nu***@example.com', credentialsConfigured: true, credentialsCiphertext: 'demo-encrypted', enabled: true, alertEnabled: true,
       inventoryIntervalSeconds: 600, inventoryIntervalMinutes: 10, activeCheckEnabled: true, activeCheckLimit: 20,
       lowBalanceThreshold: 5, balanceCurrency: 'USD', balance: 10.84, connectionStatus: 'ok',
       qualityMonitorMode: 'hybrid',
@@ -1050,6 +1050,7 @@ export class DemoRepository {
       credentialsConfigured: Boolean(credentialsCiphertext),
       credentialsCiphertext: credentialsCiphertext || '',
       enabled: input.enabled,
+      alertEnabled: input.alertEnabled,
       inventoryIntervalSeconds: input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60,
       inventoryIntervalMinutes: Math.ceil((input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60) / 60),
       activeCheckEnabled: input.activeCheckEnabled,
@@ -1094,6 +1095,7 @@ export class DemoRepository {
       authMode: input.authMode,
       credentialLabel: input.credentialLabel || '',
       enabled: input.enabled,
+      alertEnabled: input.alertEnabled,
       inventoryIntervalSeconds: input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60,
       inventoryIntervalMinutes: Math.ceil((input.inventoryIntervalSeconds ?? Number(input.inventoryIntervalMinutes || 10) * 60) / 60),
       activeCheckEnabled: input.activeCheckEnabled,
@@ -1113,6 +1115,15 @@ export class DemoRepository {
     if (input.adapterType === 'openai_compatible' && finiteNumber(input.credentials?.balance) !== null) {
       connection.balance = finiteNumber(input.credentials.balance);
     }
+    if (!connection.alertEnabled) {
+      const resolvedAt = new Date().toISOString();
+      for (const alert of this.supplierDetail(connection.id).alerts) {
+        if (alert.status !== 'open') continue;
+        alert.status = 'resolved';
+        alert.resolvedAt = resolvedAt;
+        alert.lastSeenAt = resolvedAt;
+      }
+    }
     const detail = this.supplierDetail(connection.id);
     if (input.adapterType === 'openai_compatible' && detail.keys[0]) {
       const key = detail.keys[0];
@@ -1122,6 +1133,25 @@ export class DemoRepository {
     }
     this.refreshSupplierConnectionStats(connection);
     return copySupplierConnection(connection);
+  }
+
+  async setSupplierConnectionAlertEnabled(connectionId, enabled) {
+    const connection = this.supplierConnections.find((item) => Number(item.id) === Number(connectionId));
+    if (!connection) throw Object.assign(new Error('supplier connection not found'), { statusCode: 404 });
+    connection.alertEnabled = Boolean(enabled);
+    let resolvedAlertCount = 0;
+    if (!connection.alertEnabled) {
+      const resolvedAt = new Date().toISOString();
+      for (const alert of this.supplierDetail(connection.id).alerts) {
+        if (alert.status !== 'open') continue;
+        alert.status = 'resolved';
+        alert.resolvedAt = resolvedAt;
+        alert.lastSeenAt = resolvedAt;
+        resolvedAlertCount += 1;
+      }
+    }
+    this.refreshSupplierConnectionStats(connection);
+    return { connection: copySupplierConnection(connection), resolvedAlertCount };
   }
 
   async getSupplierConnectionDeletionPlan(connectionId) {
@@ -1910,6 +1940,7 @@ export class DemoRepository {
   async listPendingSupplierAlertDeliveries(limit = 20) {
     const alerts = [];
     for (const connection of this.supplierConnections) {
+      if (!connection.alertEnabled) continue;
       const detail = this.supplierConnectionDetails.get(Number(connection.id));
       for (const alert of detail?.alerts || []) {
         if (alert.status !== 'open') continue;

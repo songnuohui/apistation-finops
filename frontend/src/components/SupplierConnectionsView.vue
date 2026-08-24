@@ -27,6 +27,7 @@ const detailLoading = ref(false);
 const detailTab = ref<DetailTab>('keys');
 const qualityLoading = ref(false);
 const syncingId = ref<number | null>(null);
+const alertChangingId = ref<number | null>(null);
 const linkKey = ref<AnyRecord | null>(null);
 const accountSearch = ref('');
 const accountCandidates = ref<AnyRecord[]>([]);
@@ -254,6 +255,7 @@ function blankEditor(connection: AnyRecord | null = null) {
     credentialLabel: connection?.credentialLabel || '',
     credentialsConfigured: Boolean(connection?.credentialsConfigured),
     enabled: connection?.enabled ?? true,
+    alertEnabled: connection?.alertEnabled ?? true,
     inventoryIntervalSeconds: connection?.inventoryIntervalSeconds || 600,
     activeCheckEnabled: connection?.activeCheckEnabled ?? true,
     activeCheckLimit: connection?.activeCheckLimit || 20,
@@ -321,6 +323,7 @@ async function saveConnection() {
       authMode: current.authMode,
       credentialLabel: current.credentialLabel || '',
       enabled: Boolean(current.enabled),
+      alertEnabled: Boolean(current.alertEnabled),
       inventoryIntervalSeconds: Number(current.inventoryIntervalSeconds),
       activeCheckEnabled: Boolean(current.activeCheckEnabled),
       activeCheckLimit: Number(current.activeCheckLimit),
@@ -354,6 +357,39 @@ async function saveConnection() {
     notify(error.message);
   } finally {
     editorSaving.value = false;
+  }
+}
+
+async function toggleConnectionAlertEnabled(connection: AnyRecord, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const enabled = input.checked;
+  alertChangingId.value = Number(connection.id);
+  try {
+    const result = await send(`/supplier-connections/${connection.id}/alert-enabled`, 'PATCH', { enabled });
+    const updated = result.connection || {};
+    const item = connectionItems.value.find((candidate) => Number(candidate.id) === Number(connection.id));
+    if (item) Object.assign(item, updated);
+    if (detail.value && Number(detail.value.connection?.id) === Number(connection.id)) {
+      Object.assign(detail.value.connection, updated);
+      if (!enabled) {
+        const resolvedAt = new Date().toISOString();
+        for (const alert of detail.value.alerts || []) {
+          if (alert.status !== 'open') continue;
+          alert.status = 'resolved';
+          alert.resolvedAt = resolvedAt;
+          alert.lastSeenAt = resolvedAt;
+        }
+      }
+    }
+    const name = connection.supplierName || connection.name || '该供应商';
+    notify(enabled
+      ? `供应商“${name}”已开启告警`
+      : `供应商“${name}”已关闭告警，现有待处理告警已归档`);
+  } catch (error: any) {
+    input.checked = !enabled;
+    notify(error.message);
+  } finally {
+    alertChangingId.value = null;
   }
 }
 
@@ -1042,8 +1078,23 @@ onBeforeUnmount(() => {
                 <small>{{ item.failedKeyCount ? `${item.failedKeyCount} 个巡检失败` : '没有巡检失败' }}</small>
               </td>
               <td>
-                <span v-if="item.openAlertCount" class="alert-count">{{ item.openAlertCount }} 待处理</span>
-                <span v-else class="muted-text">没有开放告警</span>
+                <label class="supplier-alert-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    :checked="item.alertEnabled !== false"
+                    :disabled="alertChangingId === item.id"
+                    :aria-label="`${item.supplierName || item.name || '供应商'}告警开关`"
+                    @change="toggleConnectionAlertEnabled(item, $event)"
+                  />
+                  <span class="supplier-alert-switch-track" aria-hidden="true"></span>
+                  <span class="supplier-alert-switch-copy">
+                    <strong>{{ item.alertEnabled === false ? '告警已关闭' : '告警已开启' }}</strong>
+                    <small v-if="item.alertEnabled === false">不再创建或发送该供应商告警</small>
+                    <small v-else-if="item.openAlertCount">{{ item.openAlertCount }} 条待处理告警</small>
+                    <small v-else>当前没有待处理告警</small>
+                  </span>
+                </label>
               </td>
               <td>
                 <strong>{{ dateTime(item.lastSuccessAt) }}</strong>
@@ -1083,6 +1134,7 @@ onBeforeUnmount(() => {
           <label>单次巡检上限<input v-model.number="editor.activeCheckLimit" type="number" min="1" max="100" /></label>
           <label>低余额告警阈值<input v-model="editor.lowBalanceThreshold" type="number" min="0" step="any" placeholder="不设置则不告警" /></label>
           <label class="toggle-field"><input v-model="editor.enabled" type="checkbox" /><span><strong>启用连接</strong><small>纳入定时读取</small></span></label>
+          <label class="toggle-field"><input v-model="editor.alertEnabled" type="checkbox" /><span><strong>启用供应商告警</strong><small>关闭后不再创建或发送该供应商的告警</small></span></label>
           <label class="toggle-field"><input v-model="editor.activeCheckEnabled" type="checkbox" /><span><strong>巡检可用密钥</strong><small>只检测，不写入上游</small></span></label>
         </div>
         <div class="form-note supplier-note-editor">

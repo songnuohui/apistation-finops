@@ -24,7 +24,7 @@ import {
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
   normalizeBulkAccountCostPeriods, normalizeBulkUserBalanceStatsWhitelist, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
-  normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, assertSupplierCredentials,
+  normalizeMonitorSettings, normalizeSupplierAccountLink, normalizeSupplierConnection, normalizeSupplierAlertEnabled, assertSupplierCredentials,
   hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget, normalizeAlertNotificationSettings,
   normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
@@ -660,6 +660,7 @@ async function api(request,res,url){
     assertSupplierCredentials(input);
     const ciphertext=config.demoMode?'demo-encrypted':supplierMonitorService.encryptCredentials(input.credentials);
     const created=await repository.createSupplierConnection(input,ciphertext,auth.actor);
+    responseCache.invalidate('supplier-connections');
     const sync=config.demoMode?await repository.syncSupplierConnection(created.id):await supplierMonitorService.syncConnection(created.id);
     return json(res,201,{connection:await repository.getSupplierConnection(created.id),sync});
   }
@@ -668,6 +669,14 @@ async function api(request,res,url){
     const result=await supplierDeletionService.deleteConnection(Number(supplierConnectionId[1]),auth.actor);
     responseCache.invalidate('supplier-connections');
     return json(res,200,result);
+  }
+  const supplierConnectionAlertEnabled=/^\/api\/supplier-connections\/(\d+)\/alert-enabled$/.exec(url.pathname);
+  if(request.method==='PATCH'&&supplierConnectionAlertEnabled){
+    const id=Number(supplierConnectionAlertEnabled[1]);
+    const input=normalizeSupplierAlertEnabled(await body(request));
+    const result=await repository.setSupplierConnectionAlertEnabled(id,input.enabled,auth.actor);
+    responseCache.invalidate('supplier-connections');
+    return json(res,200,{...result,connection:await repository.getSupplierConnection(id)});
   }
   if(request.method==='PATCH'&&supplierConnectionId){
     if(!config.demoMode&&!supplierMonitorService?.status().available)return json(res,503,{error:'供应商凭据加密尚未配置'});
@@ -690,6 +699,7 @@ async function api(request,res,url){
     }
     const ciphertext=replaceCredentials?(config.demoMode?'demo-encrypted':supplierMonitorService.encryptCredentials(input.credentials)):current.credentialsCiphertext;
     await repository.updateSupplierConnection(id,input,ciphertext,auth.actor);
+    responseCache.invalidate('supplier-connections');
     const sync=input.enabled?(config.demoMode?await repository.syncSupplierConnection(id):await supplierMonitorService.syncConnection(id)):{ok:false,status:'disabled'};
     return json(res,200,{connection:await repository.getSupplierConnection(id),sync});
   }

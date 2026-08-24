@@ -207,6 +207,14 @@ test('QQ alert delivery remains FinOps-owned and stores only encrypted gateway t
   assert.doesNotMatch(migration, /\bqq_password\b|\baccess_token\s+(?:TEXT|VARCHAR)/i);
 });
 
+test('supplier alert switch remains isolated to the FinOps schema', () => {
+  const migration = read('migrations/058_supplier_alert_switch.sql');
+  assert.match(migration, /\{\{FINOPS_SCHEMA\}\}\.supplier_connections/);
+  assert.match(migration, /alert_enabled BOOLEAN NOT NULL DEFAULT TRUE/);
+  assert.doesNotMatch(migration, /\b(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\bredis\b/i);
+});
+
 test('profit guard threshold migration remains FinOps-owned', () => {
   const migration = read('migrations/026_profit_guard_threshold_modes.sql');
   assert.match(migration, /account_profit_guard_policies/);

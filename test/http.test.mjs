@@ -198,6 +198,7 @@ test('supplier connections validate encrypted portal and API-key credentials', (
     baseUrl: 'https://supplier.example.test', credentials: { username: 'operator', password: 'secret', totpSecret: 'ABC' },
   });
   assert.equal(connection.authMode, 'password');
+  assert.equal(connection.alertEnabled, true);
   assert.deepEqual(Object.keys(connection.credentials).sort(), [
     'accessToken', 'apiKey', 'balance', 'balanceCurrency', 'keyName', 'password', 'rateMultiplier', 'refreshToken', 'totpSecret', 'username',
   ]);
@@ -232,6 +233,11 @@ test('supplier connections validate encrypted portal and API-key credentials', (
   });
   assert.equal(openAi.authMode, 'api_key');
   assert.equal(assertSupplierCredentials(openAi), true);
+  assert.equal(normalizeSupplierConnection({
+    supplierName: 'Muted upstream', name: 'main account', adapterType: 'sub2api',
+    baseUrl: 'https://supplier.example.test', alertEnabled: false,
+    credentials: { username: 'operator', password: 'secret' },
+  }).alertEnabled, false);
   assert.throws(() => assertSupplierCredentials({ ...openAi, authMode: 'access_token' }), /requires api_key/);
 });
 

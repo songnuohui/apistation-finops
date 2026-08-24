@@ -241,6 +241,7 @@ export function normalizeSupplierConnection(input) {
     authMode,
     credentialLabel: textValue(input.credentialLabel, 'credentialLabel', { required: false, max: 255 }),
     enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
+    alertEnabled: input.alertEnabled === undefined ? true : booleanValue(input.alertEnabled, 'alertEnabled'),
     // Seconds are intentionally bounded to keep a bad configuration from
     // creating a tight polling loop. Keep accepting the old minutes field so
     // existing clients can be upgraded without losing their setting.
@@ -267,6 +268,12 @@ export function normalizeSupplierConnection(input) {
       balance: optionalDecimal(credentials.balance, 'credentials.balance', { min: 0, allowZero: true }),
       balanceCurrency: credentials.balanceCurrency ? currencyValue(credentials.balanceCurrency, 'credentials.balanceCurrency') : '',
     },
+  };
+}
+
+export function normalizeSupplierAlertEnabled(input) {
+  return {
+    enabled: booleanValue(input.enabled, 'enabled'),
   };
 }
 
