@@ -211,6 +211,17 @@ test('demo supplier connections support create, edit, sync, account links, and a
   assert.equal((await repository.getSupplierConnectionDetails(1)).connection.openAlertCount, 0);
 });
 
+test('demo QQ delivery sends each alert once even when the alert details change', async () => {
+  const repository = new DemoRepository(config);
+  const first = await repository.listPendingSupplierAlertDeliveries();
+  assert.equal(first.length, 1);
+
+  await repository.recordSupplierAlertDelivery(first[0].id, first[0].payloadHash, { delivered: true });
+  repository.supplierConnectionDetails.get(1).alerts[0].message = '内容发生变化';
+
+  assert.deepEqual(await repository.listPendingSupplierAlertDeliveries(), []);
+});
+
 test('NewAPI supplier keys are available for account cost linking', async () => {
   const repository = new DemoRepository(config);
   repository.supplierConnections[0].adapterType = 'newapi';

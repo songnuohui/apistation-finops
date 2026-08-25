@@ -1945,7 +1945,7 @@ export class DemoRepository {
       for (const alert of detail?.alerts || []) {
         if (alert.status !== 'open') continue;
         const payloadHash = JSON.stringify([alert.severity,alert.title,alert.message,alert.details || {}]);
-        if (this.supplierAlertDeliveries.get(alert.id)?.payloadHash === payloadHash) continue;
+        if (this.supplierAlertDeliveries.get(alert.id)?.delivered) continue;
         alerts.push({
           ...alert,payloadHash,connectionName:connection.name,supplierName:connection.supplierName,
         });

@@ -5632,7 +5632,6 @@ export class PostgresRepository {
         ON d.alert_event_id=e.id AND d.channel='qq_onebot'
       WHERE e.status='open' AND c.alert_enabled AND (
         d.alert_event_id IS NULL
-        OR d.last_payload_hash IS DISTINCT FROM MD5(CONCAT_WS('|',e.severity,e.title,e.message,e.details::text))
         OR (d.status='failed' AND d.next_attempt_at<=NOW())
       )
       ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,

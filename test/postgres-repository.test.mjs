@@ -134,6 +134,22 @@ test('pending QQ deliveries exclude suppliers with alerts disabled', async () =>
   assert.match(statement, /e\.status='open' AND c\.alert_enabled AND/);
 });
 
+test('pending QQ deliveries do not resend an already delivered alert when its details change', async () => {
+  let statement = '';
+  const repository = new PostgresRepository({
+    async query(text) {
+      statement = text;
+      return { rows: [], rowCount: 0 };
+    },
+  }, config);
+
+  await repository.listPendingSupplierAlertDeliveries();
+
+  assert.doesNotMatch(statement, /last_payload_hash IS DISTINCT FROM/);
+  assert.match(statement, /d\.alert_event_id IS NULL/);
+  assert.match(statement, /d\.status='failed' AND d\.next_attempt_at<=NOW\(\)/);
+});
+
 test('supplier sync failures do not create alerts when the supplier alert switch is off', async () => {
   const queries = [];
   const client = {
