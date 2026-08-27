@@ -15,7 +15,6 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - postgres
-      - onebot
     init: true
     mem_limit: 384m
     cpus: 0.75
@@ -46,6 +45,3 @@ networks:
   postgres:
     external: true
     name: "${APISTATION_POSTGRES_NETWORK:?Set APISTATION_POSTGRES_NETWORK to the existing PostgreSQL Docker network}"
-  onebot:
-    external: true
-    name: "${APISTATION_ONEBOT_NETWORK:-apistation-finops-onebot}"

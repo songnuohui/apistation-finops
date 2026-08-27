@@ -211,17 +211,6 @@ test('demo supplier connections support create, edit, sync, account links, and a
   assert.equal((await repository.getSupplierConnectionDetails(1)).connection.openAlertCount, 0);
 });
 
-test('demo QQ delivery sends each alert once even when the alert details change', async () => {
-  const repository = new DemoRepository(config);
-  const first = await repository.listPendingSupplierAlertDeliveries();
-  assert.equal(first.length, 1);
-
-  await repository.recordSupplierAlertDelivery(first[0].id, first[0].payloadHash, { delivered: true });
-  repository.supplierConnectionDetails.get(1).alerts[0].message = '内容发生变化';
-
-  assert.deepEqual(await repository.listPendingSupplierAlertDeliveries(), []);
-});
-
 test('NewAPI supplier keys are available for account cost linking', async () => {
   const repository = new DemoRepository(config);
   repository.supplierConnections[0].adapterType = 'newapi';
@@ -291,15 +280,13 @@ test('supplier key batch profit guard updates only linked accounts', async () =>
   assert.equal((await repository.getSupplierKeyDetails(1)).accounts[0].profitGuard.updatedBy, 'bulk-admin');
 });
 
-test('supplier alert switch archives open alerts and blocks QQ deliveries in demo mode', async () => {
+test('supplier alert switch archives open alerts in demo mode', async () => {
   const repository = new DemoRepository(config);
-  assert.equal((await repository.listPendingSupplierAlertDeliveries()).length, 1);
 
   const disabled = await repository.setSupplierConnectionAlertEnabled(1, false);
   assert.equal(disabled.connection.alertEnabled, false);
   assert.equal(disabled.resolvedAlertCount, 1);
   assert.equal((await repository.getSupplierConnection(1)).openAlertCount, 0);
-  assert.deepEqual(await repository.listPendingSupplierAlertDeliveries(), []);
 
   const enabled = await repository.setSupplierConnectionAlertEnabled(1, true);
   assert.equal(enabled.connection.alertEnabled, true);

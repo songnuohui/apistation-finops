@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  Activity, AlertTriangle, Bell, Check, Edit3, KeyRound, Link2, Plus, RefreshCw,
-  Send, ServerCog, Settings2, ShieldCheck, Trash2, Unlink, X,
+  Activity, AlertTriangle, Check, Edit3, KeyRound, Link2, Plus, RefreshCw,
+  ServerCog, Settings2, ShieldCheck, Trash2, Unlink, X,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
 import { supplierAlertMessage, supplierAlertTitle, supplierMessage } from '../supplier-messages';
@@ -36,11 +36,6 @@ const acknowledgingAlertId = ref<number | null>(null);
 const targetEditor = ref<AnyRecord | null>(null);
 const targetModels = ref<string[]>([]);
 const targetModelsLoading = ref(false);
-const qqEditor = ref<AnyRecord | null>(null);
-const qqSaving = ref(false);
-const qqBotStatus = ref<AnyRecord | null>(null);
-const qqBotLoading = ref(false);
-const qqBotAction = ref(false);
 const serviceAuthEditor = ref<AnyRecord | null>(null);
 const serviceAuthSaving = ref(false);
 const profitGuardEditor = ref<AnyRecord | null>(null);
@@ -54,7 +49,6 @@ let detailRequestToken = 0;
 let qualityRequestToken = 0;
 let accountRequestToken = 0;
 let connectionRequestToken = 0;
-let qqBotTimer: number | undefined;
 
 const adapterLabels: Record<string, string> = {
   auto: '自动识别',
@@ -802,120 +796,6 @@ async function deleteTarget(targetId: number) {
   }
 }
 
-async function openQqSettings() {
-  try {
-    const [settings, botStatus] = await Promise.all([
-      get('/alert-notification-settings'),
-      get('/qq-bot/status'),
-    ]);
-    qqEditor.value = {
-      ...settings,
-    };
-    qqBotStatus.value = botStatus;
-    startQqBotPolling();
-  } catch (error: any) {
-    notify(error.message);
-  }
-}
-
-function closeQqSettings() {
-  qqEditor.value = null;
-  qqBotStatus.value = null;
-  window.clearInterval(qqBotTimer);
-  qqBotTimer = undefined;
-}
-
-async function loadQqBotStatus(quiet = false) {
-  if (!qqEditor.value) return;
-  if (!quiet) qqBotLoading.value = true;
-  try {
-    qqBotStatus.value = await get('/qq-bot/status');
-  } catch (error: any) {
-    if (!quiet) notify(error.message);
-  } finally {
-    if (!quiet) qqBotLoading.value = false;
-  }
-}
-
-function startQqBotPolling() {
-  window.clearInterval(qqBotTimer);
-  qqBotTimer = window.setInterval(() => {
-    if (qqEditor.value && !qqBotStatus.value?.loggedIn) void loadQqBotStatus(true);
-  }, 3_000);
-}
-
-async function refreshQqBotQr() {
-  qqBotAction.value = true;
-  qqBotStatus.value = {
-    ...(qqBotStatus.value || {}),
-    qrcode: '',
-    error: '正在生成新的 QQ 登录二维码，请稍候。',
-  };
-  try {
-    qqBotStatus.value = await send('/qq-bot/refresh', 'POST', {});
-    notify('已生成新的 QQ 登录二维码');
-  } catch (error: any) {
-    const message = error.message || '新的 QQ 登录二维码暂时生成失败，请稍候重试';
-    qqBotStatus.value = {
-      ...(qqBotStatus.value || {}),
-      qrcode: '',
-      error: message,
-    };
-    notify(message);
-  } finally {
-    qqBotAction.value = false;
-  }
-}
-
-async function logoutQqBot() {
-  if (!window.confirm('将退出当前 QQ 并重新启动登录流程，需要重新扫码确认。是否继续？')) return;
-  qqBotAction.value = true;
-  try {
-    await send('/qq-bot/logout', 'POST', {});
-    qqBotStatus.value = {
-      ...(qqBotStatus.value || {}),
-      loggedIn: false,
-      onebotReady: false,
-      qrcode: '',
-    };
-    notify('当前 QQ 已退出，正在准备新的登录二维码');
-    window.setTimeout(() => void loadQqBotStatus(true), 2_000);
-  } catch (error: any) {
-    notify(error.message);
-  } finally {
-    qqBotAction.value = false;
-  }
-}
-
-async function saveQqSettings(closeAfter = true) {
-  if (!qqEditor.value) return false;
-  qqSaving.value = true;
-  try {
-    await send('/alert-notification-settings', 'PATCH', {
-      enabled: Boolean(qqEditor.value.enabled),
-      qqNumber: String(qqEditor.value.qqNumber || '').trim(),
-    });
-    notify('QQ 告警配置已保存');
-    if (closeAfter) closeQqSettings();
-    return true;
-  } catch (error: any) {
-    notify(error.message);
-    return false;
-  } finally {
-    qqSaving.value = false;
-  }
-}
-
-async function testQqSettings() {
-  if (!await saveQqSettings(false)) return;
-  try {
-    await send('/alert-notification-settings/test', 'POST', {});
-    notify('QQ 测试消息已发送');
-  } catch (error: any) {
-    notify(error.message);
-  }
-}
-
 async function openServiceAuthSettings() {
   try {
     const settings = await get('/sub2api-service-auth');
@@ -1014,7 +894,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearTimeout(searchTimer);
   window.clearTimeout(accountSearchTimer);
-  window.clearInterval(qqBotTimer);
 });
 </script>
 
@@ -1032,7 +911,6 @@ onBeforeUnmount(() => {
           <button @click="openServiceAuthSettings"><KeyRound :size="16" /><span><strong>Sub2API 自动认证</strong><small>后台同步与利润保护凭据</small></span></button>
         </div>
       </details>
-      <button class="secondary-button" title="配置连接、余额和密钥异常通知" @click="openQqSettings"><Bell :size="16" />QQ 告警</button>
       <button class="primary-button" @click="openCreate"><Plus :size="16" />添加连接</button>
       <button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="loadConnections"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
     </div>
@@ -1412,39 +1290,6 @@ onBeforeUnmount(() => {
           <label class="toggle-field full-field"><input v-model="targetEditor.enabled" type="checkbox" /><span><strong>启用此目标</strong><small>到期后自动发起受控探测</small></span></label>
         </div>
         <footer><button class="secondary-button" @click="targetEditor = null">取消</button><button class="primary-button" :disabled="!targetEditor.model" @click="saveTarget"><ShieldCheck :size="16" />保存目标</button></footer>
-      </section>
-    </div>
-
-    <div v-if="qqEditor" class="modal-layer nested-modal" @click.self="closeQqSettings">
-      <section class="modal form-modal qq-modal">
-        <header><div><h2>QQ 告警通知</h2><p>在此扫码登录 QQ 机器人，并设置接收供应商异常告警的 QQ 号。</p></div><button class="icon-button" title="关闭" aria-label="关闭" @click="closeQqSettings"><X :size="19" /></button></header>
-        <section class="qq-bot-panel">
-          <div class="qq-bot-head">
-            <div><span>QQ 机器人</span><strong>{{ qqBotStatus?.loggedIn ? '已登录' : qqBotStatus?.available ? '等待扫码' : '暂不可用' }}</strong><small>{{ qqBotStatus?.loggedIn ? '机器人已可发送私聊消息' : qqBotStatus?.error || '请使用手机 QQ 扫描下方二维码' }}</small></div>
-            <span class="status-pill" :class="qqBotStatus?.loggedIn ? 'success' : qqBotStatus?.available ? 'warning' : 'danger'">{{ qqBotStatus?.loggedIn ? '已登录' : qqBotStatus?.available ? '待登录' : '未就绪' }}</span>
-          </div>
-          <div v-if="qqBotLoading && !qqBotStatus" class="loading-note"><RefreshCw :size="15" class="spin" />正在读取 QQ 机器人状态</div>
-          <template v-else-if="qqBotStatus?.configured">
-            <div v-if="qqBotStatus.loggedIn" class="qq-bot-account">
-              <div><span>机器人 QQ</span><strong>{{ qqBotStatus.qqNumber || '--' }}</strong></div>
-              <div><span>昵称</span><strong>{{ qqBotStatus.nickname || '--' }}</strong></div>
-              <div><span>消息通道</span><strong :class="{ 'qq-bot-ready': qqBotStatus.onebotReady }">{{ qqBotStatus.onebotReady ? '可用' : '启动中' }}</strong></div>
-              <button class="secondary-button danger-action" :disabled="qqBotAction" @click="logoutQqBot"><RefreshCw :size="16" :class="{ spin: qqBotAction }" />退出并重新登录</button>
-            </div>
-            <div v-else class="qq-qr-layout">
-              <div v-if="qqBotStatus.qrcode" class="qq-qr-wrap"><img class="qq-qr-image" :src="qqBotStatus.qrcode" alt="QQ 登录二维码" /></div>
-              <div v-else class="qq-qr-placeholder">登录二维码正在生成，请稍候刷新。</div>
-              <div class="qq-qr-actions"><small>请在手机 QQ 中扫一扫确认登录。二维码失效后可刷新。</small><button class="secondary-button" :disabled="qqBotAction" @click="refreshQqBotQr"><RefreshCw :size="16" :class="{ spin: qqBotAction }" />刷新二维码</button></div>
-            </div>
-          </template>
-          <div v-else class="form-note">QQ 机器人服务尚未部署完成，请联系管理员检查 FinOps 的服务配置。</div>
-        </section>
-        <div class="form-grid">
-          <label class="toggle-field full-field"><input v-model="qqEditor.enabled" type="checkbox" /><span><strong>启用 QQ 告警</strong><small>发送供应商连接、密钥、余额和倍率异常</small></span></label>
-          <label>接收 QQ 号<input v-model="qqEditor.qqNumber" inputmode="numeric" placeholder="例如 123456789" /></label>
-          <div class="form-note qq-managed-note">QQ 机器人通道由 FinOps 自动管理，地址和令牌不会显示或发送到浏览器。</div>
-        </div>
-        <footer><button class="secondary-button" :disabled="qqSaving" @click="testQqSettings"><Send :size="16" />发送测试</button><button class="primary-button" :disabled="qqSaving" @click="saveQqSettings(true)"><Check :size="16" />保存配置</button></footer>
       </section>
     </div>
 

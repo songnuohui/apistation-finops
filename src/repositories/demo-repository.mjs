@@ -234,10 +234,6 @@ export class DemoRepository {
       { id: 2, connectionId: 1, sourceKind: 'passive_monitor', keyId: null, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, durationMs: 1100, pingLatencyMs: 42, observedAt: new Date(Date.now() - 15 * 60_000).toISOString(), metadata: {} },
       { id: 3, connectionId: 1, sourceKind: 'active_probe', targetId: 1, keyId: 1, model: 'gpt-4o-mini', status: 'ok', availabilitySample: true, ttftMs: 920, durationMs: 1800, rateMultiplier: 0.05, observedAt: new Date(Date.now() - 8 * 60_000).toISOString(), metadata: {} },
     ];
-    this.alertNotificationSettings = {
-      enabled:false,qqNumber:'',onebotEndpoint:'',accessTokenConfigured:false,
-      accessTokenCiphertext:'',updatedBy:'',updatedAt:null,
-    };
     this.sub2ApiServiceAuthSettings = {
       enabled:false,authMode:'password',email:'',credentialsConfigured:false,credentialsCiphertext:'',
       lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
@@ -247,7 +243,6 @@ export class DemoRepository {
       credentialsCiphertext:'',tokenConfigured:false,tokenCiphertext:'',
       lastAuthenticatedAt:null,tokenExpiresAt:null,lastError:'',updatedBy:'',updatedAt:null,
     };
-    this.supplierAlertDeliveries = new Map();
     this.accountProfitGuardPolicies = new Map();
     this.supplierProfitGuardDefaults = new Map();
     this.accountCostPeriods = this.accounts.map((account, index) => {
@@ -1914,48 +1909,6 @@ export class DemoRepository {
     if (lastAuthenticatedAt) this.oauthSupplyAuthSettings.lastAuthenticatedAt = lastAuthenticatedAt;
     this.oauthSupplyAuthSettings.lastError = String(lastError || '');
     this.oauthSupplyAuthSettings.updatedAt = new Date().toISOString();
-  }
-
-  async getAlertNotificationSettings({ includeCiphertext = false } = {}) {
-    const result = { ...this.alertNotificationSettings };
-    if (!includeCiphertext) delete result.accessTokenCiphertext;
-    return result;
-  }
-
-  async updateAlertNotificationSettings(input, accessTokenCiphertext, actor = 'admin') {
-    Object.assign(this.alertNotificationSettings, {
-      enabled:input.enabled,
-      qqNumber:input.qqNumber,
-      onebotEndpoint:input.onebotEndpoint,
-      updatedBy:actor,
-      updatedAt:new Date().toISOString(),
-    });
-    if (accessTokenCiphertext !== undefined) {
-      this.alertNotificationSettings.accessTokenCiphertext = accessTokenCiphertext;
-      this.alertNotificationSettings.accessTokenConfigured = Boolean(accessTokenCiphertext);
-    }
-    return this.getAlertNotificationSettings();
-  }
-
-  async listPendingSupplierAlertDeliveries(limit = 20) {
-    const alerts = [];
-    for (const connection of this.supplierConnections) {
-      if (!connection.alertEnabled) continue;
-      const detail = this.supplierConnectionDetails.get(Number(connection.id));
-      for (const alert of detail?.alerts || []) {
-        if (alert.status !== 'open') continue;
-        const payloadHash = JSON.stringify([alert.severity,alert.title,alert.message,alert.details || {}]);
-        if (this.supplierAlertDeliveries.get(alert.id)?.delivered) continue;
-        alerts.push({
-          ...alert,payloadHash,connectionName:connection.name,supplierName:connection.supplierName,
-        });
-      }
-    }
-    return alerts.slice(0,limit);
-  }
-
-  async recordSupplierAlertDelivery(alertId, payloadHash, { delivered, error = '' }) {
-    this.supplierAlertDeliveries.set(Number(alertId), { payloadHash,delivered,error });
   }
 
   async acknowledgeSupplierAlert(alertId, actor = 'admin') {
