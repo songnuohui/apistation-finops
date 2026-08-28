@@ -105,6 +105,29 @@ function mergeUsageRow(target, key, day, row, extra = {}) {
   return current;
 }
 
+function dailyUnionQuery({ schema, windows, accountIds = null, select, groupBy, join = '' }) {
+  const params = [];
+  const branches = windows.map((window) => {
+    const startParameter = `$${params.push(window.start)}`;
+    const endParameter = `$${params.push(window.end)}`;
+    const accountPredicate = accountIds
+      ? `AND ul.account_id=ANY($${params.push(accountIds)}::bigint[])`
+      : '';
+    return `
+      SELECT '${window.day}'::text AS day,${select}
+      FROM ${schema}.usage_logs ul
+      ${join}
+      WHERE ul.created_at >= ${startParameter} AND ul.created_at < ${endParameter}
+        ${accountPredicate}
+      GROUP BY ${groupBy}
+    `;
+  });
+  return {
+    text: branches.join('\nUNION ALL\n'),
+    params,
+  };
+}
+
 export class SourceUsageRepository {
   constructor(pool, config) {
     this.pool = pool;
@@ -152,13 +175,13 @@ export class SourceUsageRepository {
       const rows = new Map();
       try {
         await client.query('BEGIN TRANSACTION READ ONLY');
-        for (const window of dailyWindows(start, end, this.timezone)) {
-          const args = [window.start, window.end];
-          const accountPredicate = ids
-            ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
-            : '';
-          const result = await client.query(`
-            SELECT
+        const windows = dailyWindows(start, end, this.timezone);
+        if (windows.length) {
+          const query = dailyUnionQuery({
+            schema: this.schema,
+            windows,
+            accountIds: ids,
+            select: `
               ul.account_id,
               COUNT(*)::bigint AS requests,
               COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
@@ -169,13 +192,13 @@ export class SourceUsageRepository {
               ),0) AS total_tokens,
               COALESCE(SUM(ul.total_cost),0) AS cost,
               COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-            FROM ${this.schema}.usage_logs ul
-            WHERE ul.created_at >= $1 AND ul.created_at < $2
-              ${accountPredicate}
-            GROUP BY ul.account_id
-          `, args);
+            `,
+            groupBy: 'ul.account_id',
+          });
+          const result = await client.query(query.text, query.params);
           for (const row of result.rows) {
-            mergeUsageRow(rows, JSON.stringify([number(row.account_id), window.day]), window.day, row);
+            const day = String(row.day || '');
+            mergeUsageRow(rows, JSON.stringify([number(row.account_id), day]), day, row);
           }
         }
         await client.query('COMMIT');
@@ -217,14 +240,14 @@ export class SourceUsageRepository {
       const rows = new Map();
       try {
         await client.query('BEGIN TRANSACTION READ ONLY');
-        for (const window of dailyWindows(start, end, this.timezone)) {
-          const args = [window.start, window.end];
-          const accountPredicate = ids
-            ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
-            : '';
-          const result = dimension === 'model'
-            ? await client.query(`
-              SELECT
+        const windows = dailyWindows(start, end, this.timezone);
+        if (windows.length) {
+          const query = dimension === 'model'
+            ? dailyUnionQuery({
+              schema: this.schema,
+              windows,
+              accountIds: ids,
+              select: `
                 ul.account_id,ul.model,ul.requested_model,
                 COUNT(*)::bigint AS requests,
                 COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
@@ -235,13 +258,14 @@ export class SourceUsageRepository {
                 ),0) AS total_tokens,
                 COALESCE(SUM(ul.total_cost),0) AS cost,
                 COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-              FROM ${this.schema}.usage_logs ul
-              WHERE ul.created_at >= $1 AND ul.created_at < $2
-                ${accountPredicate}
-              GROUP BY ul.account_id,ul.model,ul.requested_model
-            `, args)
-            : await client.query(`
-              SELECT
+              `,
+              groupBy: 'ul.account_id,ul.model,ul.requested_model',
+            })
+            : dailyUnionQuery({
+              schema: this.schema,
+              windows,
+              accountIds: ids,
+              select: `
                 ul.account_id,ul.user_id,COALESCE(MAX(u.email),'') AS dimension_name,
                 COUNT(*)::bigint AS requests,
                 COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
@@ -252,19 +276,19 @@ export class SourceUsageRepository {
                 ),0) AS total_tokens,
                 COALESCE(SUM(ul.total_cost),0) AS cost,
                 COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-              FROM ${this.schema}.usage_logs ul
-              LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id
-              WHERE ul.created_at >= $1 AND ul.created_at < $2
-                ${accountPredicate}
-              GROUP BY ul.account_id,ul.user_id
-            `, args);
+              `,
+              groupBy: 'ul.account_id,ul.user_id',
+              join: `LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id`,
+            });
+          const result = await client.query(query.text, query.params);
           for (const row of result.rows) {
+            const day = String(row.day || '');
             if (dimension === 'model') {
               const name = modelKey(row.requested_model, row.model);
               mergeUsageRow(
                 rows,
-                JSON.stringify([number(row.account_id), window.day, name]),
-                window.day,
+                JSON.stringify([number(row.account_id), day, name]),
+                day,
                 row,
                 { dimensionKey: name, dimensionName: name },
               );
@@ -272,8 +296,8 @@ export class SourceUsageRepository {
               const dimensionKey = number(row.user_id);
               mergeUsageRow(
                 rows,
-                JSON.stringify([number(row.account_id), window.day, dimensionKey]),
-                window.day,
+                JSON.stringify([number(row.account_id), day, dimensionKey]),
+                day,
                 row,
                 { dimensionKey, dimensionName: row.dimension_name || '' },
               );
@@ -315,9 +339,12 @@ export class SourceUsageRepository {
       try {
         client = await this.pool.connect();
         await client.query('BEGIN TRANSACTION READ ONLY');
-        for (const window of dailyWindows(start, end, this.timezone)) {
-          const result = await client.query(`
-            SELECT
+        const windows = dailyWindows(start, end, this.timezone);
+        if (windows.length) {
+          const query = dailyUnionQuery({
+            schema: this.schema,
+            windows,
+            select: `
               ul.account_id,ul.model,ul.requested_model,
               COUNT(*)::bigint AS requests,
               COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
@@ -328,23 +355,24 @@ export class SourceUsageRepository {
               ),0) AS total_tokens,
               COALESCE(SUM(ul.total_cost),0) AS cost,
               COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-            FROM ${this.schema}.usage_logs ul
-            WHERE ul.created_at >= $1 AND ul.created_at < $2
-            GROUP BY ul.account_id,ul.model,ul.requested_model
-          `, [window.start, window.end]);
+            `,
+            groupBy: 'ul.account_id,ul.model,ul.requested_model',
+          });
+          const result = await client.query(query.text, query.params);
           for (const row of result.rows) {
+            const day = String(row.day || '');
             const accountId = number(row.account_id);
             mergeUsageRow(
               accounts,
-              JSON.stringify([accountId, window.day]),
-              window.day,
+              JSON.stringify([accountId, day]),
+              day,
               row,
             );
             const name = modelKey(row.requested_model, row.model);
             mergeUsageRow(
               models,
-              JSON.stringify([accountId, window.day, name]),
-              window.day,
+              JSON.stringify([accountId, day, name]),
+              day,
               row,
               { dimensionKey: name, dimensionName: name },
             );

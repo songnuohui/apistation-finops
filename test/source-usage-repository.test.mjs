@@ -4,6 +4,7 @@ import { SourceUsageRepository } from '../src/repositories/source-usage-reposito
 
 function usageRow({
   accountId,
+  day,
   model,
   requestedModel = null,
   requests,
@@ -16,6 +17,7 @@ function usageRow({
 }) {
   return {
     account_id: String(accountId),
+    day,
     model,
     requested_model: requestedModel,
     requests: String(requests),
@@ -36,32 +38,26 @@ test('long-range account and model stats aggregate one local day at a time', asy
       if (text === 'BEGIN TRANSACTION READ ONLY' || text === 'COMMIT' || text === 'ROLLBACK') {
         return { rows: [], rowCount: 0 };
       }
-      const day = new Date(params[1]).toISOString().slice(0, 10);
-      if (day === '2026-08-19') {
-        return {
-          rows: [
-            usageRow({
-              accountId: 1,
-              model: 'claude',
-              requestedModel: 'gpt-test',
-              requests: 2,
-              inputTokens: 3,
-              outputTokens: 4,
-              cacheTokens: 1,
-              totalTokens: 8,
-              cost: 1,
-              actualCost: 2,
-            }),
-          ],
-          rowCount: 1,
-        };
-      }
       return {
         rows: [
           usageRow({
             accountId: 1,
             model: 'claude',
             requestedModel: 'gpt-test',
+            day: '2026-08-19',
+            requests: 2,
+            inputTokens: 3,
+            outputTokens: 4,
+            cacheTokens: 1,
+            totalTokens: 8,
+            cost: 1,
+            actualCost: 2,
+          }),
+          usageRow({
+            accountId: 1,
+            model: 'claude',
+            requestedModel: 'gpt-test',
+            day: '2026-08-20',
             requests: 1,
             inputTokens: 5,
             outputTokens: 6,
@@ -74,6 +70,7 @@ test('long-range account and model stats aggregate one local day at a time', asy
             accountId: 1,
             model: 'gpt-test',
             requestedModel: '',
+            day: '2026-08-20',
             requests: 4,
             inputTokens: 7,
             outputTokens: 8,
@@ -106,7 +103,9 @@ test('long-range account and model stats aggregate one local day at a time', asy
     query.text.includes('FROM "public".usage_logs')
     && query.text.includes('GROUP BY ul.account_id,ul.model,ul.requested_model')
   ));
-  assert.equal(dataQueries.length, 2);
+  assert.equal(dataQueries.length, 1);
+  assert.match(dataQueries[0].text, /UNION ALL/);
+  assert.equal(dataQueries[0].params.length, 4);
   assert.ok(dataQueries.every((query) => query.text.includes('GROUP BY ul.account_id,ul.model,ul.requested_model')));
   assert.ok(dataQueries.every((query) => !query.text.includes('GROUPING SETS')));
   assert.equal(result.accounts.length, 2);
