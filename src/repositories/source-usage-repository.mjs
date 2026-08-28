@@ -2,6 +2,109 @@ function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
 }
 
+function zonedParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  return Object.fromEntries(
+    parts
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, Number(part.value)]),
+  );
+}
+
+function zonedDateTimeToUtc(parts, timeZone) {
+  const target = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0,
+  );
+  let guess = target;
+  for (let index = 0; index < 3; index += 1) {
+    const shown = zonedParts(new Date(guess), timeZone);
+    const shownUtc = Date.UTC(
+      shown.year,
+      shown.month - 1,
+      shown.day,
+      shown.hour,
+      shown.minute,
+      shown.second,
+    );
+    guess += target - shownUtc;
+  }
+  return new Date(guess);
+}
+
+function nextCalendarDate(parts) {
+  const next = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
+  return {
+    year: next.getUTCFullYear(),
+    month: next.getUTCMonth() + 1,
+    day: next.getUTCDate(),
+  };
+}
+
+function dateKey(parts) {
+  return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+function dailyWindows(start, end, timeZone) {
+  const first = new Date(start);
+  const last = new Date(end);
+  if (!Number.isFinite(first.getTime()) || !Number.isFinite(last.getTime()) || first >= last) return [];
+
+  const windows = [];
+  let cursor = first;
+  while (cursor < last) {
+    const parts = zonedParts(cursor, timeZone);
+    const nextBoundary = zonedDateTimeToUtc(nextCalendarDate(parts), timeZone);
+    const windowEnd = nextBoundary < last ? nextBoundary : last;
+    windows.push({ start: cursor, end: windowEnd, day: dateKey(parts) });
+    cursor = windowEnd;
+  }
+  return windows;
+}
+
+function modelKey(requestedModel, model) {
+  const value = requestedModel === null || requestedModel === undefined ? model : requestedModel;
+  return String(value || '').trim() || 'unlabeled';
+}
+
+function mergeUsageRow(target, key, day, row, extra = {}) {
+  const accountId = number(row.account_id);
+  const current = target.get(key) || {
+    accountId,
+    day,
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheTokens: 0,
+    totalTokens: 0,
+    cost: 0,
+    actualCost: 0,
+    ...extra,
+  };
+  current.requests += number(row.requests);
+  current.inputTokens += number(row.input_tokens);
+  current.outputTokens += number(row.output_tokens);
+  current.cacheTokens += number(row.cache_tokens);
+  current.totalTokens += number(row.total_tokens);
+  current.cost += number(row.cost);
+  current.actualCost += number(row.actual_cost);
+  target.set(key, current);
+  return current;
+}
+
 export class SourceUsageRepository {
   constructor(pool, config) {
     this.pool = pool;
@@ -45,36 +148,36 @@ export class SourceUsageRepository {
     if (this.inflight.has(key)) return this.inflight.get(key);
 
     const load = (async () => {
-      const args = [start, end];
-      const accountPredicate = ids
-        ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
-        : '';
-      const timezoneParameter = args.push(this.timezone);
       const client = await this.pool.connect();
-      let result;
+      const rows = new Map();
       try {
         await client.query('BEGIN TRANSACTION READ ONLY');
-        result = await client.query(`
-          SELECT
-            COALESCE(ul.account_id,0)::bigint AS account_id,
-            (ul.created_at AT TIME ZONE $${timezoneParameter})::date::text AS day,
-            COUNT(*)::bigint AS requests,
-            COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
-            COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
-            COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
-            COALESCE(SUM(
-              ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
-            ),0) AS total_tokens,
-            COALESCE(SUM(ul.total_cost),0) AS cost,
-            COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-          FROM ${this.schema}.usage_logs ul
-          WHERE ul.created_at >= $1 AND ul.created_at < $2
-            ${accountPredicate}
-          GROUP BY
-            COALESCE(ul.account_id,0),
-            (ul.created_at AT TIME ZONE $${timezoneParameter})::date
-          ORDER BY account_id,day
-        `, args);
+        for (const window of dailyWindows(start, end, this.timezone)) {
+          const args = [window.start, window.end];
+          const accountPredicate = ids
+            ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
+            : '';
+          const result = await client.query(`
+            SELECT
+              ul.account_id,
+              COUNT(*)::bigint AS requests,
+              COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+              COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+              COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+              COALESCE(SUM(
+                ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+              ),0) AS total_tokens,
+              COALESCE(SUM(ul.total_cost),0) AS cost,
+              COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+            FROM ${this.schema}.usage_logs ul
+            WHERE ul.created_at >= $1 AND ul.created_at < $2
+              ${accountPredicate}
+            GROUP BY ul.account_id
+          `, args);
+          for (const row of result.rows) {
+            mergeUsageRow(rows, JSON.stringify([number(row.account_id), window.day]), window.day, row);
+          }
+        }
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {});
@@ -82,17 +185,9 @@ export class SourceUsageRepository {
       } finally {
         client.release();
       }
-      const value = result.rows.map((row) => ({
-        accountId: number(row.account_id),
-        day: row.day || '',
-        requests: number(row.requests),
-        inputTokens: number(row.input_tokens),
-        outputTokens: number(row.output_tokens),
-        cacheTokens: number(row.cache_tokens),
-        totalTokens: number(row.total_tokens),
-        cost: number(row.cost),
-        actualCost: number(row.actual_cost),
-      }));
+      const value = [...rows.values()].sort((left, right) => (
+        left.accountId - right.accountId || left.day.localeCompare(right.day)
+      ));
       this.cache.set(key, { value, expiresAt: Date.now() + this.ttlMs });
       this.pruneCache();
       return value;
@@ -118,49 +213,73 @@ export class SourceUsageRepository {
     if (this.inflight.has(key)) return this.inflight.get(key);
 
     const load = (async () => {
-      const args = [start, end];
-      const accountPredicate = ids
-        ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
-        : '';
-      const timezoneParameter = args.push(this.timezone);
-      const dimensionSelect = dimension === 'model'
-        ? `COALESCE(NULLIF(BTRIM(COALESCE(ul.requested_model,ul.model)),''),'unlabeled')`
-        : 'COALESCE(ul.user_id,0)::bigint';
-      const dimensionLabel = dimension === 'model'
-        ? `${dimensionSelect} AS dimension_name`
-        : `COALESCE(MAX(u.email),'') AS dimension_name`;
-      const join = dimension === 'user'
-        ? `LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id`
-        : '';
       const client = await this.pool.connect();
-      let result;
+      const rows = new Map();
       try {
         await client.query('BEGIN TRANSACTION READ ONLY');
-        result = await client.query(`
-          SELECT
-            COALESCE(ul.account_id,0)::bigint AS account_id,
-            (ul.created_at AT TIME ZONE $${timezoneParameter})::date::text AS day,
-            ${dimensionSelect} AS dimension_key,
-            ${dimensionLabel},
-            COUNT(*)::bigint AS requests,
-            COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
-            COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
-            COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
-            COALESCE(SUM(
-              ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
-            ),0) AS total_tokens,
-            COALESCE(SUM(ul.total_cost),0) AS cost,
-            COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-          FROM ${this.schema}.usage_logs ul
-          ${join}
-          WHERE ul.created_at >= $1 AND ul.created_at < $2
-            ${accountPredicate}
-          GROUP BY
-            COALESCE(ul.account_id,0),
-            (ul.created_at AT TIME ZONE $${timezoneParameter})::date,
-            ${dimensionSelect}
-          ORDER BY account_id,day,dimension_key
-        `, args);
+        for (const window of dailyWindows(start, end, this.timezone)) {
+          const args = [window.start, window.end];
+          const accountPredicate = ids
+            ? `AND ul.account_id=ANY($${args.push(ids)}::bigint[])`
+            : '';
+          const result = dimension === 'model'
+            ? await client.query(`
+              SELECT
+                ul.account_id,ul.model,ul.requested_model,
+                COUNT(*)::bigint AS requests,
+                COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+                COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+                COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+                COALESCE(SUM(
+                  ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+                ),0) AS total_tokens,
+                COALESCE(SUM(ul.total_cost),0) AS cost,
+                COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+              FROM ${this.schema}.usage_logs ul
+              WHERE ul.created_at >= $1 AND ul.created_at < $2
+                ${accountPredicate}
+              GROUP BY ul.account_id,ul.model,ul.requested_model
+            `, args)
+            : await client.query(`
+              SELECT
+                ul.account_id,ul.user_id,COALESCE(MAX(u.email),'') AS dimension_name,
+                COUNT(*)::bigint AS requests,
+                COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+                COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+                COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+                COALESCE(SUM(
+                  ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+                ),0) AS total_tokens,
+                COALESCE(SUM(ul.total_cost),0) AS cost,
+                COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+              FROM ${this.schema}.usage_logs ul
+              LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id
+              WHERE ul.created_at >= $1 AND ul.created_at < $2
+                ${accountPredicate}
+              GROUP BY ul.account_id,ul.user_id
+            `, args);
+          for (const row of result.rows) {
+            if (dimension === 'model') {
+              const name = modelKey(row.requested_model, row.model);
+              mergeUsageRow(
+                rows,
+                JSON.stringify([number(row.account_id), window.day, name]),
+                window.day,
+                row,
+                { dimensionKey: name, dimensionName: name },
+              );
+            } else {
+              const dimensionKey = number(row.user_id);
+              mergeUsageRow(
+                rows,
+                JSON.stringify([number(row.account_id), window.day, dimensionKey]),
+                window.day,
+                row,
+                { dimensionKey, dimensionName: row.dimension_name || '' },
+              );
+            }
+          }
+        }
         await client.query('COMMIT');
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {});
@@ -168,19 +287,11 @@ export class SourceUsageRepository {
       } finally {
         client.release();
       }
-      const value = result.rows.map((row) => ({
-        accountId: number(row.account_id),
-        day: row.day || '',
-        dimensionKey: dimension === 'user' ? number(row.dimension_key) : String(row.dimension_key || 'unlabeled'),
-        dimensionName: row.dimension_name || '',
-        requests: number(row.requests),
-        inputTokens: number(row.input_tokens),
-        outputTokens: number(row.output_tokens),
-        cacheTokens: number(row.cache_tokens),
-        totalTokens: number(row.total_tokens),
-        cost: number(row.cost),
-        actualCost: number(row.actual_cost),
-      }));
+      const value = [...rows.values()].sort((left, right) => (
+        left.accountId - right.accountId
+        || left.day.localeCompare(right.day)
+        || String(left.dimensionKey).localeCompare(String(right.dimensionKey), 'zh-CN')
+      ));
       this.cache.set(key, { value, expiresAt: Date.now() + this.ttlMs });
       this.pruneCache();
       return value;
@@ -199,46 +310,46 @@ export class SourceUsageRepository {
 
     const load = (async () => {
       let client;
-      let result;
+      const accounts = new Map();
+      const models = new Map();
       try {
         client = await this.pool.connect();
         await client.query('BEGIN TRANSACTION READ ONLY');
-        result = await client.query(`
-          WITH scoped_usage AS (
+        for (const window of dailyWindows(start, end, this.timezone)) {
+          const result = await client.query(`
             SELECT
-              COALESCE(ul.account_id,0)::bigint AS account_id,
-              (ul.created_at AT TIME ZONE $3)::date::text AS day,
-              COALESCE(NULLIF(BTRIM(COALESCE(ul.requested_model,ul.model)),''),'unlabeled') AS model_key,
-              ul.input_tokens,
-              ul.output_tokens,
-              ul.cache_creation_tokens,
-              ul.cache_read_tokens,
-              ul.total_cost,
-              ul.actual_cost
+              ul.account_id,ul.model,ul.requested_model,
+              COUNT(*)::bigint AS requests,
+              COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+              COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+              COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+              COALESCE(SUM(
+                ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+              ),0) AS total_tokens,
+              COALESCE(SUM(ul.total_cost),0) AS cost,
+              COALESCE(SUM(ul.actual_cost),0) AS actual_cost
             FROM ${this.schema}.usage_logs ul
             WHERE ul.created_at >= $1 AND ul.created_at < $2
-          )
-          SELECT
-            account_id,
-            day,
-            CASE WHEN GROUPING(model_key)=1 THEN NULL ELSE model_key END AS model_key,
-            GROUPING(model_key)::integer AS model_grouped,
-            COUNT(*)::bigint AS requests,
-            COALESCE(SUM(input_tokens),0) AS input_tokens,
-            COALESCE(SUM(output_tokens),0) AS output_tokens,
-            COALESCE(SUM(cache_creation_tokens+cache_read_tokens),0) AS cache_tokens,
-            COALESCE(SUM(
-              input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens
-            ),0) AS total_tokens,
-            COALESCE(SUM(total_cost),0) AS cost,
-            COALESCE(SUM(actual_cost),0) AS actual_cost
-          FROM scoped_usage
-          GROUP BY GROUPING SETS (
-            (account_id,day),
-            (account_id,day,model_key)
-          )
-          ORDER BY account_id,day,model_grouped,model_key
-        `, [start, end, this.timezone]);
+            GROUP BY ul.account_id,ul.model,ul.requested_model
+          `, [window.start, window.end]);
+          for (const row of result.rows) {
+            const accountId = number(row.account_id);
+            mergeUsageRow(
+              accounts,
+              JSON.stringify([accountId, window.day]),
+              window.day,
+              row,
+            );
+            const name = modelKey(row.requested_model, row.model);
+            mergeUsageRow(
+              models,
+              JSON.stringify([accountId, window.day, name]),
+              window.day,
+              row,
+              { dimensionKey: name, dimensionName: name },
+            );
+          }
+        }
         await client.query('COMMIT');
       } catch (error) {
         if (client) await client.query('ROLLBACK').catch(() => {});
@@ -249,29 +360,16 @@ export class SourceUsageRepository {
       } finally {
         client?.release();
       }
-      const value = { accounts: [], models: [] };
-      for (const row of result.rows) {
-        const item = {
-          accountId: number(row.account_id),
-          day: row.day || '',
-          requests: number(row.requests),
-          inputTokens: number(row.input_tokens),
-          outputTokens: number(row.output_tokens),
-          cacheTokens: number(row.cache_tokens),
-          totalTokens: number(row.total_tokens),
-          cost: number(row.cost),
-          actualCost: number(row.actual_cost),
-        };
-        if (number(row.model_grouped) === 1) {
-          value.accounts.push(item);
-        } else {
-          value.models.push({
-            ...item,
-            dimensionKey: String(row.model_key || 'unlabeled'),
-            dimensionName: String(row.model_key || 'unlabeled'),
-          });
-        }
-      }
+      const value = {
+        accounts: [...accounts.values()].sort((left, right) => (
+          left.accountId - right.accountId || left.day.localeCompare(right.day)
+        )),
+        models: [...models.values()].sort((left, right) => (
+          left.accountId - right.accountId
+          || left.day.localeCompare(right.day)
+          || left.dimensionName.localeCompare(right.dimensionName, 'zh-CN')
+        )),
+      };
       const loadedAt = Date.now();
       this.cache.set(key, {
         value,
