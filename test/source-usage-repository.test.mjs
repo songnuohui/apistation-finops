@@ -90,6 +90,7 @@ test('long-range account and model stats aggregate one local day at a time', asy
     {
       sourceSchema: 'public',
       timezone: 'Asia/Shanghai',
+      sub2apiUsageDatabasePoolMax: 1,
       sub2apiUsageCacheTtlSeconds: 30,
     },
   );
@@ -159,6 +160,7 @@ test('long-range user stats aggregate remotely before reading user labels', asyn
     {
       sourceSchema: 'public',
       timezone: 'Asia/Shanghai',
+      sub2apiUsageDatabasePoolMax: 1,
       sub2apiUsageCacheTtlSeconds: 30,
     },
   );

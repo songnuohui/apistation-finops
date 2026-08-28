@@ -105,7 +105,7 @@ function mergeUsageRow(target, key, day, row, extra = {}) {
   return current;
 }
 
-function dailyUnionQuery({ schema, windows, accountIds = null, select, groupBy, join = '' }) {
+function dailyUnionQuery({ schema, windows, accountIds = null, select, groupBy }) {
   const params = [];
   const branches = windows.map((window) => {
     const startParameter = `$${params.push(window.start)}`;
@@ -116,7 +116,6 @@ function dailyUnionQuery({ schema, windows, accountIds = null, select, groupBy, 
     return `
       SELECT '${window.day}'::text AS day,${select}
       FROM ${schema}.usage_logs ul
-      ${join}
       WHERE ul.created_at >= ${startParameter} AND ul.created_at < ${endParameter}
         ${accountPredicate}
       GROUP BY ${groupBy}
@@ -133,6 +132,10 @@ export class SourceUsageRepository {
     this.pool = pool;
     this.schema = `"${config.sourceSchema}"`;
     this.timezone = config.timezone || 'Asia/Shanghai';
+    this.queryConcurrency = Math.max(
+      1,
+      Math.min(2, Number(config.sub2apiUsageDatabasePoolMax) || 2),
+    );
     this.ttlMs = (config.sub2apiUsageCacheTtlSeconds || 30) * 1_000;
     this.staleTtlMs = Math.max(
       this.ttlMs,
@@ -158,6 +161,37 @@ export class SourceUsageRepository {
     while (this.cache.size > 40) this.cache.delete(this.cache.keys().next().value);
   }
 
+  async readOnlyQuery(text, params = []) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN TRANSACTION READ ONLY');
+      const result = await client.query(text, params);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async queryDailyUnionRows(windows, buildQuery) {
+    const batches = Array.from(
+      { length: Math.min(this.queryConcurrency, windows.length) },
+      () => [],
+    );
+    windows.forEach((window, index) => {
+      batches[index % batches.length].push(window);
+    });
+    const results = await Promise.all(batches.map(async (batch) => {
+      const query = buildQuery(batch);
+      const result = await this.readOnlyQuery(query.text, query.params);
+      return result.rows;
+    }));
+    return results.flat();
+  }
+
   async getDailyAccountGroupStats({ start, end, accountIds = null }) {
     const ids = accountIds?.length
       ? [...new Set(accountIds.map(Number)
@@ -171,42 +205,31 @@ export class SourceUsageRepository {
     if (this.inflight.has(key)) return this.inflight.get(key);
 
     const load = (async () => {
-      const client = await this.pool.connect();
       const rows = new Map();
-      try {
-        await client.query('BEGIN TRANSACTION READ ONLY');
-        const windows = dailyWindows(start, end, this.timezone);
-        if (windows.length) {
-          const query = dailyUnionQuery({
-            schema: this.schema,
-            windows,
-            accountIds: ids,
-            select: `
-              ul.account_id,
-              COUNT(*)::bigint AS requests,
-              COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
-              COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
-              COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
-              COALESCE(SUM(
-                ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
-              ),0) AS total_tokens,
-              COALESCE(SUM(ul.total_cost),0) AS cost,
-              COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-            `,
-            groupBy: 'ul.account_id',
-          });
-          const result = await client.query(query.text, query.params);
-          for (const row of result.rows) {
-            const day = String(row.day || '');
-            mergeUsageRow(rows, JSON.stringify([number(row.account_id), day]), day, row);
-          }
+      const windows = dailyWindows(start, end, this.timezone);
+      if (windows.length) {
+        const resultRows = await this.queryDailyUnionRows(windows, (batch) => dailyUnionQuery({
+          schema: this.schema,
+          windows: batch,
+          accountIds: ids,
+          select: `
+            ul.account_id,
+            COUNT(*)::bigint AS requests,
+            COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+            COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+            COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+            COALESCE(SUM(
+              ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+            ),0) AS total_tokens,
+            COALESCE(SUM(ul.total_cost),0) AS cost,
+            COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+          `,
+          groupBy: 'ul.account_id',
+        }));
+        for (const row of resultRows) {
+          const day = String(row.day || '');
+          mergeUsageRow(rows, JSON.stringify([number(row.account_id), day]), day, row);
         }
-        await client.query('COMMIT');
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => {});
-        throw error;
-      } finally {
-        client.release();
       }
       const value = [...rows.values()].sort((left, right) => (
         left.accountId - right.accountId || left.day.localeCompare(right.day)
@@ -236,96 +259,86 @@ export class SourceUsageRepository {
     if (this.inflight.has(key)) return this.inflight.get(key);
 
     const load = (async () => {
-      const client = await this.pool.connect();
       const rows = new Map();
-      try {
-        await client.query('BEGIN TRANSACTION READ ONLY');
-        const windows = dailyWindows(start, end, this.timezone);
-        if (windows.length) {
-          const query = dimension === 'model'
-            ? dailyUnionQuery({
-              schema: this.schema,
-              windows,
-              accountIds: ids,
-              select: `
-                ul.account_id,ul.model,ul.requested_model,
-                COUNT(*)::bigint AS requests,
-                COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
-                COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
-                COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
-                COALESCE(SUM(
-                  ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
-                ),0) AS total_tokens,
-                COALESCE(SUM(ul.total_cost),0) AS cost,
-                COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-              `,
-              groupBy: 'ul.account_id,ul.model,ul.requested_model',
-            })
-            : dailyUnionQuery({
-              schema: this.schema,
-              windows,
-              accountIds: ids,
-              select: `
-                ul.account_id,ul.user_id,
-                COUNT(*)::bigint AS requests,
-                COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
-                COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
-                COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
-                COALESCE(SUM(
-                  ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
-                ),0) AS total_tokens,
-                COALESCE(SUM(ul.total_cost),0) AS cost,
-                COALESCE(SUM(ul.actual_cost),0) AS actual_cost
-              `,
-              groupBy: 'ul.account_id,ul.user_id',
-            });
-          const result = await client.query(query.text, query.params);
-          let userNames = new Map();
-          if (dimension === 'user') {
-            const userIds = [...new Set(result.rows
-              .map((row) => number(row.user_id))
-              .filter((value) => Number.isSafeInteger(value) && value > 0))];
-            if (userIds.length) {
-              const userResult = await client.query(`
-                SELECT u.id,COALESCE(u.email,'') AS email
-                FROM ${this.schema}.users u
-                WHERE u.id=ANY($1::bigint[])
-              `, [userIds]);
-              userNames = new Map(userResult.rows.map((row) => [
-                number(row.id),
-                row.email || '',
-              ]));
-            }
-          }
-          for (const row of result.rows) {
-            const day = String(row.day || '');
-            if (dimension === 'model') {
-              const name = modelKey(row.requested_model, row.model);
-              mergeUsageRow(
-                rows,
-                JSON.stringify([number(row.account_id), day, name]),
-                day,
-                row,
-                { dimensionKey: name, dimensionName: name },
-              );
-            } else {
-              const dimensionKey = number(row.user_id);
-              mergeUsageRow(
-                rows,
-                JSON.stringify([number(row.account_id), day, dimensionKey]),
-                day,
-                row,
-                { dimensionKey, dimensionName: userNames.get(dimensionKey) || '' },
-              );
-            }
+      const windows = dailyWindows(start, end, this.timezone);
+      if (windows.length) {
+        const query = dimension === 'model'
+          ? (batch) => dailyUnionQuery({
+            schema: this.schema,
+            windows: batch,
+            accountIds: ids,
+            select: `
+              ul.account_id,ul.model,ul.requested_model,
+              COUNT(*)::bigint AS requests,
+              COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+              COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+              COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+              COALESCE(SUM(
+                ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+              ),0) AS total_tokens,
+              COALESCE(SUM(ul.total_cost),0) AS cost,
+              COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+            `,
+            groupBy: 'ul.account_id,ul.model,ul.requested_model',
+          })
+          : (batch) => dailyUnionQuery({
+            schema: this.schema,
+            windows: batch,
+            accountIds: ids,
+            select: `
+              ul.account_id,ul.user_id,
+              COUNT(*)::bigint AS requests,
+              COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
+              COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
+              COALESCE(SUM(ul.cache_creation_tokens+ul.cache_read_tokens),0) AS cache_tokens,
+              COALESCE(SUM(
+                ul.input_tokens+ul.output_tokens+ul.cache_creation_tokens+ul.cache_read_tokens
+              ),0) AS total_tokens,
+              COALESCE(SUM(ul.total_cost),0) AS cost,
+              COALESCE(SUM(ul.actual_cost),0) AS actual_cost
+            `,
+            groupBy: 'ul.account_id,ul.user_id',
+          });
+        const resultRows = await this.queryDailyUnionRows(windows, query);
+        let userNames = new Map();
+        if (dimension === 'user') {
+          const userIds = [...new Set(resultRows
+            .map((row) => number(row.user_id))
+            .filter((value) => Number.isSafeInteger(value) && value > 0))];
+          if (userIds.length) {
+            const userResult = await this.readOnlyQuery(`
+              SELECT u.id,COALESCE(u.email,'') AS email
+              FROM ${this.schema}.users u
+              WHERE u.id=ANY($1::bigint[])
+            `, [userIds]);
+            userNames = new Map(userResult.rows.map((row) => [
+              number(row.id),
+              row.email || '',
+            ]));
           }
         }
-        await client.query('COMMIT');
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => {});
-        throw error;
-      } finally {
-        client.release();
+        for (const row of resultRows) {
+          const day = String(row.day || '');
+          if (dimension === 'model') {
+            const name = modelKey(row.requested_model, row.model);
+            mergeUsageRow(
+              rows,
+              JSON.stringify([number(row.account_id), day, name]),
+              day,
+              row,
+              { dimensionKey: name, dimensionName: name },
+            );
+          } else {
+            const dimensionKey = number(row.user_id);
+            mergeUsageRow(
+              rows,
+              JSON.stringify([number(row.account_id), day, dimensionKey]),
+              day,
+              row,
+              { dimensionKey, dimensionName: userNames.get(dimensionKey) || '' },
+            );
+          }
+        }
       }
       const value = [...rows.values()].sort((left, right) => (
         left.accountId - right.accountId
@@ -349,17 +362,14 @@ export class SourceUsageRepository {
     if (this.inflight.has(key)) return this.inflight.get(key);
 
     const load = (async () => {
-      let client;
       const accounts = new Map();
       const models = new Map();
       try {
-        client = await this.pool.connect();
-        await client.query('BEGIN TRANSACTION READ ONLY');
         const windows = dailyWindows(start, end, this.timezone);
         if (windows.length) {
-          const query = dailyUnionQuery({
+          const resultRows = await this.queryDailyUnionRows(windows, (batch) => dailyUnionQuery({
             schema: this.schema,
-            windows,
+            windows: batch,
             select: `
               ul.account_id,ul.model,ul.requested_model,
               COUNT(*)::bigint AS requests,
@@ -373,9 +383,8 @@ export class SourceUsageRepository {
               COALESCE(SUM(ul.actual_cost),0) AS actual_cost
             `,
             groupBy: 'ul.account_id,ul.model,ul.requested_model',
-          });
-          const result = await client.query(query.text, query.params);
-          for (const row of result.rows) {
+          }));
+          for (const row of resultRows) {
             const day = String(row.day || '');
             const accountId = number(row.account_id);
             mergeUsageRow(
@@ -394,15 +403,11 @@ export class SourceUsageRepository {
             );
           }
         }
-        await client.query('COMMIT');
       } catch (error) {
-        if (client) await client.query('ROLLBACK').catch(() => {});
         if (cached?.staleExpiresAt > Date.now()) {
           return cached.value;
         }
         throw error;
-      } finally {
-        client?.release();
       }
       const value = {
         accounts: [...accounts.values()].sort((left, right) => (
