@@ -266,7 +266,7 @@ export class SourceUsageRepository {
               windows,
               accountIds: ids,
               select: `
-                ul.account_id,ul.user_id,COALESCE(MAX(u.email),'') AS dimension_name,
+                ul.account_id,ul.user_id,
                 COUNT(*)::bigint AS requests,
                 COALESCE(SUM(ul.input_tokens),0) AS input_tokens,
                 COALESCE(SUM(ul.output_tokens),0) AS output_tokens,
@@ -278,9 +278,25 @@ export class SourceUsageRepository {
                 COALESCE(SUM(ul.actual_cost),0) AS actual_cost
               `,
               groupBy: 'ul.account_id,ul.user_id',
-              join: `LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id`,
             });
           const result = await client.query(query.text, query.params);
+          let userNames = new Map();
+          if (dimension === 'user') {
+            const userIds = [...new Set(result.rows
+              .map((row) => number(row.user_id))
+              .filter((value) => Number.isSafeInteger(value) && value > 0))];
+            if (userIds.length) {
+              const userResult = await client.query(`
+                SELECT u.id,COALESCE(u.email,'') AS email
+                FROM ${this.schema}.users u
+                WHERE u.id=ANY($1::bigint[])
+              `, [userIds]);
+              userNames = new Map(userResult.rows.map((row) => [
+                number(row.id),
+                row.email || '',
+              ]));
+            }
+          }
           for (const row of result.rows) {
             const day = String(row.day || '');
             if (dimension === 'model') {
@@ -299,7 +315,7 @@ export class SourceUsageRepository {
                 JSON.stringify([number(row.account_id), day, dimensionKey]),
                 day,
                 row,
-                { dimensionKey, dimensionName: row.dimension_name || '' },
+                { dimensionKey, dimensionName: userNames.get(dimensionKey) || '' },
               );
             }
           }

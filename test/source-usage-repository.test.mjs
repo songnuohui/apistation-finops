@@ -121,3 +121,75 @@ test('long-range account and model stats aggregate one local day at a time', asy
     { day: '2026-08-20', name: 'unlabeled', requests: 4, tokens: 18 },
   ]);
 });
+
+test('long-range user stats aggregate remotely before reading user labels', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN TRANSACTION READ ONLY' || text === 'COMMIT' || text === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('FROM "public".users u')) {
+        return {
+          rows: [{ id: '7', email: 'user@example.com' }],
+          rowCount: 1,
+        };
+      }
+      return {
+        rows: [{
+          day: '2026-08-19',
+          account_id: '1',
+          user_id: '7',
+          requests: '2',
+          input_tokens: '3',
+          output_tokens: '4',
+          cache_tokens: '1',
+          total_tokens: '8',
+          cost: '1',
+          actual_cost: '2',
+        }],
+        rowCount: 1,
+      };
+    },
+    release() {},
+  };
+  const repository = new SourceUsageRepository(
+    { connect: async () => client },
+    {
+      sourceSchema: 'public',
+      timezone: 'Asia/Shanghai',
+      sub2apiUsageCacheTtlSeconds: 30,
+    },
+  );
+
+  const result = await repository.getDailyDimensionStats({
+    start: new Date('2026-08-19T00:00:00+08:00'),
+    end: new Date('2026-08-21T00:00:00+08:00'),
+    dimension: 'user',
+  });
+
+  const aggregateQuery = queries.find((query) => (
+    query.text.includes('FROM "public".usage_logs')
+    && query.text.includes('GROUP BY ul.account_id,ul.user_id')
+  ));
+  const labelQuery = queries.find((query) => query.text.includes('FROM "public".users u'));
+  assert.ok(aggregateQuery);
+  assert.match(aggregateQuery.text, /UNION ALL/);
+  assert.doesNotMatch(aggregateQuery.text, /JOIN "public"\.users/);
+  assert.ok(labelQuery);
+  assert.deepEqual(labelQuery.params, [[7]]);
+  assert.deepEqual(result, [{
+    accountId: 1,
+    day: '2026-08-19',
+    dimensionKey: 7,
+    dimensionName: 'user@example.com',
+    requests: 2,
+    inputTokens: 3,
+    outputTokens: 4,
+    cacheTokens: 1,
+    totalTokens: 8,
+    cost: 1,
+    actualCost: 2,
+  }]);
+});
