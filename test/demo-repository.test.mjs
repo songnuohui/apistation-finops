@@ -412,6 +412,23 @@ test('demo account cost history is paginated and editable by period', async () =
   assert.equal(updated.supplier, 'new supplier');
 });
 
+test('demo accounting rejects exact duplicate periods and can void an erroneous period', async () => {
+  const repository = new DemoRepository(config);
+  const first = (await repository.listAccountCostPeriods({ accountId: 2745 })).items[0];
+  await assert.rejects(repository.createAccountCostPeriod({
+    accountId: 2745, originalAmount: first.originalAmount, baseAmount: first.baseAmount,
+    feeAmount: first.feeAmount, taxAmount: first.taxAmount, originalCurrency: 'CNY', fxRate: '1',
+    effectiveFrom: first.effectiveFrom, effectiveTo: first.effectiveTo, supplier: first.supplier,
+    purchaseBatch: first.purchaseBatch,
+  }), /重复登记/);
+  const result = await repository.deleteAccountCostPeriod(first.id, { correctionReason: '测试误登记' });
+  assert.equal(result.status, 'void');
+  const history = (await repository.listAccountCostPeriods({ accountId: 2745 })).items;
+  assert.equal(history[0].status, 'void');
+  const account = (await repository.listAccounts({ search: '2745' })).items.find((item) => Number(item.id) === 2745);
+  assert.equal(account.hasCostRecord, false);
+});
+
 test('public group monitor contains only enabled configured groups', async () => {
   const repository = new DemoRepository(config);
   const candidates = await repository.listMonitorGroupCandidates();

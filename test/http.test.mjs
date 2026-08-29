@@ -8,7 +8,7 @@ import {
 import { resolveStaticPath } from '../src/http/static-path.mjs';
 import { routeId } from '../src/http/route.mjs';
 import {
-  normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
+  normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodDelete, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
   normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
   mergeSupplierCredentials,
@@ -162,6 +162,8 @@ test('write payloads are normalized and invalid financial data is rejected', () 
   assert.equal(normalizeAccountCostPeriodUpdate({
     ...period, correctionReason: '采购单录入金额有误',
   }).correctionReason, '采购单录入金额有误');
+  assert.equal(normalizeAccountCostPeriodDelete({}).correctionReason, '误登记或重复成本记录');
+  assert.equal(normalizeAccountCostPeriodDelete({ reason: '重复登记' }).correctionReason, '重复登记');
   assert.deepEqual(normalizeBulkAccountCostPeriods({ ...period, accountIds: [2745, '2745', 2742] }).accountIds, [2745, 2742]);
 });
 

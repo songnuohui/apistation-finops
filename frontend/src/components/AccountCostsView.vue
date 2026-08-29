@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
-  Check, ChevronDown, Edit3, History, Link2, Plus,
+  Check, ChevronDown, Edit3, History, Plus, Trash2,
   RefreshCw, RotateCcw, Search, WalletCards, X,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from '../api';
@@ -456,6 +456,42 @@ async function savePeriod() {
   }
 }
 
+async function deletePeriod(item: AnyRecord) {
+  const total = money(item.totalCost ?? (Number(item.baseAmount || item.originalAmount || 0)
+    + Number(item.feeAmount || 0) + Number(item.taxAmount || 0)));
+  const started = item.hasStarted || item.hasFinalizedSnapshot;
+  const message = started
+    ? `这条成本记录已经开始生效或进入结算，作废后会保留审计记录但不再计入当前成本。\n\n金额：${total}\n\n确定作废吗？`
+    : `确定作废这条 ${total} 的成本记录吗？作废后可在历史中追溯。`;
+  if (!window.confirm(message)) return;
+  saving.value = true;
+  try {
+    await send(`/account-cost-periods/${item.id}`, 'DELETE', {
+      correctionReason: started ? '误登记或重复成本记录，管理员确认作废' : '误登记或重复成本记录',
+    });
+    notify('成本记录已作废，不再计入当前成本');
+    if (history.value) {
+      const periods = await get(`/accounts/${history.value.account.id}/cost-periods?page=1&page_size=50`);
+      history.value.periods = periods;
+    }
+    await load();
+  } catch (error: any) {
+    notify(error.message);
+  } finally {
+    saving.value = false;
+  }
+}
+
+function openHistoryRuleEditor(account: AnyRecord) {
+  history.value = null;
+  openEditor(account);
+}
+
+function openHistoryPeriodEditor(account: AnyRecord) {
+  history.value = null;
+  openPeriodEditor(account);
+}
+
 async function openHistory(account: AnyRecord) {
   history.value = { account, tab: 'rules', rules: null, periods: null, loading: true };
   try {
@@ -588,7 +624,7 @@ onUnmounted(() => window.clearTimeout(searchTimer));
           <td class="number"><strong>{{ compact(account.tokens) }}</strong><small>{{ compact(account.requests) }} 次</small></td>
           <td>{{ dateTime(account.acquiredAt || account.createdAt) }}<small>{{ account.product || modeLabel(account.costMode) }}</small></td>
           <td>{{ dateTime(account.expiresAt) }}<small v-if="account.lastHealthAt">检查 {{ dateTime(account.lastHealthAt) }}</small><small v-else>未上报到期时间</small></td>
-          <td><div class="row-actions"><template v-if="!isOAuthSupplyAccount(account)"><button class="icon-button mini-action" title="配置成本规则" @click="openEditor(account)"><Edit3 :size="15" /></button><button class="icon-button mini-action" title="登记采购成本" @click="openPeriodEditor(account)"><Plus :size="15" /></button></template><span v-else class="auto-ledger-label" title="成本由采购订单自动登记"><Link2 :size="14" />自动</span><button class="icon-button mini-action" title="查看成本历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
+          <td><div class="row-actions"><button class="icon-button mini-action" title="查看和管理成本历史" @click="openHistory(account)"><History :size="15" /></button></div></td>
         </tr>
         <tr v-if="!loading && !rows.length"><td colspan="10" class="table-empty">当前时间和筛选条件下没有账号</td></tr>
       </tbody></table></div>
@@ -629,10 +665,11 @@ onUnmounted(() => window.clearTimeout(searchTimer));
     </section></div>
 
     <div v-if="history" class="modal-layer nested-modal" @click.self="history = null"><section class="modal history-modal"><header><div><h2>账号成本历史</h2><p>{{ history.account.name }} · 规则和固定成本期间</p></div><button class="icon-button" @click="history = null"><X :size="19" /></button></header>
+      <div class="history-actions"><div><button v-if="!isOAuthSupplyAccount(history.account)" class="secondary-button small-button" @click="openHistoryRuleEditor(history.account)"><Edit3 :size="14" />配置成本规则</button><button v-if="!isOAuthSupplyAccount(history.account)" class="primary-button small-button" @click="openHistoryPeriodEditor(history.account)"><Plus :size="14" />登记固定成本</button></div></div>
       <div class="detail-tabs"><button :class="{ active: history.tab === 'rules' }" @click="history.tab = 'rules'">计价规则</button><button :class="{ active: history.tab === 'periods' }" @click="history.tab = 'periods'">固定成本期间</button></div>
       <div v-if="history.loading" class="table-empty">正在读取历史</div>
       <div v-else-if="history.tab === 'rules'" class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>类型</th><th>模式</th><th>倍率</th><th>状态</th><th>备注</th></tr></thead><tbody><tr v-for="item in history.rules?.items || []" :key="`${item.type}-${item.id || item.eventId}`"><td>{{ dateTime(item.occurredAt || item.cutoffAt) }}</td><td>{{ item.type || 'rule' }}</td><td>{{ modeLabel(item.costMode) }}</td><td>{{ item.upstreamMultiplier == null ? '--' : `${item.upstreamMultiplier}x` }}</td><td>{{ item.status || '--' }}</td><td>{{ item.notes || '--' }}</td></tr><tr v-if="!history.rules?.items?.length"><td colspan="6" class="table-empty">暂无计价版本</td></tr></tbody></table></div>
-      <div v-else class="table-wrap compact-table"><table><thead><tr><th>时间</th><th class="number">总成本</th><th>生效期间</th><th>供应商</th><th>采购批次</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in history.periods?.items || []" :key="item.id"><td>{{ dateTime(item.createdAt || item.effectiveFrom) }}</td><td class="number">{{ money(item.totalCost ?? (Number(item.baseAmount || item.originalAmount || 0) + Number(item.feeAmount || 0) + Number(item.taxAmount || 0))) }}</td><td>{{ dateTime(item.effectiveFrom) }}<small>至 {{ dateTime(item.effectiveTo) }}</small></td><td>{{ item.supplier || '--' }}</td><td>{{ item.purchaseBatch || '--' }}</td><td>{{ item.status || '--' }}</td><td><button class="small-button" @click="openPeriodEditor(history.account, item)"><Edit3 :size="14" />编辑</button></td></tr><tr v-if="!history.periods?.items?.length"><td colspan="7" class="table-empty">暂无固定成本期间</td></tr></tbody></table></div>
+      <div v-else class="table-wrap compact-table"><table><thead><tr><th>时间</th><th class="number">总成本</th><th>生效期间</th><th>供应商</th><th>采购批次</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in history.periods?.items || []" :key="item.id" :class="{ 'void-row': item.status === 'void' }"><td>{{ dateTime(item.createdAt || item.effectiveFrom) }}</td><td class="number">{{ money(item.totalCost ?? (Number(item.baseAmount || item.originalAmount || 0) + Number(item.feeAmount || 0) + Number(item.taxAmount || 0))) }}</td><td>{{ dateTime(item.effectiveFrom) }}<small>至 {{ dateTime(item.effectiveTo) }}</small></td><td>{{ item.supplier || '--' }}</td><td>{{ item.purchaseBatch || '--' }}</td><td><span class="status-pill" :class="item.status === 'void' ? 'danger' : 'success'">{{ item.status === 'void' ? '已作废' : '生效中' }}</span><small v-if="item.hasFinalizedSnapshot">含已结算快照</small></td><td><div class="row-actions"><button v-if="item.status !== 'void'" class="small-button" @click="openPeriodEditor(history.account, item)"><Edit3 :size="14" />编辑</button><button v-if="item.status !== 'void'" class="small-button danger-action" :disabled="saving" @click="deletePeriod(item)"><Trash2 :size="14" />{{ item.hasStarted || item.hasFinalizedSnapshot ? '作废' : '删除' }}</button><span v-else class="muted-text">仅供追溯</span></div></td></tr><tr v-if="!history.periods?.items?.length"><td colspan="7" class="table-empty">暂无固定成本期间</td></tr></tbody></table></div>
     </section></div>
   </div>
 </template>

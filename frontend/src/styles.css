@@ -753,6 +753,14 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .account-cost-filterbar .filter-actions{justify-content:flex-end}
 }
 .success-text{color:#078454!important}
+.history-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:10px 12px;margin-bottom:2px;background:#f7faff;border:1px solid #e2ebf7;border-radius:7px}
+.history-actions>div{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.history-actions .small-button{white-space:nowrap}
+.void-row td{color:#8c98a8;background:#fbfcfd}
+.void-row td strong{color:#8c98a8!important}
+.danger-action{color:#b63b4d!important}
+.danger-action:hover{border-color:#e3a9b1!important;background:#fff2f3!important}
+@media(max-width:650px){.history-actions{align-items:stretch;flex-direction:column}.history-actions>div{width:100%}.history-actions button{flex:1}}
 .user-finance-metrics .metric-card{min-height:108px}
 .user-finance-metrics .metric-card strong{font-size:20px;line-height:26px}
 .user-finance-detail-modal{width:min(1280px,calc(100vw - 40px))}

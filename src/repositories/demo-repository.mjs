@@ -266,6 +266,7 @@ export class DemoRepository {
         effectiveTo,
         notes: '演示数据',
         status: 'active',
+        finalizedSnapshotCount: 0,
       };
       account.currentCostPeriodId = period.id;
       account.currentCostProfileId = null;
@@ -832,6 +833,8 @@ export class DemoRepository {
           + Number(item.feeAmount || 0) + Number(item.taxAmount || 0),
         costProfile: this.costProfiles.find((profile) => Number(profile.id) === Number(item.costProfileId))?.name || '未绑定模板',
         hasStarted: new Date(item.effectiveFrom).getTime() <= Date.now(),
+        finalizedSnapshotCount: Number(item.finalizedSnapshotCount || 0),
+        hasFinalizedSnapshot: Number(item.finalizedSnapshotCount || 0) > 0,
       }));
     return pageResult(periods, page, pageSize);
   }
@@ -2099,6 +2102,16 @@ export class DemoRepository {
     if ((selectedProfile?.costMode || account?.costMode) && (selectedProfile?.costMode || account?.costMode) !== 'fixed_purchase') {
       throw Object.assign(new Error('multiplier accounts use the account ledger rule instead of a fixed cost period'), { statusCode: 409 });
     }
+    const duplicate = this.accountCostPeriods.find((period) => (
+      Number(period.accountId) === Number(input.accountId)
+      && period.status === 'active'
+      && period.effectiveFrom === input.effectiveFrom
+      && period.effectiveTo === input.effectiveTo
+      && Number(period.baseAmount || period.originalAmount || 0) === Number(input.baseAmount || input.originalAmount || 0)
+      && Number(period.feeAmount || 0) === Number(input.feeAmount || 0)
+      && Number(period.taxAmount || 0) === Number(input.taxAmount || 0)
+    ));
+    if (duplicate) throw Object.assign(new Error('该账号已经存在相同生效期间和金额的成本记录，请勿重复登记'), { statusCode: 409 });
     const id = Math.max(0, ...this.accountCostPeriods.map((period) => period.id)) + 1;
     const period = { id, ...input, status: 'active' };
     this.accountCostPeriods.push(period);
@@ -2218,9 +2231,21 @@ export class DemoRepository {
   async updateAccountCostPeriod(periodId, input) {
     const period = this.accountCostPeriods.find((item) => Number(item.id) === Number(periodId));
     if (!period) throw Object.assign(new Error('account cost period not found'), { statusCode: 404 });
+    if (period.status === 'void') throw Object.assign(new Error('void account cost periods cannot be edited'), { statusCode: 409 });
     if (new Date(period.effectiveFrom).getTime() <= Date.now() && !input.correctionReason) {
       throw Object.assign(new Error('started purchase costs require a correctionReason so historical profit changes are explicit'), { statusCode: 409 });
     }
+    const duplicate = this.accountCostPeriods.find((candidate) => (
+      Number(candidate.id) !== Number(periodId)
+      && Number(candidate.accountId) === Number(period.accountId)
+      && candidate.status === 'active'
+      && candidate.effectiveFrom === input.effectiveFrom
+      && candidate.effectiveTo === input.effectiveTo
+      && Number(candidate.baseAmount || candidate.originalAmount || 0) === Number(input.baseAmount || input.originalAmount || 0)
+      && Number(candidate.feeAmount || 0) === Number(input.feeAmount || 0)
+      && Number(candidate.taxAmount || 0) === Number(input.taxAmount || 0)
+    ));
+    if (duplicate) throw Object.assign(new Error('该账号已经存在相同生效期间和金额的成本记录，请勿重复登记'), { statusCode: 409 });
     const beforeTotal = Number(period.baseAmount || period.originalAmount || 0)
       + Number(period.feeAmount || 0) + Number(period.taxAmount || 0);
     Object.assign(period, input);
@@ -2257,5 +2282,58 @@ export class DemoRepository {
       account.currentCostNotes = input.notes || '';
     }
     return { ...period };
+  }
+
+  async deleteAccountCostPeriod(periodId, input = {}) {
+    const period = this.accountCostPeriods.find((item) => Number(item.id) === Number(periodId));
+    if (!period) throw Object.assign(new Error('account cost period not found'), { statusCode: 404 });
+    if (period.status === 'void') throw Object.assign(new Error('account cost period is already void'), { statusCode: 409 });
+    if (new Date(period.effectiveFrom).getTime() <= Date.now() && !input.correctionReason) {
+      throw Object.assign(new Error('started purchase costs require a correctionReason so historical profit changes are explicit'), { statusCode: 409 });
+    }
+    period.status = 'void';
+    period.voidReason = input.correctionReason || '';
+    const account = this.accounts.find((item) => Number(item.id) === Number(period.accountId));
+    if (account) {
+      const activePeriods = this.accountCostPeriods
+        .filter((item) => Number(item.accountId) === Number(account.id) && item.status === 'active')
+        .sort((left, right) => new Date(right.effectiveFrom) - new Date(left.effectiveFrom) || right.id - left.id);
+      const latest = activePeriods[0];
+      const total = activePeriods.reduce((sum, item) => sum
+        + Number(item.baseAmount || item.originalAmount || 0)
+        + Number(item.feeAmount || 0) + Number(item.taxAmount || 0), 0);
+      account.periodCost = +total.toFixed(2);
+      account.purchaseAllocatedCostCny = account.periodCost;
+      account.effectiveCostCny = +effectiveCostCny(account.costType, 0, account.periodCost).toFixed(2);
+      account.fullyLoadedCost = account.effectiveCostCny;
+      account.fullyLoadedCostCny = account.effectiveCostCny;
+      account.bookedCostCny = account.effectiveCostCny;
+      account.grossProfit = +(Number(account.recognizedRevenueCny || account.revenue || 0) - account.effectiveCostCny).toFixed(2);
+      account.grossProfitCny = account.grossProfit;
+      account.bookedProfitCny = account.grossProfit;
+      account.grossMargin = account.revenue ? +(account.grossProfit / account.revenue).toFixed(4) : null;
+      account.hasCostRecord = activePeriods.length > 0;
+      account.costCoverageStatus = activePeriods.length ? 'complete' : (Number(account.requests || 0) ? 'missing' : 'pending');
+      account.currentCostPeriodId = latest?.id || null;
+      account.currentCostProfileId = latest?.costProfileId || null;
+      account.currentOriginalAmount = latest ? Number(latest.originalAmount || latest.baseAmount || 0) : null;
+      account.currentFeeAmount = latest ? Number(latest.feeAmount || 0) : null;
+      account.currentTaxAmount = latest ? Number(latest.taxAmount || 0) : null;
+      account.currentEffectiveFrom = latest?.effectiveFrom || null;
+      account.currentEffectiveTo = latest?.effectiveTo || null;
+      account.currentCostNotes = latest?.notes || '';
+      if (latest) {
+        account.supplier = latest.supplier || account.supplier;
+        account.purchaseBatch = latest.purchaseBatch || account.purchaseBatch;
+      } else {
+        if (account.supplier === period.supplier) account.supplier = '';
+        if (account.purchaseBatch === period.purchaseBatch) account.purchaseBatch = '';
+      }
+    }
+    return {
+      id: Number(period.id), accountId: Number(period.accountId), status: 'void',
+      historicalCorrection: new Date(period.effectiveFrom).getTime() <= Date.now(),
+      snapshotCount: Number(period.finalizedSnapshotCount || 0), finalizedSnapshotCount: Number(period.finalizedSnapshotCount || 0),
+    };
   }
 }

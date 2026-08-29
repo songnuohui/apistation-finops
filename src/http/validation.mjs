@@ -186,6 +186,16 @@ export function normalizeAccountCostPeriodUpdate(input) {
   return normalizeAccountCostPeriodFields(input, null, { updating: true });
 }
 
+export function normalizeAccountCostPeriodDelete(input = {}) {
+  return {
+    correctionReason: textValue(
+      input.correctionReason || input.reason || '误登记或重复成本记录',
+      'correctionReason',
+      { max: 1000 },
+    ),
+  };
+}
+
 export function normalizeBulkAccountCostPeriods(input) {
   const source = Array.isArray(input.accountIds) ? input.accountIds : [];
   const accountIds = [...new Set(source.map((value) => optionalId(value, 'accountIds')).filter(Boolean))];

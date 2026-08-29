@@ -148,6 +148,13 @@ test('immutable cost snapshot migration is isolated from sub2api and preserves u
   assert.doesNotMatch(sync, /COALESCE\(account_rate_multiplier,1\)/);
 });
 
+test('void cost-period compatibility view excludes voided periods but keeps historical snapshots available', () => {
+  const migration = read('migrations/060_void_cost_period_view.sql');
+  assert.match(migration, /CREATE OR REPLACE VIEW .*account_fixed_cost_periods/s);
+  assert.match(migration, /d\.status='active' AND \(p\.status='active' OR d\.finalized=TRUE\)/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM)\s+public\./i);
+});
+
 test('canonical model migration rebuilds only FinOps usage aggregates', () => {
   const migration = read('migrations/015_canonical_usage_models.sql');
   assert.match(migration, /DELETE FROM \{\{FINOPS_SCHEMA\}\}\.fact_usage_daily/);

@@ -1784,10 +1784,16 @@ export class PostgresRepository {
               COALESCE(p.allocated_cost_cny,p.base_amount+p.fee_amount+p.tax_amount) AS total_cost_cny,
               p.original_currency,p.effective_from,p.effective_to,p.status,p.notes,
               p.effective_from<=NOW() AS has_started,
+             COALESCE(snapshot.finalized_count,0)::int AS finalized_snapshot_count,
              COUNT(*) OVER() AS total_count
       FROM ${this.schema}.account_cost_periods p
       JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
       LEFT JOIN ${this.schema}.cost_profiles cp ON cp.id=p.cost_profile_id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) FILTER (WHERE finalized) AS finalized_count
+        FROM ${this.schema}.account_cost_daily_snapshots
+        WHERE account_cost_period_id=p.id
+      ) snapshot ON TRUE
       WHERE p.source_account_id=$1
       ORDER BY p.effective_from DESC,p.id DESC
       LIMIT $2 OFFSET $3`, [accountId, pageSize, offset]);
@@ -1808,6 +1814,8 @@ export class PostgresRepository {
         effectiveTo: row.effective_to,
         status: row.status,
         hasStarted: Boolean(row.has_started),
+        finalizedSnapshotCount: number(row.finalized_snapshot_count),
+        hasFinalizedSnapshot: number(row.finalized_snapshot_count) > 0,
         notes: row.notes || '',
     })), page, pageSize);
   }
@@ -3018,6 +3026,15 @@ export class PostgresRepository {
     if (selectedCostMode && selectedCostMode !== 'fixed_purchase') {
       throw httpError('multiplier accounts use the account ledger rule instead of a fixed cost period', 409);
     }
+    const duplicate = await client.query(`
+      SELECT id
+      FROM ${this.schema}.account_cost_periods
+      WHERE source_account_id=$1 AND status='active'
+        AND effective_from=$2 AND effective_to=$3
+        AND base_amount=$4 AND fee_amount=$5 AND tax_amount=$6
+      LIMIT 1`, [input.accountId, input.effectiveFrom, input.effectiveTo,
+      input.baseAmount, input.feeAmount || 0, input.taxAmount || 0]);
+    if (duplicate.rowCount) throw httpError('该账号已经存在相同生效期间和金额的成本记录，请勿重复登记', 409);
     const supplierId = input._supplierId ?? await this.ensureSupplierInTransaction(client, input.supplier, actor);
     const purchaseBatchId = input._purchaseBatchId ?? await this.ensurePurchaseBatchInTransaction(client, input, supplierId, actor);
     const totalCost = cnySum(input.baseAmount, input.feeAmount, input.taxAmount);
@@ -3252,6 +3269,7 @@ export class PostgresRepository {
         WHERE p.id=$1 FOR UPDATE OF p,a`, [periodId]);
       if (!existing.rowCount) throw httpError('account cost period not found', 404);
       const before = existing.rows[0];
+      if (before.status === 'void') throw httpError('void account cost periods cannot be edited', 409);
       if (before.has_started && !input.correctionReason) {
         throw httpError('started purchase costs require a correctionReason so historical profit changes are explicit', 409);
       }
@@ -3263,6 +3281,15 @@ export class PostgresRepository {
           throw httpError('only fixed_purchase profiles can have a CNY cost period', 409);
         }
       }
+      const duplicate = await client.query(`
+        SELECT id
+        FROM ${this.schema}.account_cost_periods
+        WHERE source_account_id=$1 AND status='active' AND id<>$2
+          AND effective_from=$3 AND effective_to=$4
+          AND base_amount=$5 AND fee_amount=$6 AND tax_amount=$7
+        LIMIT 1`, [before.source_account_id, periodId, input.effectiveFrom, input.effectiveTo,
+        input.baseAmount, input.feeAmount || 0, input.taxAmount || 0]);
+      if (duplicate.rowCount) throw httpError('该账号已经存在相同生效期间和金额的成本记录，请勿重复登记', 409);
       const supplierId = await this.ensureSupplierInTransaction(client, input.supplier, actor);
       const purchaseBatchId = await this.ensurePurchaseBatchInTransaction(client, input, supplierId, actor);
       const totalCost = cnySum(input.baseAmount, input.feeAmount, input.taxAmount);
@@ -3311,6 +3338,98 @@ export class PostgresRepository {
         }),
       ]);
       return { ...result.rows[0], historicalCorrection: Boolean(before.has_started), snapshotRows };
+    });
+  }
+
+  async deleteAccountCostPeriod(periodId, input = {}, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const existing = await client.query(`SELECT p.*,a.cost_profile_id AS account_cost_profile_id,
+          p.effective_from<=NOW() AS has_started
+        FROM ${this.schema}.account_cost_periods p
+        JOIN ${this.schema}.dim_accounts a ON a.source_account_id=p.source_account_id
+        WHERE p.id=$1 FOR UPDATE OF p,a`, [periodId]);
+      if (!existing.rowCount) throw httpError('account cost period not found', 404);
+      const before = existing.rows[0];
+      if (before.status === 'void') throw httpError('account cost period is already void', 409);
+      if (before.has_started && !input.correctionReason) {
+        throw httpError('started purchase costs require a correctionReason so historical profit changes are explicit', 409);
+      }
+
+      const snapshotResult = await client.query(`
+        SELECT COUNT(*)::int AS total_count,
+               COUNT(*) FILTER (WHERE finalized)::int AS finalized_count
+        FROM ${this.schema}.account_cost_daily_snapshots
+        WHERE account_cost_period_id=$1`, [periodId]);
+      const snapshotCounts = snapshotResult.rows[0] || { total_count: 0, finalized_count: 0 };
+
+      const result = await client.query(`
+        UPDATE ${this.schema}.account_cost_periods
+        SET status='void',updated_at=NOW()
+        WHERE id=$1
+        RETURNING *`, [periodId]);
+      await client.query(`
+        UPDATE ${this.schema}.account_cost_daily_snapshots
+        SET status='void',updated_at=NOW()
+        WHERE account_cost_period_id=$1 AND finalized=FALSE`, [periodId]);
+
+      const purchaseBatchId = before.purchase_batch_id ? Number(before.purchase_batch_id) : null;
+      if (purchaseBatchId) {
+        const remainingBatchPeriod = await client.query(`
+          SELECT effective_from,effective_to,
+                 COALESCE(allocated_cost_cny,base_amount+fee_amount+tax_amount) AS total_cost_cny,
+                 notes
+          FROM ${this.schema}.account_cost_periods
+          WHERE purchase_batch_id=$1 AND source_account_id=$2 AND status='active'
+          ORDER BY effective_from DESC,id DESC LIMIT 1`, [purchaseBatchId, before.source_account_id]);
+        if (remainingBatchPeriod.rowCount) {
+          const remaining = remainingBatchPeriod.rows[0];
+          await client.query(`
+            INSERT INTO ${this.schema}.purchase_batch_allocations(
+              purchase_batch_id,source_account_id,allocated_amount_cny,effective_from,effective_to,notes,created_by)
+            VALUES($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT(purchase_batch_id,source_account_id) DO UPDATE SET
+              allocated_amount_cny=EXCLUDED.allocated_amount_cny,effective_from=EXCLUDED.effective_from,
+              effective_to=EXCLUDED.effective_to,notes=EXCLUDED.notes,updated_at=NOW()`,
+          [purchaseBatchId, before.source_account_id, remaining.total_cost_cny, remaining.effective_from,
+            remaining.effective_to, remaining.notes || '', actor]);
+        } else {
+          await client.query(`DELETE FROM ${this.schema}.purchase_batch_allocations
+            WHERE purchase_batch_id=$1 AND source_account_id=$2`, [purchaseBatchId, before.source_account_id]);
+        }
+        await this.refreshPurchaseBatchTotalsInTransaction(client, purchaseBatchId);
+      }
+
+      const latest = await client.query(`
+        SELECT cost_profile_id,supplier,purchase_batch
+        FROM ${this.schema}.account_cost_periods
+        WHERE source_account_id=$1 AND status='active'
+        ORDER BY effective_from DESC,id DESC LIMIT 1`, [before.source_account_id]);
+      if (latest.rowCount) {
+        await client.query(`UPDATE ${this.schema}.dim_accounts
+          SET cost_profile_id=COALESCE($2,cost_profile_id),supplier=$3,purchase_batch=$4,synced_at=NOW()
+          WHERE source_account_id=$1`, [before.source_account_id, latest.rows[0].cost_profile_id,
+          latest.rows[0].supplier || '', latest.rows[0].purchase_batch || '']);
+      } else {
+        await client.query(`UPDATE ${this.schema}.dim_accounts
+          SET supplier=CASE WHEN supplier=$2 THEN '' ELSE supplier END,
+              purchase_batch=CASE WHEN purchase_batch=$3 THEN '' ELSE purchase_batch END,
+              synced_at=NOW()
+          WHERE source_account_id=$1`, [before.source_account_id, before.supplier || '', before.purchase_batch || '']);
+      }
+
+      const historicalCorrection = Boolean(before.has_started) || Number(snapshotCounts.finalized_count) > 0;
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,$2,'account_cost_period',$3,$4::jsonb)`, [
+        actor, historicalCorrection ? 'void_historical_correction' : 'void', String(periodId), JSON.stringify({
+          before, after: result.rows[0], correctionReason: input.correctionReason || '',
+          snapshotCount: Number(snapshotCounts.total_count), finalizedSnapshotCount: Number(snapshotCounts.finalized_count),
+        }),
+      ]);
+      return {
+        id: Number(periodId), accountId: Number(before.source_account_id), status: 'void',
+        historicalCorrection, snapshotCount: Number(snapshotCounts.total_count),
+        finalizedSnapshotCount: Number(snapshotCounts.finalized_count),
+      };
     });
   }
 

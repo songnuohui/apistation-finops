@@ -920,6 +920,41 @@ test('started purchase cost edits require an explicit historical correction reas
   assert.equal(queries.some((query) => query.text.includes('UPDATE "finops".account_cost_periods SET')), false);
 });
 
+test('account cost periods are voided with an audit trail and open snapshots are voided', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('SELECT p.*,a.cost_profile_id AS account_cost_profile_id')) {
+        return {
+          rows: [{
+            id: 9, source_account_id: 8, status: 'active', supplier: 'Supplier A', purchase_batch: 'B-001',
+            purchase_batch_id: null, effective_from: '2026-07-01T00:00:00.000Z', has_started: true,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('SELECT COUNT(*)::int AS total_count')) {
+        return { rows: [{ total_count: 2, finalized_count: 1 }], rowCount: 1 };
+      }
+      if (text.includes('UPDATE "finops".account_cost_periods') && text.includes("status='void'")) {
+        return { rows: [{ id: 9, source_account_id: 8, status: 'void' }], rowCount: 1 };
+      }
+      if (text.includes('SELECT cost_profile_id,supplier,purchase_batch')) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const result = await repository.deleteAccountCostPeriod(9, { correctionReason: '重复登记' }, 'tester');
+  assert.equal(result.status, 'void');
+  assert.equal(result.finalizedSnapshotCount, 1);
+  const snapshotUpdate = queries.find((query) => query.text.includes('UPDATE "finops".account_cost_daily_snapshots'));
+  assert.match(snapshotUpdate.text, /finalized=FALSE/);
+  const auditInsert = queries.find((query) => query.text.includes('INSERT INTO "finops".audit_logs'));
+  assert.equal(auditInsert.params[1], 'void_historical_correction');
+});
+
 test('account cost history uses a bounded page query scoped to one account', async () => {
   const queries = [];
   const pool = {
