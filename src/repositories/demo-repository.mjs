@@ -615,7 +615,42 @@ export class DemoRepository {
         order * (Number(left[key] || 0) - Number(right[key] || 0))
         || Number(left.id) - Number(right.id)
       ));
-    return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
+    const included = filtered.filter((item) => !item.excludeFromBalanceStats);
+    const summary = included.reduce((result, item) => {
+      const balance = Number(item.balanceCny || 0);
+      const cashPaid = Number(item.cashPaidCny || 0);
+      result.remainingBalanceCny += Math.max(0, balance);
+      result.positiveBalanceUserCount += balance > 0 ? 1 : 0;
+      result.cashPaidCny += cashPaid;
+      result.cashPayingUserCount += cashPaid > 0 ? 1 : 0;
+      result.userChargeCny += Number(item.userChargeCny || 0);
+      result.requests += Number(item.requests || 0);
+      result.bookedCostCny += Number(item.bookedCostCny ?? item.effectiveCostCny ?? 0);
+      result.bookedProfitCny += Number(item.bookedProfitCny ?? item.grossProfitCny ?? 0);
+      result.partialCostUserCount += item.costCoverageStatus === 'complete' ? 0 : 1;
+      return result;
+    }, {
+      userCount: included.length,
+      excludedUserCount: filtered.length - included.length,
+      remainingBalanceCny: 0,
+      positiveBalanceUserCount: 0,
+      cashPaidCny: 0,
+      cashPayingUserCount: 0,
+      userChargeCny: 0,
+      requests: 0,
+      bookedCostCny: 0,
+      bookedProfitCny: 0,
+      partialCostUserCount: 0,
+      grossMargin: null,
+    });
+    summary.grossMargin = summary.userChargeCny ? summary.bookedProfitCny / summary.userChargeCny : null;
+    return {
+      items: filtered.slice((page - 1) * pageSize, page * pageSize),
+      total: filtered.length,
+      page,
+      pageSize,
+      summary,
+    };
   }
 
   async getUserDetails({ userId, recharge, usage } = {}) {

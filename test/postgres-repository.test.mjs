@@ -799,6 +799,11 @@ test('reported balance scope excludes self-use accounts only from the balance li
   assert.match(userQueries[0].text, /\$8='whitelist' AND u\.exclude_from_balance_stats/);
   assert.match(userQueries[0].text, /NOT \$9::boolean OR COALESCE\(us\.charge_cny,0\)>0/);
   assert.match(userQueries[0].text, /FROM usage_by_user_account u/);
+  assert.match(userQueries[0].text, /AS user_finance_summary/);
+  assert.match(userQueries[0].text, /'remainingBalanceCny'.*u\.current_balance > 0 AND NOT u\.exclude_from_balance_stats/s);
+  assert.match(userQueries[0].text, /'userChargeCny'.*WHERE NOT u\.exclude_from_balance_stats/s);
+  assert.match(userQueries[0].text, /'bookedCostCny'.*WHERE NOT u\.exclude_from_balance_stats/s);
+  assert.match(userQueries[0].text, /'bookedProfitCny'.*WHERE NOT u\.exclude_from_balance_stats/s);
 });
 
 test('recharge-scoped cash details and summary include balance recharges and exclude subscription refunds', async () => {

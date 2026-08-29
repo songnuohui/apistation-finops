@@ -930,6 +930,37 @@ export class PostgresRepository {
              COALESCE(ad.admin_credit_cny,0) AS admin_credit_cny,COALESCE(ad.admin_deduction_cny,0) AS admin_deduction_cny,
              COALESCE(ad.redeemed_credit_cny,0) AS redeemed_credit_cny,COALESCE(ad.affiliate_credit_cny,0) AS affiliate_credit_cny,
              COALESCE(us.revenue_cny,0)-COALESCE(us.effective_cost_cny,0) AS profit_cny,
+             jsonb_build_object(
+               'userCount',COUNT(*) FILTER (WHERE NOT u.exclude_from_balance_stats) OVER (),
+               'excludedUserCount',COUNT(*) FILTER (WHERE u.exclude_from_balance_stats) OVER (),
+               'remainingBalanceCny',COALESCE(SUM(u.current_balance) FILTER (
+                 WHERE u.current_balance > 0 AND NOT u.exclude_from_balance_stats
+               ) OVER (),0),
+               'positiveBalanceUserCount',COUNT(*) FILTER (
+                 WHERE u.current_balance > 0 AND NOT u.exclude_from_balance_stats
+               ) OVER (),
+               'cashPaidCny',COALESCE(SUM(COALESCE(c.cash_paid_cny,0)) FILTER (
+                 WHERE NOT u.exclude_from_balance_stats
+               ) OVER (),0),
+               'cashPayingUserCount',COUNT(*) FILTER (
+                 WHERE COALESCE(c.cash_paid_cny,0)>0 AND NOT u.exclude_from_balance_stats
+               ) OVER (),
+               'userChargeCny',COALESCE(SUM(COALESCE(us.charge_cny,0)) FILTER (
+                 WHERE NOT u.exclude_from_balance_stats
+               ) OVER (),0),
+               'requests',COALESCE(SUM(COALESCE(us.requests,0)) FILTER (
+                 WHERE NOT u.exclude_from_balance_stats
+               ) OVER (),0),
+               'bookedCostCny',COALESCE(SUM(COALESCE(us.effective_cost_cny,0)) FILTER (
+                 WHERE NOT u.exclude_from_balance_stats
+               ) OVER (),0),
+               'bookedProfitCny',COALESCE(SUM(
+                 COALESCE(us.revenue_cny,0)-COALESCE(us.effective_cost_cny,0)
+               ) FILTER (WHERE NOT u.exclude_from_balance_stats) OVER (),0),
+               'partialCostUserCount',COUNT(*) FILTER (
+                 WHERE COALESCE(us.unbooked_account_count,0)>0 AND NOT u.exclude_from_balance_stats
+               ) OVER ()
+             ) AS user_finance_summary,
              COUNT(*) OVER() AS total_count
        FROM ${this.schema}.dim_users u
        LEFT JOIN user_economics us ON us.source_user_id=u.source_user_id
@@ -943,13 +974,17 @@ export class PostgresRepository {
             OR ($8='whitelist' AND u.exclude_from_balance_stats)
           )
       ORDER BY ${orderColumn} ${orderDirection} NULLS LAST,u.source_user_id ASC LIMIT $6 OFFSET $7`, [dailyStart, dailyEnd, start, end, search, pageSize, offset, balanceScope, consumptionOnly]);
-    return pageResult(result.rows.map((row) => {
+    const rawSummary = result.rows[0]?.user_finance_summary || {};
+    const userChargeCny = number(rawSummary.userChargeCny);
+    const bookedProfitCny = number(rawSummary.bookedProfitCny);
+    const resultPage = pageResult(result.rows.map((row) => {
       const recognizedRevenueCny = number(row.revenue_cny);
       const purchaseAllocatedCostCny = number(row.purchase_allocated_cost_cny);
       const effectiveCost = number(row.effective_cost_cny);
       const grossProfit = recognizedRevenueCny - effectiveCost;
+      const { user_finance_summary, ...userRow } = row;
       return {
-        ...row,
+        ...userRow,
         revenue: recognizedRevenueCny,
         revenueCny: recognizedRevenueCny,
         recognizedRevenueCny,
@@ -980,6 +1015,23 @@ export class PostgresRepository {
         balanceCurrency: 'CNY',
       };
     }), page, pageSize);
+    return {
+      ...resultPage,
+      summary: {
+        userCount: number(rawSummary.userCount),
+        excludedUserCount: number(rawSummary.excludedUserCount),
+        remainingBalanceCny: number(rawSummary.remainingBalanceCny),
+        positiveBalanceUserCount: number(rawSummary.positiveBalanceUserCount),
+        cashPaidCny: number(rawSummary.cashPaidCny),
+        cashPayingUserCount: number(rawSummary.cashPayingUserCount),
+        userChargeCny,
+        requests: number(rawSummary.requests),
+        bookedCostCny: number(rawSummary.bookedCostCny),
+        bookedProfitCny,
+        partialCostUserCount: number(rawSummary.partialCostUserCount),
+        grossMargin: userChargeCny ? bookedProfitCny / userChargeCny : null,
+      },
+    };
   }
 
   async getUserDetails({ userId, start, end, dailyStart = start, dailyEnd = end, recharge, usage }) {

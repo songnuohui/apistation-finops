@@ -247,6 +247,41 @@ function sortAndPage(items, input) {
   );
 }
 
+function summarizeUserFinance(items) {
+  const included = items.filter((item) => !item.excludeFromBalanceStats);
+  const summary = included.reduce((result, item) => {
+    const balance = number(item.balanceCny);
+    const cashPaid = number(item.cashPaidCny);
+    result.remainingBalanceCny += Math.max(0, balance);
+    result.positiveBalanceUserCount += balance > 0 ? 1 : 0;
+    result.cashPaidCny += cashPaid;
+    result.cashPayingUserCount += cashPaid > 0 ? 1 : 0;
+    result.userChargeCny += number(item.userChargeCny);
+    result.requests += number(item.requests);
+    result.bookedCostCny += number(item.bookedCostCny ?? item.effectiveCostCny);
+    result.bookedProfitCny += number(item.bookedProfitCny ?? item.grossProfitCny);
+    result.partialCostUserCount += item.costCoverageStatus === 'complete' ? 0 : 1;
+    return result;
+  }, {
+    userCount: included.length,
+    excludedUserCount: items.length - included.length,
+    remainingBalanceCny: 0,
+    positiveBalanceUserCount: 0,
+    cashPaidCny: 0,
+    cashPayingUserCount: 0,
+    userChargeCny: 0,
+    requests: 0,
+    bookedCostCny: 0,
+    bookedProfitCny: 0,
+    partialCostUserCount: 0,
+    grossMargin: null,
+  });
+  summary.grossMargin = summary.userChargeCny
+    ? summary.bookedProfitCny / summary.userChargeCny
+    : null;
+  return summary;
+}
+
 export class SourceUsageService {
   constructor(repository, gateway, config, sourceUsageRepository = null, logger = console) {
     this.repository = repository;
@@ -580,7 +615,10 @@ export class SourceUsageService {
         ? items.filter((item) => `${item.id} ${item.email} ${item.username}`
           .toLowerCase().includes(term))
         : items;
-      return sortAndPage(filtered, input);
+      return {
+        ...sortAndPage(filtered, input),
+        summary: summarizeUserFinance(filtered),
+      };
     }
     const sourceSort = {
       requests: 'requests',
@@ -624,6 +662,7 @@ export class SourceUsageService {
     );
     return {
       ...local,
+      summary: local.summary || summarizeUserFinance(local.items),
       items: local.items.map((item) => ({
         ...item,
         ...(usageByUser.get(number(item.id)) || {}),

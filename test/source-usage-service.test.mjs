@@ -117,3 +117,59 @@ test('source usage service falls back to separate repository methods for older a
   assert.equal(summary.total_tokens, 8);
   assert.equal(models.items[0].name, 'gpt-test');
 });
+
+test('user finance summary excludes every metric from balance-whitelisted users', async () => {
+  const repository = {
+    ...localRepository(),
+    async listUsers() {
+      return {
+        items: [
+          { id: 1, email: 'customer@example.com', balanceCny: 50, cashPaidCny: 10, excludeFromBalanceStats: false },
+          { id: 2, email: 'internal@example.com', balanceCny: 900, cashPaidCny: 100, excludeFromBalanceStats: true },
+        ],
+        total: 2,
+        page: 1,
+        pageSize: 100,
+      };
+    },
+  };
+  const source = {
+    async getDailyDimensionStats({ dimension }) {
+      assert.equal(dimension, 'user');
+      return [
+        {
+          accountId: 1, day: '2026-08-20', dimensionKey: '1', dimensionName: 'customer@example.com',
+          requests: 3, inputTokens: 4, outputTokens: 5, cacheTokens: 0, totalTokens: 9, cost: 1, actualCost: 2,
+        },
+        {
+          accountId: 1, day: '2026-08-20', dimensionKey: '2', dimensionName: 'internal@example.com',
+          requests: 30, inputTokens: 40, outputTokens: 50, cacheTokens: 0, totalTokens: 90, cost: 10, actualCost: 20,
+        },
+      ];
+    },
+  };
+  const service = new SourceUsageService(
+    repository,
+    {},
+    { timezone: 'Asia/Shanghai' },
+    source,
+    { warn() {} },
+  );
+
+  const result = await service.listUsers({
+    ...input,
+    search: '',
+    balanceScope: 'all',
+    consumptionOnly: false,
+  });
+
+  assert.equal(result.summary.userCount, 1);
+  assert.equal(result.summary.excludedUserCount, 1);
+  assert.equal(result.summary.remainingBalanceCny, 50);
+  assert.equal(result.summary.cashPaidCny, 10);
+  assert.equal(result.summary.userChargeCny, 2);
+  assert.equal(result.summary.requests, 3);
+  assert.equal(result.summary.bookedCostCny, 0);
+  assert.equal(result.summary.bookedProfitCny, 2);
+  assert.equal(result.summary.grossMargin, 1);
+});

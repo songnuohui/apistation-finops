@@ -21,11 +21,15 @@ const whitelist = ref<AnyRecord | null>(null);
 let searchTimer: number | undefined;
 let loadRequestId = 0;
 const rows = computed(() => data.value.items || []);
+const summary = computed(() => data.value.summary || {});
 const pages = computed(() => Math.max(1, Math.ceil(Number(data.value.total || 0) / pageSize)));
 const money = (value: any) => value === null || value === undefined || value === ''
   ? '--'
   : new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(Number(value));
 const compact = (value: any) => new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
+const count = (value: any) => value === null || value === undefined
+  ? '--'
+  : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(Number(value));
 const percent = (value: any) => value === null || value === undefined ? '--' : `${(Number(value) * 100).toFixed(1)}%`;
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--';
 async function load() {
@@ -105,9 +109,17 @@ onMounted(load);
 
 <template>
   <div class="page-view user-finance-view">
+    <div class="metric-grid user-finance-metrics">
+      <div class="metric-card"><span>统计用户</span><strong>{{ count(summary.userCount) }}</strong><small>已剔除 {{ count(summary.excludedUserCount) }} 位白名单用户</small></div>
+      <div class="metric-card"><span>用户剩余金额</span><strong>{{ money(summary.remainingBalanceCny) }}</strong><small>{{ count(summary.positiveBalanceUserCount) }} 位用户有正余额</small></div>
+      <div class="metric-card"><span>现金实收</span><strong>{{ money(summary.cashPaidCny) }}</strong><small>{{ count(summary.cashPayingUserCount) }} 位用户产生实收</small></div>
+      <div class="metric-card"><span>实际消费</span><strong>{{ money(summary.userChargeCny) }}</strong><small>{{ compact(summary.requests) }} 次请求</small></div>
+      <div class="metric-card"><span>总成本</span><strong>{{ money(summary.bookedCostCny) }}</strong><small>{{ count(summary.partialCostUserCount) }} 位用户成本待补</small></div>
+      <div class="metric-card" :class="{ good: Number(summary.bookedProfitCny || 0) >= 0, bad: Number(summary.bookedProfitCny || 0) < 0 }"><span>毛利</span><strong>{{ money(summary.bookedProfitCny) }}</strong><small>毛利率 {{ percent(summary.grossMargin) }}</small></div>
+    </div>
     <div class="user-toolbar"><label class="search-box"><Search :size="17" /><input v-model="search" placeholder="搜索邮箱或用户名" /></label><button class="icon-button" title="刷新列表" aria-label="刷新列表" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button><button class="secondary-button" @click="openWhitelist"><ShieldCheck :size="16" />自用账号白名单</button><span class="selection-text">已选择 {{ selected.size }} 位</span><button class="secondary-button" :disabled="!selected.size" @click="updateSelected(true)"><UserRoundX :size="16" />加入白名单</button><button class="secondary-button" :disabled="!selected.size" @click="updateSelected(false)"><UserRoundCheck :size="16" />恢复余额统计</button><span v-if="loading" class="loading-note"><RefreshCw :size="15" class="spin" />更新中</span></div>
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>用户核算</h2><p>点击用户查看充值和消费明细；白名单只排除余额统计，不影响消费与成本</p></div><Users :size="20" class="head-icon" /></div>
+      <div class="panel-head"><div><h2>用户核算</h2><p>顶部汇总统一剔除白名单；点击用户查看充值和消费明细</p></div><Users :size="20" class="head-icon" /></div>
       <div class="table-wrap"><table class="user-table"><thead><tr><th><input type="checkbox" title="选择当前页" @change="togglePageSelection(($event.target as HTMLInputElement).checked)" /></th><th>用户</th><th v-for="column in [['cashPaidCny','现金实收'],['adminCreditCny','管理员加款'],['adminDeductionCny','管理员扣款'],['balanceCny','当前余额'],['userChargeCny','实际消费'],['requests','请求'],['tokens','Token'],['bookedCostCny','总成本'],['bookedProfitCny','毛利']]" :key="column[0]" class="number"><button class="column-sort" @click="toggleSort(column[0])">{{ column[1] }} <ChevronDown :size="13" /></button></th><th class="number">毛利率</th><th>成本覆盖</th></tr></thead><tbody>
         <tr v-if="loading && !rows.length"><td colspan="13" class="table-empty">正在读取用户数据</td></tr>
         <tr v-for="user in rows" :key="user.id"><td><input type="checkbox" :checked="selected.has(Number(user.id))" @change="toggleSelection(Number(user.id), ($event.target as HTMLInputElement).checked)" /></td><td><button class="link-button" @click="loadDetail(user)">{{ user.email || user.username || `用户 #${user.id}` }}</button><small>ID {{ user.id }}<template v-if="user.username && user.username !== user.email"> · {{ user.username }}</template><template v-if="user.excludeFromBalanceStats"> · 自用账号白名单</template></small></td><td class="number">{{ money(user.cashPaidCny) }}</td><td class="number">{{ money(user.adminCreditCny) }}</td><td class="number">{{ money(user.adminDeductionCny) }}</td><td class="number">{{ money(user.balanceCny) }}</td><td class="number">{{ money(user.userChargeCny) }}</td><td class="number">{{ compact(user.requests) }}</td><td class="number">{{ compact(user.tokens) }}</td><td class="number">{{ money(user.bookedCostCny ?? user.effectiveCostCny) }}</td><td class="number positive">{{ money(user.bookedProfitCny) }}</td><td class="number">{{ percent(user.grossMargin) }}</td><td><span class="status-pill" :class="user.costCoverageStatus === 'complete' ? 'success' : 'warning'">{{ user.costCoverageStatus === 'complete' ? '已覆盖' : '部分覆盖' }}</span></td></tr>

@@ -150,9 +150,11 @@ button:disabled{cursor:not-allowed!important}
   background:#b9c9dc;
 }
 .metric-card.good::after{background:#1bae7a}
+.metric-card.bad::after{background:var(--red)}
 .metric-card span{color:#718197;font-size:12px}
 .metric-card strong{color:var(--ink);margin:12px 0 7px;font-size:23px;line-height:29px}
 .metric-card.good strong{color:var(--green)}
+.metric-card.bad strong{color:var(--red)}
 .metric-card small{color:#8998aa;font-size:11px}
 .metric-action{font:inherit;color:inherit;cursor:pointer;text-align:left}
 .metric-action:hover{transform:translateY(-1px);border-color:#9dbde7;background:#fff;box-shadow:0 8px 18px rgba(38,78,125,.1)}
@@ -751,4 +753,8 @@ html,body,#app{max-width:100%;overflow-x:hidden}
   .account-cost-filterbar .filter-actions{justify-content:flex-end}
 }
 .success-text{color:#078454!important}
+.user-finance-metrics .metric-card{min-height:108px}
+.user-finance-metrics .metric-card strong{font-size:20px;line-height:26px}
+@media(max-width:520px){.user-finance-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:360px){.user-finance-metrics{grid-template-columns:1fr}}
 .supplier-alert-switch{display:grid;grid-template-columns:34px minmax(0,1fr);gap:8px;align-items:center;min-width:178px;cursor:pointer}.supplier-alert-switch input{position:absolute;inline-size:1px;block-size:1px;opacity:0}.supplier-alert-switch-track{width:34px;height:20px;position:relative;border:1px solid #aebdce;border-radius:10px;background:#dbe4ee;transition:background-color .16s ease,border-color .16s ease}.supplier-alert-switch-track::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(25,45,70,.2);transition:transform .16s ease}.supplier-alert-switch input:checked+.supplier-alert-switch-track{border-color:#167650;background:#1aa873}.supplier-alert-switch input:checked+.supplier-alert-switch-track::after{transform:translateX(14px)}.supplier-alert-switch input:focus-visible+.supplier-alert-switch-track{outline:2px solid #8bb2f8;outline-offset:2px}.supplier-alert-switch input:disabled+.supplier-alert-switch-track{opacity:.55}.supplier-alert-switch:has(input:disabled){cursor:not-allowed}.supplier-alert-switch-copy{min-width:0}.supplier-alert-switch-copy strong,.supplier-alert-switch-copy small{display:block}.supplier-alert-switch-copy strong{color:#31445d;font-size:12px}.supplier-alert-switch-copy small{margin-top:3px;color:#8492a5;font-size:11px;line-height:15px}

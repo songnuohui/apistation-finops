@@ -104,10 +104,18 @@ test('self-use balance whitelist excludes only reported balances, not usage rank
   const reportedBalanceUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'reported' });
   const whitelistedUsers = await repository.listUsers({ pageSize: 100, balanceScope: 'whitelist' });
   const dashboard = await repository.getOverviewDashboard();
+  const includedUsers = allUsers.items.filter((item) => !item.excludeFromBalanceStats);
 
   assert.ok(allUsers.items.some((item) => item.id === selfUseAccount.id));
   assert.ok(!reportedBalanceUsers.items.some((item) => item.id === selfUseAccount.id));
   assert.deepEqual(whitelistedUsers.items.map((item) => item.id), [selfUseAccount.id]);
+  assert.equal(allUsers.summary.excludedUserCount, 1);
+  assert.equal(allUsers.summary.userCount, includedUsers.length);
+  assert.equal(allUsers.summary.remainingBalanceCny, expectedBalance);
+  assert.equal(allUsers.summary.userChargeCny, includedUsers.reduce((sum, item) => sum + item.userChargeCny, 0));
+  assert.equal(allUsers.summary.cashPaidCny, includedUsers.reduce((sum, item) => sum + item.cashPaidCny, 0));
+  assert.equal(allUsers.summary.bookedCostCny, includedUsers.reduce((sum, item) => sum + item.bookedCostCny, 0));
+  assert.equal(allUsers.summary.bookedProfitCny, includedUsers.reduce((sum, item) => sum + item.bookedProfitCny, 0));
   assert.equal(dashboard.totals.balanceCny, expectedBalance);
   assert.ok(dashboard.rankings.tokenUsage.some((item) => item.id === selfUseAccount.id));
 });
