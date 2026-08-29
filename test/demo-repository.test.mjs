@@ -76,6 +76,18 @@ test('demo usage summaries support consumption sorting and user-only consumption
   assert.ok(users.items.every((item) => item.userChargeCny > 0));
 });
 
+test('demo user finance drilldowns exclude whitelisted users and filter contributors', async () => {
+  const repository = new DemoRepository(config);
+  repository.users[0].excludeFromBalanceStats = true;
+  const included = await repository.listUsers({ page: 1, pageSize: 100, financeScope: 'included' });
+  const balances = await repository.listUsers({ page: 1, pageSize: 100, financeScope: 'balance' });
+  const cash = await repository.listUsers({ page: 1, pageSize: 100, financeScope: 'cash' });
+
+  assert.ok(included.items.every((item) => !item.excludeFromBalanceStats));
+  assert.ok(balances.items.every((item) => Number(item.balanceCny) > 0 && !item.excludeFromBalanceStats));
+  assert.ok(cash.items.every((item) => Number(item.cashPaidCny) > 0 && !item.excludeFromBalanceStats));
+});
+
 test('demo usage event details support global search and request-level cost fields', async () => {
   const repository = new DemoRepository(config);
   const firstPage = await repository.listUsageEvents({ page: 1, pageSize: 10 });

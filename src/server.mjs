@@ -20,6 +20,7 @@ import {
 } from './auth.mjs';
 import {
   accountScope, cashScope, filterTerm, listSort, pagination, resolveRange, searchTerm, userBalanceScope,
+  userFinanceScope,
 } from './http/query.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeAccountLedger,
@@ -367,7 +368,8 @@ async function api(request,res,url){
   }
   if(request.method==='GET'&&url.pathname==='/api/users'){
     return json(res,200,await cached('users',config.listCacheTtlSeconds,()=>sourceUsageService.listUsers({
-      ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),balanceScope:userBalanceScope(url.searchParams),
+      ...range(),...page(),...userSort(url.searchParams),search:searchTerm(url.searchParams),
+      balanceScope:userBalanceScope(url.searchParams),financeScope:userFinanceScope(url.searchParams),
     })));
   }
   const accountCostHistory=/^\/api\/accounts\/(\d+)\/cost-periods$/.exec(url.pathname);

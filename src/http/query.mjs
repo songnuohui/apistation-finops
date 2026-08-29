@@ -142,3 +142,11 @@ export function userBalanceScope(searchParams) {
   }
   return scope;
 }
+
+export function userFinanceScope(searchParams) {
+  const scope = searchParams.get('finance_scope') || 'all';
+  if (!['all', 'included', 'balance', 'cash', 'consumption', 'cost', 'profit'].includes(scope)) {
+    throw Object.assign(new Error('invalid user finance scope'), { statusCode: 400 });
+  }
+  return scope;
+}

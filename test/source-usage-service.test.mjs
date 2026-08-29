@@ -162,6 +162,13 @@ test('user finance summary excludes every metric from balance-whitelisted users'
     balanceScope: 'all',
     consumptionOnly: false,
   });
+  const cashDetail = await service.listUsers({
+    ...input,
+    search: '',
+    balanceScope: 'all',
+    financeScope: 'cash',
+    consumptionOnly: false,
+  });
 
   assert.equal(result.summary.userCount, 1);
   assert.equal(result.summary.excludedUserCount, 1);
@@ -172,4 +179,8 @@ test('user finance summary excludes every metric from balance-whitelisted users'
   assert.equal(result.summary.bookedCostCny, 0);
   assert.equal(result.summary.bookedProfitCny, 2);
   assert.equal(result.summary.grossMargin, 1);
+  assert.equal(cashDetail.total, 1);
+  assert.equal(cashDetail.items[0].email, 'customer@example.com');
+  assert.equal(cashDetail.items[0].excludeFromBalanceStats, false);
+  assert.equal(cashDetail.summary.cashPaidCny, 10);
 });

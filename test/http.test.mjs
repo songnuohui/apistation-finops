@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { authorize, sessionCookie } from '../src/auth.mjs';
-import { accountScope, cashScope, pagination, resolveRange, userBalanceScope } from '../src/http/query.mjs';
+import {
+  accountScope, cashScope, pagination, resolveRange, userBalanceScope, userFinanceScope,
+} from '../src/http/query.mjs';
 import { resolveStaticPath } from '../src/http/static-path.mjs';
 import { routeId } from '../src/http/route.mjs';
 import {
@@ -59,6 +61,10 @@ test('cash and reported-balance scopes accept only their supported values', () =
   assert.equal(userBalanceScope(new URLSearchParams('balance_scope=reported')), 'reported');
   assert.equal(userBalanceScope(new URLSearchParams('balance_scope=whitelist')), 'whitelist');
   assert.throws(() => userBalanceScope(new URLSearchParams('balance_scope=whitelisted')), /invalid user balance scope/);
+
+  assert.equal(userFinanceScope(new URLSearchParams()), 'all');
+  assert.equal(userFinanceScope(new URLSearchParams('finance_scope=profit')), 'profit');
+  assert.throws(() => userFinanceScope(new URLSearchParams('finance_scope=whitelist')), /invalid user finance scope/);
 });
 
 test('authorization accepts a valid signed administrator session only', () => {

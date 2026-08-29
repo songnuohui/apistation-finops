@@ -595,7 +595,7 @@ export class DemoRepository {
 
   async listUsers({
     search = '', page = 1, pageSize = 20, sort = 'userChargeCny', direction = 'desc',
-    balanceScope = 'all', consumptionOnly = false,
+    balanceScope = 'all', financeScope = 'all', consumptionOnly = false,
   } = {}) {
     const sortable = new Set([
       'cashPaidCny','adminCreditCny','adminDeductionCny','balanceCny',
@@ -611,6 +611,22 @@ export class DemoRepository {
         || (balanceScope === 'reported' && Number(item.balanceCny || 0) > 0 && !item.excludeFromBalanceStats)
         || (balanceScope === 'whitelist' && item.excludeFromBalanceStats)
       ))
+      .filter((item) => {
+        if (financeScope === 'all') return true;
+        if (item.excludeFromBalanceStats) return false;
+        const balance = Number(item.balanceCny || 0);
+        const cashPaid = Number(item.cashPaidCny || 0);
+        const charge = Number(item.userChargeCny || 0);
+        const cost = Number(item.bookedCostCny ?? item.effectiveCostCny ?? 0);
+        const profit = Number(item.bookedProfitCny ?? item.grossProfitCny ?? 0);
+        if (financeScope === 'included') return true;
+        if (financeScope === 'balance') return balance > 0;
+        if (financeScope === 'cash') return cashPaid > 0;
+        if (financeScope === 'consumption') return charge > 0;
+        if (financeScope === 'cost') return cost !== 0 || item.costCoverageStatus !== 'complete';
+        if (financeScope === 'profit') return profit !== 0 || charge !== 0 || cost !== 0;
+        return true;
+      })
       .sort((left, right) => (
         order * (Number(left[key] || 0) - Number(right[key] || 0))
         || Number(left.id) - Number(right.id)

@@ -282,6 +282,25 @@ function summarizeUserFinance(items) {
   return summary;
 }
 
+function filterUserFinanceItems(items, scope = 'all') {
+  if (scope === 'all') return items;
+  return items.filter((item) => {
+    if (item.excludeFromBalanceStats) return false;
+    const balance = number(item.balanceCny);
+    const cashPaid = number(item.cashPaidCny);
+    const charge = number(item.userChargeCny);
+    const cost = number(item.bookedCostCny ?? item.effectiveCostCny);
+    const profit = number(item.bookedProfitCny ?? item.grossProfitCny);
+    if (scope === 'included') return true;
+    if (scope === 'balance') return balance > 0;
+    if (scope === 'cash') return cashPaid > 0;
+    if (scope === 'consumption') return charge > 0;
+    if (scope === 'cost') return cost !== 0 || item.costCoverageStatus !== 'complete';
+    if (scope === 'profit') return profit !== 0 || charge !== 0 || cost !== 0;
+    return true;
+  });
+}
+
 export class SourceUsageService {
   constructor(repository, gateway, config, sourceUsageRepository = null, logger = console) {
     this.repository = repository;
@@ -611,10 +630,11 @@ export class SourceUsageService {
           }
         }
       }
-      const filtered = term
+      const searched = term
         ? items.filter((item) => `${item.id} ${item.email} ${item.username}`
           .toLowerCase().includes(term))
         : items;
+      const filtered = filterUserFinanceItems(searched, input.financeScope);
       return {
         ...sortAndPage(filtered, input),
         summary: summarizeUserFinance(filtered),
