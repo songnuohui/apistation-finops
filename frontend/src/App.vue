@@ -5,6 +5,7 @@ import {
   Activity, AlertTriangle, BarChart3, CalendarDays, ChevronDown, CircleDollarSign, DatabaseZap, Download,
   FileText, LayoutDashboard, LogOut, Menu, RefreshCw, Search, ServerCog, Settings2,
   ShieldCheck, Users, WalletCards, X, KeyRound, PlugZap,
+  Mail,
 } from 'lucide-vue-next';
 import { get, query, rangeQuery, send } from './api';
 
@@ -15,6 +16,7 @@ const AccountCostsView = defineAsyncComponent(() => import('./components/Account
 const SupplierManagementView = defineAsyncComponent(() => import('./components/SupplierManagementView.vue'));
 const OAuthSupplyView = defineAsyncComponent(() => import('./components/OAuthSupplyView.vue'));
 const ReplenishmentView = defineAsyncComponent(() => import('./components/ReplenishmentView.vue'));
+const EmailCenterView = defineAsyncComponent(() => import('./components/EmailCenterView.vue'));
 
 type AnyRecord = Record<string, any>;
 
@@ -50,6 +52,7 @@ const qualityRefreshToken = ref(0);
 const supplierKeyRefreshToken = ref(0);
 const oauthSupplyRefreshToken = ref(0);
 const replenishmentRefreshToken = ref(0);
+const emailRefreshToken = ref(0);
 const activeUsageTab = ref<'users' | 'models' | 'events'>('users');
 const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
@@ -64,6 +67,7 @@ const nav = [
   { id: 'suppliers', label: '供应商管理', icon: ServerCog, group: '资源与成本' },
   { id: 'oauth-supply', label: 'OAuth Supply', icon: PlugZap, group: '自动化接入' },
   { id: 'replenishment', label: '自动补号', icon: RefreshCw, group: '自动化接入' },
+  { id: 'email', label: '邮件中心', icon: Mail, group: '运营工具' },
 ];
 const pageMeta: Record<string, [string, string]> = {
   overview: ['经营总览', '现金、消耗、成本与毛利'],
@@ -73,6 +77,7 @@ const pageMeta: Record<string, [string, string]> = {
   suppliers: ['供应商管理', '连接、密钥、账号分组和供应商质量统一管理'],
   'oauth-supply': ['OAuth Supply 接入', '独立配置客户账号，登录并安全取得采购 Token'],
   replenishment: ['自动补号', '库存、订单、验号、Sub2API 导入和采购成本统一管理'],
+  email: ['邮件中心', '公告、活动、订阅和发送记录'],
 };
 
 const supplierTab = computed(() => String(route.query.tab || 'connections'));
@@ -95,6 +100,7 @@ const escape = (value: any) => String(value ?? '');
 const statusClass = (value: any) => ['ok', 'healthy', 'active', 'complete', 'priced'].includes(String(value)) ? 'success' : ['error', 'failed', 'missing'].includes(String(value)) ? 'danger' : 'warning';
 const showRangeControl = computed(() => (
   page.value !== 'oauth-supply'
+  && page.value !== 'email'
   && (page.value !== 'suppliers' || supplierTab.value === 'quality')
 ));
 const customRangeError = computed(() => {
@@ -177,6 +183,7 @@ async function loadPage() {
     else if (page.value === 'supplier-quality') qualityRefreshToken.value += 1;
     else if (page.value === 'oauth-supply') oauthSupplyRefreshToken.value += 1;
     else if (page.value === 'replenishment') replenishmentRefreshToken.value += 1;
+    else if (page.value === 'email') emailRefreshToken.value += 1;
   } finally { loading.value = false; }
 }
 
@@ -343,7 +350,7 @@ function syncBodyScrollLock() {
         <div><strong>ApiStation FinOps</strong><small>成本与用量中心</small></div>
       </div>
       <nav class="nav">
-        <template v-for="group in ['经营分析', '资源与成本', '自动化接入']" :key="group">
+        <template v-for="group in ['经营分析', '资源与成本', '自动化接入', '运营工具']" :key="group">
           <p class="nav-label">{{ group }}</p>
           <button v-for="item in nav.filter((navItem) => navItem.group === group)" :key="item.id" class="nav-item" :class="{ active: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="navigate(item.id)">
             <component :is="item.icon" :size="18" stroke-width="1.8" /><span>{{ item.label }}</span>
@@ -471,6 +478,7 @@ function syncBodyScrollLock() {
           :range-end="customEnd"
           @toast="showToast"
         />
+        <EmailCenterView v-else-if="page === 'email'" :refresh-token="emailRefreshToken" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">

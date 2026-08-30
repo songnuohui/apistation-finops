@@ -350,3 +350,14 @@ test('usage cost snapshot performance indexes remain FinOps-owned', () => {
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(migration, /credentials|raw_key|api_key\s+(?:TEXT|VARCHAR)/i);
 });
+
+test('FinOps email center remains isolated and stores no plaintext SMTP password', () => {
+  const migration = read('migrations/061_finops_email_center.sql');
+  assert.match(migration, /finops_email_settings/);
+  assert.match(migration, /smtp_credentials_ciphertext TEXT NOT NULL/);
+  assert.match(migration, /finops_email_preferences/);
+  assert.match(migration, /finops_email_campaigns/);
+  assert.match(migration, /skipped_whitelist/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /smtp_password\s+(?:TEXT|VARCHAR)/i);
+});

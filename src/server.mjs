@@ -29,7 +29,7 @@ import {
   hasSupplierCredentialInput, mergeSupplierCredentials,
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget,
   normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
-  normalizeOAuthSupplyAuthSettings,
+  normalizeOAuthSupplyAuthSettings, normalizeEmailSettings, normalizeEmailCampaign,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { routeId } from './http/route.mjs';
@@ -61,6 +61,7 @@ import {
 import { SyncService } from './services/sync-service.mjs';
 import { SupplierMonitorService } from './services/supplier-monitor-service.mjs';
 import { normalizeSupplierBaseUrl } from './services/supplier-adapters.mjs';
+import { EmailService } from './services/email-service.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const webRoot=path.join(root,'web');
@@ -69,6 +70,7 @@ const sourcePool=createSourcePool(config);
 const finopsPool=createFinopsPool(config);
 const sub2ApiUsagePool=createSub2ApiUsagePool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
+const emailService=new EmailService(repository,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
 const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
 const responseCache=new ResponseCacheService(config);
@@ -326,6 +328,42 @@ async function api(request,res,url){
   const range=()=>resolveRange(url.searchParams,new Date(),config.timezone),page=()=>pagination(url.searchParams);
   if(request.method!=='GET')await responseCache.invalidate();
   const cached=(scope,ttl,loader)=>responseCache.remember(scope,`${request.method}:${url.pathname}?${url.searchParams.toString()}`,ttl,loader);
+  if(request.method==='GET'&&url.pathname==='/api/email/settings'){
+    return json(res,200,emailService.status(await repository.getEmailSettings()));
+  }
+  if(request.method==='PATCH'&&url.pathname==='/api/email/settings'){
+    const input=normalizeEmailSettings(await body(request));
+    const current=await repository.getEmailSettings({includeCredentials:true});
+    const ciphertext=input.clearCredentials ? '' : input.smtpPassword
+      ? emailService.encryptPassword(input.smtpPassword)
+      : current.credentialsCiphertext || '';
+    return json(res,200,emailService.status(await repository.updateEmailSettings(input,ciphertext,auth.actor)));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/email/settings/test'){
+    const input=await body(request);
+    const to=String(input.email || '').trim().toLowerCase();
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return json(res,400,{error:'请输入有效的测试邮箱'});
+    await emailService.test(await repository.getEmailSettings({includeCredentials:true}),to);
+    return json(res,200,{ok:true});
+  }
+  if(request.method==='GET'&&url.pathname==='/api/email/campaigns'){
+    return json(res,200,await repository.listEmailCampaigns(page()));
+  }
+  if(request.method==='POST'&&url.pathname==='/api/email/campaigns'){
+    return json(res,201,await emailService.createCampaign(normalizeEmailCampaign(await body(request)),auth.actor));
+  }
+  const emailCampaignId=/^\/api\/email\/campaigns\/(\d+)$/.exec(url.pathname);
+  if(request.method==='GET'&&emailCampaignId) return json(res,200,await repository.getEmailCampaign(Number(emailCampaignId[1])));
+  const emailCampaignSend=/^\/api\/email\/campaigns\/(\d+)\/send$/.exec(url.pathname);
+  if(request.method==='POST'&&emailCampaignSend) return json(res,200,await emailService.sendCampaign(Number(emailCampaignSend[1])));
+  if(request.method==='GET'&&url.pathname==='/api/email/preferences') return json(res,200,await repository.listEmailPreferences({ ...page(), search:searchTerm(url.searchParams) }));
+  const emailPreferenceId=/^\/api\/email\/preferences\/(\d+)$/.exec(url.pathname);
+  if(request.method==='PATCH'&&emailPreferenceId){
+    const input=await body(request);
+    if(typeof input.subscribed!=='boolean') return json(res,400,{error:'subscribed must be boolean'});
+    const user=await repository.getEmailUser(Number(emailPreferenceId[1]));
+    return json(res,200,await repository.setEmailPreference(user.sourceUserId,user.email,input.subscribed,auth.actor));
+  }
   if(request.method==='GET'&&url.pathname==='/api/bootstrap')return json(res,200,await cached('bootstrap',config.dashboardCacheTtlSeconds,()=>repository.getBootstrap()));
   if(request.method==='GET'&&url.pathname==='/api/source/dashboard-snapshot'){
     return json(res,200,await sub2ApiReadonlyGateway.dashboardSnapshot({
@@ -1110,11 +1148,16 @@ async function readiness(){
     ['060_void_cost_period_view'],
   );
   if(!voidCostPeriodMigration.rowCount)throw new Error('required FinOps migration 060_void_cost_period_view is not applied');
+  const emailMigration=await finopsPool.query(
+    `SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version=$1`,
+    ['061_finops_email_center'],
+  );
+  if(!emailMigration.rowCount)throw new Error('required FinOps migration 061_finops_email_center is not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_supplier_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view','061_finops_email_center'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),
@@ -1149,6 +1192,31 @@ const server=http.createServer(async(request,res)=>{
     }
     if(request.method==='GET'&&url.pathname==='/api/public/group-monitor'){
       return publicMonitorApi(res);
+    }
+    if((request.method==='GET'||request.method==='POST')&&url.pathname==='/email/preferences'){
+      try {
+        const token=url.searchParams.get('t')||'';
+        const action=url.searchParams.get('action')||'';
+        if(request.method==='GET'){
+          const value=emailService.decodePreference(token);
+          if(!value||!['subscribe','unsubscribe'].includes(action)) throw Object.assign(new Error('退订链接无效或已过期'),{statusCode:400});
+          const page=Buffer.from(emailService.renderPreferenceConfirmation(value,action));
+          setHeaders(res);
+          res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Length':page.length});
+          return res.end(page);
+        }
+        const result=await emailService.preferenceAction(token,action);
+        const page=Buffer.from(emailService.renderPreferencePage(result));
+        setHeaders(res);
+        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Length':page.length});
+        return res.end(page);
+      } catch(error) {
+        const status=error.statusCode||400;
+        const page=Buffer.from(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>链接无效</title><style>body{font:16px Arial;background:#f3f6fa;color:#17263d}.box{max-width:520px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #dbe5f0;border-radius:10px}p{color:#607087}</style><main class="box"><h1>链接无效</h1><p>${String(error.message||'退订链接无效').replace(/[&<>]/g,'')}</p></main></html>`);
+        setHeaders(res);
+        res.writeHead(status,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Length':page.length});
+        return res.end(page);
+      }
     }
     if(request.method==='GET'&&url.pathname==='/login'){
       return authorize(request,config).ok?redirect(res,'/'):staticFile(res,{pathname:'/login.html'});

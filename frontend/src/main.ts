@@ -15,6 +15,7 @@ const routes = [
   { path: '/supplier-quality', redirect: '/suppliers?tab=quality' },
   { path: '/oauth-supply', component: App },
   { path: '/replenishment', component: App },
+  { path: '/email', component: App },
 ];
 
 const router = createRouter({

@@ -3341,6 +3341,133 @@ export class PostgresRepository {
     });
   }
 
+  async getEmailSettings({ includeCredentials = false } = {}) {
+    const result = await this.pool.query(`SELECT * FROM ${this.schema}.finops_email_settings WHERE id=1`);
+    const row = result.rows[0] || {};
+    return {
+      enabled: Boolean(row.enabled), smtpHost: row.smtp_host || '', smtpPort: Number(row.smtp_port || 587),
+      smtpSecure: Boolean(row.smtp_secure), smtpUsername: row.smtp_username || '', fromEmail: row.from_email || '',
+      fromName: row.from_name || '', credentialsConfigured: Boolean(row.smtp_credentials_ciphertext),
+      credentialsCiphertext: includeCredentials ? row.smtp_credentials_ciphertext || '' : undefined,
+      updatedAt: row.updated_at || null, updatedBy: row.updated_by || '',
+    };
+  }
+
+  async updateEmailSettings(input, ciphertext, actor = 'admin') {
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_settings SET
+      enabled=$1,smtp_host=$2,smtp_port=$3,smtp_secure=$4,smtp_username=$5,
+      smtp_credentials_ciphertext=$6,from_email=$7,from_name=$8,updated_by=$9,updated_at=NOW() WHERE id=1
+      RETURNING *`, [input.enabled, input.smtpHost, input.smtpPort, input.smtpSecure, input.smtpUsername,
+      ciphertext || '', input.fromEmail, input.fromName, actor]);
+    return this.getEmailSettings();
+  }
+
+  async listEmailCampaigns({ page = 1, pageSize = 20 } = {}) {
+    const offset = (page - 1) * pageSize;
+    const result = await this.pool.query(`SELECT c.*,COUNT(r.id)::int AS recipient_rows
+      FROM ${this.schema}.finops_email_campaigns c LEFT JOIN ${this.schema}.finops_email_recipients r ON r.campaign_id=c.id
+      GROUP BY c.id ORDER BY c.created_at DESC,c.id DESC LIMIT $1 OFFSET $2`, [pageSize, offset]);
+    const total = await this.pool.query(`SELECT COUNT(*)::int AS count FROM ${this.schema}.finops_email_campaigns`);
+    return { items: result.rows.map((row) => this.emailCampaign(row)), total: Number(total.rows[0]?.count || 0), page, pageSize };
+  }
+
+  emailCampaign(row) {
+    return { id: Number(row.id), subject: row.subject, category: row.category, htmlContent: row.html_content,
+      textContent: row.text_content, status: row.status, totalCount: Number(row.total_count || 0),
+      sentCount: Number(row.sent_count || 0), failedCount: Number(row.failed_count || 0), skippedCount: Number(row.skipped_count || 0),
+      createdBy: row.created_by, sentAt: row.sent_at, createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  async createEmailCampaign(input, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const created = await client.query(`INSERT INTO ${this.schema}.finops_email_campaigns
+        (subject,category,html_content,text_content,created_by) VALUES($1,$2,$3,$4,$5) RETURNING *`,
+      [input.subject, input.category, input.htmlContent, input.textContent || '', actor]);
+      const campaign = created.rows[0];
+      const userFilter = input.recipientMode === 'selected' ? 'AND u.source_user_id=ANY($2::bigint[])' : '';
+      await client.query(`INSERT INTO ${this.schema}.finops_email_recipients(campaign_id,source_user_id,email)
+        SELECT $1,u.source_user_id,u.email FROM ${this.schema}.dim_users u
+        WHERE NULLIF(BTRIM(u.email),'') IS NOT NULL
+          AND u.source_deleted_at IS NULL AND u.status='active' ${userFilter}
+        ON CONFLICT(campaign_id,source_user_id) DO NOTHING`, input.recipientMode === 'selected' ? [campaign.id, input.userIds] : [campaign.id]);
+      await client.query(`UPDATE ${this.schema}.finops_email_campaigns SET total_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1),updated_at=NOW() WHERE id=$1`, [campaign.id]);
+      return this.getEmailCampaign(campaign.id, client);
+    });
+  }
+
+  async getEmailCampaign(id, client = this.pool) {
+    const result = await client.query(`SELECT * FROM ${this.schema}.finops_email_campaigns WHERE id=$1`, [id]);
+    if (!result.rowCount) throw httpError('email campaign not found', 404);
+    const campaign = this.emailCampaign(result.rows[0]);
+    const recipients = await client.query(`SELECT id,source_user_id,email,status,error_message,sent_at FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 ORDER BY id`, [id]);
+    campaign.recipients = recipients.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: row.email, status: row.status, errorMessage: row.error_message || '', sentAt: row.sent_at }));
+    return campaign;
+  }
+
+  async markEmailCampaignSending(id) {
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='sending',updated_at=NOW() WHERE id=$1 AND status='draft' RETURNING *`, [id]);
+    if (!result.rowCount) throw httpError('邮件活动不存在或已发送', 409);
+    return this.emailCampaign(result.rows[0]);
+  }
+
+  async listPendingEmailRecipients(campaignId) {
+    const result = await this.pool.query(`SELECT r.*,u.exclude_from_balance_stats,
+      (u.source_deleted_at IS NULL AND u.status='active') AS active,
+      COALESCE(p.subscribed,TRUE) AS subscribed FROM ${this.schema}.finops_email_recipients r
+      LEFT JOIN ${this.schema}.dim_users u ON u.source_user_id=r.source_user_id
+      LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=r.source_user_id
+      WHERE r.campaign_id=$1 AND r.status='pending' ORDER BY r.id`, [campaignId]);
+    return result.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: String(row.email || '').trim().toLowerCase(), excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), active: Boolean(row.active), subscribed: Boolean(row.subscribed) }));
+  }
+
+  async updateEmailRecipientStatus(id, status, errorMessage = '') {
+    await this.pool.query(`UPDATE ${this.schema}.finops_email_recipients SET status=$2,error_message=$3,sent_at=CASE WHEN $2='sent' THEN NOW() ELSE sent_at END WHERE id=$1`, [id, status, errorMessage]);
+  }
+
+  async finishEmailCampaign(id) {
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns c SET
+      sent_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent'),
+      failed_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed'),
+      skipped_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status LIKE 'skipped_%'),
+      status=CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed')
+        THEN CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent') THEN 'partial_failed' ELSE 'failed' END
+        ELSE 'completed' END,
+      sent_at=NOW(),updated_at=NOW() WHERE c.id=$1 RETURNING *`, [id]);
+    return this.emailCampaign(result.rows[0]);
+  }
+
+  async listEmailPreferences({ page = 1, pageSize = 30, search = '' } = {}) {
+    const offset = (page - 1) * pageSize;
+    const result = await this.pool.query(`SELECT u.source_user_id,u.email,u.username,u.exclude_from_balance_stats,COALESCE(p.subscribed,TRUE) AS subscribed,p.unsubscribed_at,p.resubscribed_at
+      FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+      ORDER BY u.source_user_id LIMIT $2 OFFSET $3`, [search, pageSize, offset]);
+    const count = await this.pool.query(`SELECT COUNT(*)::int AS count FROM ${this.schema}.dim_users u WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')`, [search]);
+    const summary = await this.pool.query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER (WHERE COALESCE(p.subscribed,TRUE))::int AS subscribed_count,COUNT(*) FILTER (WHERE NOT COALESCE(p.subscribed,TRUE))::int AS unsubscribed_count,COUNT(*) FILTER (WHERE u.exclude_from_balance_stats)::int AS whitelist_count FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')`, [search]);
+    return { items: result.rows.map((row) => ({ sourceUserId: Number(row.source_user_id), email: row.email || '', username: row.username || '', excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), subscribed: Boolean(row.subscribed), unsubscribedAt: row.unsubscribed_at, resubscribedAt: row.resubscribed_at })), total: Number(count.rows[0]?.count || 0), page, pageSize, summary: { total: Number(summary.rows[0]?.total || 0), subscribedCount: Number(summary.rows[0]?.subscribed_count || 0), unsubscribedCount: Number(summary.rows[0]?.unsubscribed_count || 0), whitelistCount: Number(summary.rows[0]?.whitelist_count || 0) } };
+  }
+
+  async getEmailUser(userId) {
+    const result = await this.pool.query(`SELECT source_user_id,email FROM ${this.schema}.dim_users WHERE source_user_id=$1`, [userId]);
+    if (!result.rowCount) throw httpError('user not found', 404);
+    return { sourceUserId: Number(result.rows[0].source_user_id), email: result.rows[0].email || '' };
+  }
+
+  async setEmailPreference(userId, email, subscribed, source = 'public_link') {
+    const userResult = await this.pool.query(`SELECT email FROM ${this.schema}.dim_users WHERE source_user_id=$1`, [userId]);
+    if (!userResult.rowCount) throw httpError('user not found', 404);
+    if (String(userResult.rows[0].email || '').trim().toLowerCase() !== String(email || '').trim().toLowerCase()) {
+      throw httpError('email preference link is no longer valid', 403);
+    }
+    const result = await this.pool.query(`INSERT INTO ${this.schema}.finops_email_preferences(source_user_id,email,subscribed,unsubscribed_at,resubscribed_at,updated_source,updated_at)
+      VALUES($1,$2,$3,CASE WHEN $3 THEN NULL ELSE NOW() END,CASE WHEN $3 THEN NOW() ELSE NULL END,$4,NOW())
+      ON CONFLICT(source_user_id) DO UPDATE SET email=EXCLUDED.email,subscribed=EXCLUDED.subscribed,
+        unsubscribed_at=CASE WHEN EXCLUDED.subscribed THEN finops_email_preferences.unsubscribed_at ELSE NOW() END,
+        resubscribed_at=CASE WHEN EXCLUDED.subscribed THEN NOW() ELSE finops_email_preferences.resubscribed_at END,
+        updated_source=EXCLUDED.updated_source,updated_at=NOW() RETURNING *`, [userId, email, subscribed, source]);
+    return { sourceUserId: Number(result.rows[0].source_user_id), email: result.rows[0].email, subscribed: Boolean(result.rows[0].subscribed), updatedAt: result.rows[0].updated_at };
+  }
+
   async deleteAccountCostPeriod(periodId, input = {}, actor='admin') {
     return inTransaction(this.pool, async (client) => {
       const existing = await client.query(`SELECT p.*,a.cost_profile_id AS account_cost_profile_id,

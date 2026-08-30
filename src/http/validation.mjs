@@ -16,6 +16,8 @@ const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'token_refresh'
 const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
 const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier']);
 const SUB2API_SERVICE_AUTH_MODES = new Set(['password', 'api_key']);
+const EMAIL_CATEGORIES = new Set(['announcement', 'promotion']);
+const EMAIL_RECIPIENT_MODES = new Set(['all', 'selected']);
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -184,6 +186,15 @@ export function normalizeAccountCostPeriod(input) {
 
 export function normalizeAccountCostPeriodUpdate(input) {
   return normalizeAccountCostPeriodFields(input, null, { updating: true });
+}
+
+function emailValue(value, field, { required = true } = {}) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized && !required) return '';
+  if (!normalized || normalized.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    throw badRequest(`invalid ${field}`);
+  }
+  return normalized;
 }
 
 export function normalizeAccountCostPeriodDelete(input = {}) {
@@ -510,5 +521,45 @@ export function normalizeCashTransaction(input) {
     reference: textValue(input.reference, 'reference', { required: false, max: 120 }),
     party: textValue(input.party, 'party', { required: false, max: 160 }),
     notes: textValue(input.notes, 'notes', { required: false, max: 2000 }),
+  };
+}
+
+export function normalizeEmailSettings(input) {
+  const enabled = input.enabled === undefined ? false : booleanValue(input.enabled, 'enabled');
+  const smtpHost = textValue(input.smtpHost, 'smtpHost', { required: enabled, max: 255 });
+  const smtpPort = integerValue(input.smtpPort || 587, 'smtpPort', { min: 1, max: 65535 });
+  const smtpSecure = input.smtpSecure === undefined ? smtpPort === 465 : booleanValue(input.smtpSecure, 'smtpSecure');
+  const smtpUsername = textValue(input.smtpUsername, 'smtpUsername', { required: enabled, max: 255 });
+  const smtpPassword = textValue(input.smtpPassword, 'smtpPassword', { required: false, max: 8192 });
+  const fromEmail = emailValue(input.fromEmail, 'fromEmail', { required: enabled });
+  const fromName = textValue(input.fromName, 'fromName', { required: false, max: 160 });
+  if (enabled && !smtpPassword && input.credentialsConfigured !== true) {
+    throw badRequest('smtpPassword is required when no saved password exists');
+  }
+  return {
+    enabled,
+    smtpHost,
+    smtpPort,
+    smtpSecure,
+    smtpUsername,
+    smtpPassword,
+    fromEmail,
+    fromName,
+    clearCredentials: input.clearCredentials === undefined ? false : booleanValue(input.clearCredentials, 'clearCredentials'),
+  };
+}
+
+export function normalizeEmailCampaign(input) {
+  const recipientMode = enumValue(input.recipientMode || 'all', 'recipientMode', EMAIL_RECIPIENT_MODES);
+  const userIds = recipientMode === 'selected' ? idList(input.userIds, 'userIds', { max: 10000 }) : [];
+  const htmlContent = String(input.htmlContent ?? '').trim();
+  if (!htmlContent || htmlContent.length > 500000) throw badRequest('htmlContent is required and must be at most 500000 characters');
+  return {
+    subject: textValue(input.subject, 'subject', { max: 255 }),
+    category: enumValue(input.category || 'announcement', 'category', EMAIL_CATEGORIES),
+    htmlContent,
+    textContent: textValue(input.textContent, 'textContent', { required: false, max: 500000 }),
+    recipientMode,
+    userIds,
   };
 }

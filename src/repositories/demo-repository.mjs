@@ -193,6 +193,10 @@ export class DemoRepository {
     this.accounts = accounts.map((item) => ({ ...item, tags: [...item.tags] }));
     this.cashTransactions = cashTransactions.map((item) => ({ ...item }));
     this.nonCashBalanceCredits = nonCashBalanceCredits.map((item) => ({ ...item }));
+    this.emailSettings = { enabled: false, smtpHost: '', smtpPort: 587, smtpSecure: false, smtpUsername: '', fromEmail: '', fromName: '', credentialsConfigured: false, smtpCredentialsCiphertext: '', updatedAt: null };
+    this.emailPreferences = new Map();
+    this.emailCampaigns = [];
+    this.emailRecipients = new Map();
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
     this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
     this.supplierConnections = [{
@@ -2336,4 +2340,48 @@ export class DemoRepository {
       snapshotCount: Number(period.finalizedSnapshotCount || 0), finalizedSnapshotCount: Number(period.finalizedSnapshotCount || 0),
     };
   }
+
+  async getEmailSettings({ includeCredentials = false } = {}) { return { ...this.emailSettings, credentialsCiphertext: includeCredentials ? this.emailSettings.smtpCredentialsCiphertext : undefined }; }
+
+  async updateEmailSettings(input, ciphertext) {
+    this.emailSettings = { ...this.emailSettings, enabled: input.enabled, smtpHost: input.smtpHost, smtpPort: input.smtpPort, smtpSecure: input.smtpSecure, smtpUsername: input.smtpUsername, fromEmail: input.fromEmail, fromName: input.fromName, credentialsConfigured: Boolean(ciphertext), smtpCredentialsCiphertext: ciphertext || '', updatedAt: new Date().toISOString() };
+    return this.getEmailSettings();
+  }
+
+  async listEmailPreferences({ page = 1, pageSize = 30, search = '' } = {}) {
+    const term = String(search || '').toLowerCase();
+    const items = this.users.filter((user) => `${user.email} ${user.username}`.toLowerCase().includes(term)).map((user) => {
+      const preference = this.emailPreferences.get(Number(user.id));
+      return { sourceUserId: Number(user.id), email: user.email || '', username: user.username || '', excludeFromBalanceStats: Boolean(user.excludeFromBalanceStats), subscribed: preference?.subscribed !== false, unsubscribedAt: preference?.unsubscribedAt || null, resubscribedAt: preference?.resubscribedAt || null };
+    });
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize, summary: { total: items.length, subscribedCount: items.filter((item) => item.subscribed).length, unsubscribedCount: items.filter((item) => !item.subscribed).length, whitelistCount: items.filter((item) => item.excludeFromBalanceStats).length } };
+  }
+
+  async getEmailUser(userId) {
+    const user = this.users.find((item) => Number(item.id) === Number(userId));
+    if (!user) throw Object.assign(new Error('user not found'), { statusCode: 404 });
+    return { sourceUserId: Number(user.id), email: user.email || '' };
+  }
+
+  async setEmailPreference(userId, email, subscribed, source = 'public_link') {
+    const value = { sourceUserId: Number(userId), email, subscribed: Boolean(subscribed), unsubscribedAt: subscribed ? null : new Date().toISOString(), resubscribedAt: subscribed ? new Date().toISOString() : null, source };
+    this.emailPreferences.set(Number(userId), value);
+    return { ...value, updatedAt: new Date().toISOString() };
+  }
+
+  async createEmailCampaign(input, actor = 'admin') {
+    const id = this.emailCampaigns.length + 1;
+    const campaign = { id, subject: input.subject, category: input.category, htmlContent: input.htmlContent, textContent: input.textContent || '', status: 'draft', totalCount: 0, sentCount: 0, failedCount: 0, skippedCount: 0, createdBy: actor, sentAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const recipients = this.users.filter((user) => input.recipientMode !== 'selected' || input.userIds.includes(Number(user.id))).filter((user) => user.email && (!user.status || user.status === 'active')).map((user) => ({ id: `${id}-${user.id}`, campaignId: id, sourceUserId: Number(user.id), email: user.email, status: 'pending', excludeFromBalanceStats: Boolean(user.excludeFromBalanceStats), active: true, subscribed: this.emailPreferences.get(Number(user.id))?.subscribed !== false }));
+    campaign.totalCount = recipients.length;
+    this.emailCampaigns.push(campaign); this.emailRecipients.set(id, recipients);
+    return { ...campaign };
+  }
+
+  async listEmailCampaigns({ page = 1, pageSize = 20 } = {}) { return { items: this.emailCampaigns.slice().reverse().slice((page - 1) * pageSize, page * pageSize), total: this.emailCampaigns.length, page, pageSize }; }
+  async getEmailCampaign(id) { const campaign = this.emailCampaigns.find((item) => Number(item.id) === Number(id)); if (!campaign) throw Object.assign(new Error('email campaign not found'), { statusCode: 404 }); return { ...campaign, recipients: (this.emailRecipients.get(Number(id)) || []).map((item) => ({ ...item, errorMessage: item.errorMessage || '' })) }; }
+  async markEmailCampaignSending(id) { const campaign = await this.getEmailCampaign(id); if (campaign.status !== 'draft') throw Object.assign(new Error('邮件活动不存在或已发送'), { statusCode: 409 }); campaign.status = 'sending'; Object.assign(this.emailCampaigns.find((item) => item.id === campaign.id), campaign); return campaign; }
+  async listPendingEmailRecipients(id) { return (this.emailRecipients.get(Number(id)) || []).filter((item) => item.status === 'pending').map((item) => ({ ...item })); }
+  async updateEmailRecipientStatus(id, status, errorMessage = '') { for (const list of this.emailRecipients.values()) { const item = list.find((entry) => String(entry.id) === String(id)); if (item) { item.status = status; item.errorMessage = errorMessage; if (status === 'sent') item.sentAt = new Date().toISOString(); return; } } }
+  async finishEmailCampaign(id) { const campaign = this.emailCampaigns.find((item) => Number(item.id) === Number(id)); const recipients = this.emailRecipients.get(Number(id)) || []; campaign.sentCount = recipients.filter((item) => item.status === 'sent').length; campaign.failedCount = recipients.filter((item) => item.status === 'failed').length; campaign.skippedCount = recipients.filter((item) => item.status.startsWith('skipped_')).length; campaign.status = campaign.failedCount ? (campaign.sentCount ? 'partial_failed' : 'failed') : 'completed'; campaign.sentAt = new Date().toISOString(); return { ...campaign }; }
 }

@@ -1,0 +1,48 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DemoRepository } from '../src/repositories/demo-repository.mjs';
+import { EmailService, createEmailPreferenceToken, decodeEmailPreferenceToken } from '../src/services/email-service.mjs';
+import { normalizeEmailCampaign, normalizeEmailSettings } from '../src/http/validation.mjs';
+
+const config = { demoMode: true, sessionSecret: 'email-test-secret', emailCredentialsKey: '', finopsPublicUrl: 'https://finops.example.com', sub2apiAuthTimeoutMs: 1000 };
+
+test('email validation keeps SMTP and campaign payloads bounded', () => {
+  assert.equal(normalizeEmailSettings({ enabled: true, smtpHost: 'smtp.example.com', smtpPort: 465, smtpSecure: true, smtpUsername: 'mailer@example.com', smtpPassword: 'secret', fromEmail: 'mailer@example.com' }).smtpPort, 465);
+  assert.throws(() => normalizeEmailSettings({ enabled: true, smtpHost: 'smtp.example.com', smtpPort: 587, smtpUsername: 'mailer@example.com', fromEmail: 'mailer@example.com' }), /smtpPassword/);
+  assert.equal(normalizeEmailCampaign({ subject: '公告', htmlContent: '<p>内容</p>', recipientMode: 'all' }).category, 'announcement');
+  assert.throws(() => normalizeEmailCampaign({ subject: '公告', htmlContent: '<p>内容</p>', recipientMode: 'selected', userIds: [] }), /userIds/);
+});
+
+test('email preference token is signed and rejects tampering', () => {
+  const token = createEmailPreferenceToken({ userId: 7, email: 'user@example.com' }, config, Date.parse('2026-08-01T00:00:00Z'));
+  assert.deepEqual(decodeEmailPreferenceToken(token, config, Date.parse('2026-08-02T00:00:00Z')), { userId: 7, email: 'user@example.com' });
+  assert.equal(decodeEmailPreferenceToken(`${token}x`, config), null);
+  assert.equal(decodeEmailPreferenceToken(token, config, Date.parse('2027-08-02T00:00:00Z')), null);
+});
+
+test('demo email campaign snapshots recipients and keeps preferences FinOps-only', async () => {
+  const repository = new DemoRepository(config);
+  const service = new EmailService(repository, config);
+  await repository.setEmailPreference(1, 'nuohuisong@gmail.com', false);
+  const campaign = await service.createCampaign({ subject: '测试', category: 'announcement', htmlContent: '<script>alert(1)</script><p>你好</p>', textContent: '', recipientMode: 'all', userIds: [] }, 'tester');
+  assert.equal(campaign.totalCount, 8);
+  const result = await service.preferenceAction(new URL(service.preferenceUrl(1, 'nuohuisong@gmail.com', 'subscribe')).searchParams.get('t'), 'subscribe');
+  assert.equal(result.subscribed, true);
+  assert.match(campaign.htmlContent, /<p>你好<\/p>/);
+  assert.doesNotMatch(campaign.htmlContent, /script/);
+});
+
+test('preference confirmation is read-only until the action is submitted', async () => {
+  const repository = new DemoRepository(config);
+  const service = new EmailService(repository, config);
+  const token = new URL(service.preferenceUrl(1, 'nuohuisong@gmail.com', 'unsubscribe')).searchParams.get('t');
+
+  const value = service.decodePreference(token);
+  const confirmation = service.renderPreferenceConfirmation(value, 'unsubscribe');
+  assert.match(confirmation, /method="post"/);
+  assert.equal((await repository.listEmailPreferences()).items[0].subscribed, true);
+
+  const result = await service.preferenceAction(token, 'unsubscribe');
+  assert.equal(result.subscribed, false);
+  assert.equal((await repository.listEmailPreferences()).items[0].subscribed, false);
+});

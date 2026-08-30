@@ -1,0 +1,127 @@
+<script setup lang="ts">
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { Bold, Italic, Link, List, Mail, RefreshCw, Send, Settings2, Underline, X } from 'lucide-vue-next';
+import { get, query, send } from '../api';
+
+type AnyRecord = Record<string, any>;
+const props = defineProps<{ refreshToken?: number }>();
+const emit = defineEmits<{ toast: [message: string] }>();
+const settings = ref<AnyRecord>({});
+const campaigns = ref<AnyRecord>({ items: [] });
+const preferences = ref<AnyRecord>({ items: [] });
+const loading = ref(false);
+const savingSettings = ref(false);
+const sending = ref(false);
+const settingsOpen = ref(false);
+const editorOpen = ref(false);
+const editor = ref<AnyRecord | null>(null);
+const editorElement = ref<HTMLElement | null>(null);
+const testEmail = ref('');
+const preferenceSearch = ref('');
+const preferencePage = ref(1);
+const selectedUsers = ref(new Set<number>());
+const detail = ref<AnyRecord | null>(null);
+
+const settingForm = ref({ enabled: false, smtpHost: '', smtpPort: 587, smtpSecure: false, smtpUsername: '', smtpPassword: '', fromEmail: '', fromName: '', credentialsConfigured: false, clearCredentials: false });
+const preferenceRows = computed(() => preferences.value.items || []);
+const campaignRows = computed(() => campaigns.value.items || []);
+const isConfigured = computed(() => Boolean(settings.value.configured));
+const selectedCount = computed(() => selectedUsers.value.size);
+const campaignStatus: Record<string, string> = { draft: '草稿', sending: '发送中', completed: '已完成', partial_failed: '部分失败', failed: '失败' };
+const categoryLabels: Record<string, string> = { announcement: '公告', promotion: '活动' };
+const recipientRows = computed(() => detail.value?.recipients || []);
+
+function copySettings() {
+  settingForm.value = { enabled: Boolean(settings.value.enabled), smtpHost: settings.value.smtpHost || '', smtpPort: Number(settings.value.smtpPort || 587), smtpSecure: Boolean(settings.value.smtpSecure), smtpUsername: settings.value.smtpUsername || '', smtpPassword: '', fromEmail: settings.value.fromEmail || '', fromName: settings.value.fromName || '', credentialsConfigured: Boolean(settings.value.credentialsConfigured), clearCredentials: false };
+}
+
+async function load() {
+  loading.value = true;
+  try {
+      const [nextSettings, nextCampaigns, nextPreferences] = await Promise.all([
+      get('/email/settings'), get('/email/campaigns?page=1&page_size=20'), get(`/email/preferences?${query({ page: preferencePage.value, page_size: 100, search: preferenceSearch.value })}`),
+    ]);
+    settings.value = nextSettings; campaigns.value = nextCampaigns; preferences.value = nextPreferences; copySettings();
+  } catch (error: any) { emit('toast', error.message); }
+  finally { loading.value = false; }
+}
+
+async function saveSettings() {
+  savingSettings.value = true;
+  try { settings.value = await send('/email/settings', 'PATCH', settingForm.value); copySettings(); settingsOpen.value = false; emit('toast', '邮件服务设置已保存'); }
+  catch (error: any) { emit('toast', error.message); }
+  finally { savingSettings.value = false; }
+}
+
+async function testSmtp() {
+  if (!testEmail.value) { emit('toast', '请输入测试邮箱'); return; }
+  try { await send('/email/settings/test', 'POST', { email: testEmail.value }); emit('toast', '测试邮件已发送'); }
+  catch (error: any) { emit('toast', error.message); }
+}
+
+function openEditor() {
+  editor.value = { subject: '', category: 'announcement', recipientMode: 'all', htmlContent: '<p></p>', textContent: '', userIds: [] };
+  selectedUsers.value = new Set(); editorOpen.value = true;
+  nextTick(() => { if (editorElement.value) editorElement.value.innerHTML = editor.value?.htmlContent || ''; });
+}
+function closeEditor() { editorOpen.value = false; editor.value = null; }
+function format(command: string, value?: string) { document.execCommand(command, false, value); editorElement.value?.focus(); if (editor.value && editorElement.value) editor.value.htmlContent = editorElement.value.innerHTML; }
+function insertLink() { const url = window.prompt('链接地址'); if (url && /^https?:\/\//i.test(url)) format('createLink', url); }
+function syncHtml() { if (editor.value && editorElement.value) editor.value.htmlContent = editorElement.value.innerHTML; }
+function toggleUser(id: number, checked: boolean) { const next = new Set(selectedUsers.value); checked ? next.add(id) : next.delete(id); selectedUsers.value = next; if (editor.value) editor.value.userIds = [...next]; }
+function toggleAllUsers(checked: boolean) { const next = new Set(selectedUsers.value); preferenceRows.value.forEach((row: AnyRecord) => checked ? next.add(Number(row.sourceUserId)) : next.delete(Number(row.sourceUserId))); selectedUsers.value = next; if (editor.value) editor.value.userIds = [...next]; }
+async function searchPreferences() { preferencePage.value = 1; await load(); }
+async function sendCampaign() {
+  if (!editor.value) return;
+  syncHtml();
+  if (editor.value.recipientMode === 'selected' && !selectedUsers.value.size) { emit('toast', '请选择至少一位收件人'); return; }
+  if (!editor.value.subject.trim() || !editor.value.htmlContent.replace(/<[^>]+>/g, '').trim()) { emit('toast', '请填写邮件主题和内容'); return; }
+  if (!window.confirm(`确认立即发送这封${categoryLabels[editor.value.category]}邮件吗？发送后不能撤回。`)) return;
+  sending.value = true;
+  try {
+    const campaign = await send('/email/campaigns', 'POST', { ...editor.value, userIds: [...selectedUsers.value] });
+    const result = await send(`/email/campaigns/${campaign.id}/send`, 'POST', {});
+    closeEditor(); await load(); detail.value = { ...result, recipients: [] }; emit('toast', `发送完成：${result.sentCount || 0} 封成功，${result.failedCount || 0} 封失败`);
+  } catch (error: any) { emit('toast', error.message); }
+  finally { sending.value = false; }
+}
+async function openDetail(campaign: AnyRecord) { try { detail.value = await get(`/email/campaigns/${campaign.id}`); } catch (error: any) { emit('toast', error.message); } }
+async function refreshPreferences() { await load(); }
+function dateTime(value: any) { return value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '--'; }
+function statusLabel(value: any) { return campaignStatus[String(value)] || String(value || '--'); }
+
+watch(() => props.refreshToken, load);
+watch(preferenceSearch, () => { window.setTimeout(() => searchPreferences(), 250); });
+onMounted(load);
+</script>
+
+<template>
+  <div class="page-view email-center-view">
+    <div class="email-header-row">
+      <div><h2 class="section-title">邮件中心</h2><p class="section-subtitle">FinOps 公告与活动邮件</p></div>
+      <div class="email-header-actions"><span class="email-config-status" :class="{ ready: isConfigured }"><span></span>{{ isConfigured ? 'SMTP 已配置' : 'SMTP 未配置' }}</span><button class="secondary-button" type="button" @click="settingsOpen = !settingsOpen"><Settings2 :size="16" />邮件服务设置</button><button class="primary-button" type="button" @click="openEditor"><Mail :size="16" />新建邮件</button></div>
+    </div>
+    <section v-if="settingsOpen" class="panel email-settings-panel">
+      <div class="panel-head"><div><h2>SMTP 设置</h2><p>凭据只保存在 FinOps，和 sub2api 的邮件配置相互独立</p></div><button class="icon-button" title="关闭" aria-label="关闭" @click="settingsOpen = false"><X :size="18" /></button></div>
+      <div class="form-grid email-settings-grid"><label>SMTP 主机<input v-model="settingForm.smtpHost" placeholder="smtp.example.com" /></label><label>端口<input v-model.number="settingForm.smtpPort" type="number" min="1" max="65535" /></label><label>SMTP 用户名<input v-model="settingForm.smtpUsername" autocomplete="off" /></label><label>SMTP 密码<input v-model="settingForm.smtpPassword" type="password" autocomplete="new-password" :placeholder="settingForm.credentialsConfigured ? '已保存，留空保持不变' : '请输入密码'" /></label><label>发件人邮箱<input v-model="settingForm.fromEmail" type="email" /></label><label>发件人名称<input v-model="settingForm.fromName" /></label><label class="checkbox-field"><input v-model="settingForm.enabled" type="checkbox" />启用 FinOps 邮件发送</label><label class="checkbox-field"><input v-model="settingForm.smtpSecure" type="checkbox" />使用 SSL/TLS（通常端口 465）</label></div>
+      <div class="email-settings-footer"><label class="test-email"><span>测试收件箱</span><input v-model="testEmail" type="email" placeholder="your@email.com" /></label><button class="secondary-button" type="button" :disabled="!settings.configured" @click="testSmtp"><Send :size="15" />发送测试邮件</button><span class="spacer"></span><button class="primary-button" type="button" :disabled="savingSettings" @click="saveSettings"><RefreshCw v-if="savingSettings" :size="15" class="spin" /><span v-else>保存设置</span></button></div>
+    </section>
+    <div class="email-metric-grid"><div class="metric-card"><span>邮件活动</span><strong>{{ campaigns.total || 0 }}</strong><small>已保存的公告和活动</small></div><div class="metric-card"><span>订阅用户</span><strong>{{ preferences.summary?.subscribedCount || 0 }}</strong><small>白名单用户不发送</small></div><div class="metric-card"><span>已退订</span><strong>{{ preferences.summary?.unsubscribedCount || 0 }}</strong><small>可通过邮件链接恢复</small></div></div>
+    <section class="panel table-panel">
+      <div class="panel-head"><div><h2>发送记录</h2><p>发送结果只记录在 FinOps，不会写入 sub2api</p></div><button class="icon-button" title="刷新" aria-label="刷新" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button></div>
+      <div class="table-wrap"><table class="email-campaign-table"><thead><tr><th>主题</th><th>类型</th><th>状态</th><th class="number">成功</th><th class="number">失败</th><th class="number">跳过</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="campaign in campaignRows" :key="campaign.id"><td><button class="link-button" @click="openDetail(campaign)">{{ campaign.subject }}</button></td><td><span class="status-pill success">{{ categoryLabels[campaign.category] || campaign.category }}</span></td><td><span class="status-pill" :class="campaign.status === 'completed' ? 'success' : campaign.status === 'partial_failed' || campaign.status === 'failed' ? 'danger' : 'warning'">{{ statusLabel(campaign.status) }}</span></td><td class="number">{{ campaign.sentCount || 0 }}</td><td class="number">{{ campaign.failedCount || 0 }}</td><td class="number">{{ campaign.skippedCount || 0 }}</td><td>{{ dateTime(campaign.createdAt) }}</td><td><button class="small-button" @click="openDetail(campaign)">查看明细</button></td></tr><tr v-if="!loading && !campaignRows.length"><td colspan="8" class="table-empty">暂无邮件活动</td></tr></tbody></table></div>
+    </section>
+    <section class="panel table-panel">
+      <div class="panel-head"><div><h2>用户订阅状态</h2><p>白名单用户始终排除，不受订阅状态影响</p></div><div class="email-preference-actions"><label class="search-box"><Mail :size="16" /><input v-model="preferenceSearch" placeholder="搜索邮箱或用户名" /></label><button class="icon-button" title="刷新订阅状态" aria-label="刷新订阅状态" @click="refreshPreferences"><RefreshCw :size="16" :class="{ spin: loading }" /></button></div></div>
+      <div class="table-wrap"><table class="email-preference-table"><thead><tr><th>用户</th><th>白名单</th><th>FinOps 邮件</th><th>更新时间</th><th>管理</th></tr></thead><tbody><tr v-for="row in preferenceRows" :key="row.sourceUserId"><td><strong>{{ row.email || row.username || `用户 #${row.sourceUserId}` }}</strong><small>ID {{ row.sourceUserId }}<template v-if="row.username && row.username !== row.email"> · {{ row.username }}</template></small></td><td><span class="status-pill" :class="row.excludeFromBalanceStats ? 'warning' : 'success'">{{ row.excludeFromBalanceStats ? '排除' : '正常' }}</span></td><td><span class="status-pill" :class="row.subscribed ? 'success' : 'warning'">{{ row.subscribed ? '已订阅' : '已退订' }}</span></td><td>{{ dateTime(row.unsubscribedAt || row.resubscribedAt) }}</td><td><button class="small-button" :disabled="row.excludeFromBalanceStats" @click="send(`/email/preferences/${row.sourceUserId}`, 'PATCH', { subscribed: !row.subscribed }).then(() => load()).then(() => emit('toast', row.subscribed ? '已退订' : '已恢复订阅')).catch((error: any) => emit('toast', error.message))">{{ row.subscribed ? '退订' : '恢复订阅' }}</button></td></tr><tr v-if="!loading && !preferenceRows.length"><td colspan="5" class="table-empty">暂无用户</td></tr></tbody></table></div>
+      <div v-if="preferences.total > preferences.pageSize" class="pager"><button class="small-button" :disabled="preferencePage <= 1" @click="preferencePage--; load()">上一页</button><span>第 {{ preferencePage }} 页，共 {{ preferences.total }} 位</span><button class="small-button" :disabled="preferencePage * preferences.pageSize >= preferences.total" @click="preferencePage++; load()">下一页</button></div>
+    </section>
+
+    <div v-if="editorOpen && editor" class="modal-layer" @click.self="closeEditor"><section class="modal email-editor-modal"><header><div><h2>新建邮件</h2><p>发送后将立即投递，不能撤回</p></div><button class="icon-button" title="关闭" aria-label="关闭" @click="closeEditor"><X :size="19" /></button></header><div class="email-editor-form"><label>邮件主题<input v-model="editor.subject" maxlength="255" placeholder="填写邮件主题" /></label><div class="email-editor-options"><label>邮件类型<select v-model="editor.category"><option value="announcement">公告</option><option value="promotion">活动</option></select></label><label>收件人<select v-model="editor.recipientMode"><option value="all">全部用户（自动排除白名单和退订用户）</option><option value="selected">指定用户</option></select></label></div><div v-if="editor.recipientMode === 'selected'" class="recipient-picker"><div class="recipient-picker-head"><strong>指定用户</strong><span>已选择 {{ selectedCount }} 位</span><label><input type="checkbox" :checked="preferenceRows.length > 0 && preferenceRows.every((row: AnyRecord) => selectedUsers.has(Number(row.sourceUserId)))" @change="toggleAllUsers(($event.target as HTMLInputElement).checked)" />选择当前列表</label></div><div class="recipient-picker-list"><label v-for="row in preferenceRows" :key="row.sourceUserId" class="recipient-option" :class="{ disabled: row.excludeFromBalanceStats || !row.email }"><input type="checkbox" :checked="selectedUsers.has(Number(row.sourceUserId))" :disabled="row.excludeFromBalanceStats || !row.email" @change="toggleUser(Number(row.sourceUserId), ($event.target as HTMLInputElement).checked)" /><span>{{ row.email || row.username || `用户 #${row.sourceUserId}` }}<small>{{ row.excludeFromBalanceStats ? '白名单' : !row.email ? '无邮箱' : row.subscribed ? '已订阅' : '已退订' }}</small></span></label><span v-if="!preferenceRows.length" class="table-empty">没有匹配用户</span></div></div><div class="rich-editor"><div class="rich-toolbar"><button type="button" title="粗体" @click="format('bold')"><Bold :size="16" /></button><button type="button" title="斜体" @click="format('italic')"><Italic :size="16" /></button><button type="button" title="下划线" @click="format('underline')"><Underline :size="16" /></button><button type="button" title="项目符号" @click="format('insertUnorderedList')"><List :size="16" /></button><button type="button" title="插入链接" @click="insertLink"><Link :size="16" /></button></div><div ref="editorElement" class="rich-editor-content" contenteditable="true" @input="syncHtml"></div></div></div><footer><button class="secondary-button" type="button" @click="closeEditor">取消</button><button class="primary-button" type="button" :disabled="sending" @click="sendCampaign"><RefreshCw v-if="sending" :size="15" class="spin" /><Send v-else :size="15" />{{ sending ? '发送中' : '立即发送' }}</button></footer></section></div>
+    <div v-if="detail" class="modal-layer" @click.self="detail = null"><section class="modal email-detail-modal"><header><div><h2>{{ detail.subject }}</h2><p>{{ categoryLabels[detail.category] || detail.category }} · {{ statusLabel(detail.status) }}</p></div><button class="icon-button" title="关闭" aria-label="关闭" @click="detail = null"><X :size="19" /></button></header><div class="supplier-metrics"><div><span>成功</span><strong>{{ detail.sentCount || 0 }}</strong><small>实际发送</small></div><div><span>失败</span><strong>{{ detail.failedCount || 0 }}</strong><small>未自动重试</small></div><div><span>跳过</span><strong>{{ detail.skippedCount || 0 }}</strong><small>白名单或退订</small></div><div><span>发送时间</span><strong>{{ dateTime(detail.sentAt) }}</strong><small>FinOps 记录</small></div></div><div class="email-preview" v-html="detail.htmlContent"></div><div class="table-wrap compact-table"><table><thead><tr><th>用户</th><th>状态</th><th>说明</th><th>发送时间</th></tr></thead><tbody><tr v-for="row in recipientRows" :key="row.id"><td>{{ row.email }}</td><td><span class="status-pill" :class="row.status === 'sent' ? 'success' : row.status?.startsWith('skipped') ? 'warning' : 'danger'">{{ row.status }}</span></td><td>{{ row.errorMessage || '--' }}</td><td>{{ dateTime(row.sentAt) }}</td></tr><tr v-if="!recipientRows.length"><td colspan="4" class="table-empty">暂无收件人明细</td></tr></tbody></table></div></section></div>
+  </div>
+</template>
+
+<style>
+.email-center-view{gap:18px}.email-header-row{display:flex;align-items:center;justify-content:space-between;gap:16px}.section-title{margin:0;color:var(--ink);font-size:18px}.section-subtitle{margin:4px 0 0;color:var(--muted);font-size:12px}.email-header-actions,.email-preference-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.email-config-status{display:inline-flex;align-items:center;gap:7px;color:#8b6b24;font-size:12px}.email-config-status span{width:8px;height:8px;border-radius:50%;background:#d69a27}.email-config-status.ready{color:#13734f}.email-config-status.ready span{background:#16a36d}.email-settings-panel{padding-bottom:17px}.email-settings-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.checkbox-field{display:flex!important;align-items:center;gap:8px;align-self:end;height:40px}.checkbox-field input{width:16px!important;height:16px!important}.email-settings-footer{display:flex;align-items:flex-end;gap:10px;margin-top:18px}.test-email{display:grid;gap:4px;color:var(--muted);font-size:11px}.test-email input{height:37px;min-width:230px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink)}.spacer{flex:1}.email-metric-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.email-metric-grid .metric-card{min-height:94px}.email-metric-grid .metric-card strong{font-size:22px}.email-campaign-table{min-width:850px!important}.email-preference-table{min-width:840px!important}.email-preference-actions .search-box{width:260px;height:37px}.email-preview{margin:0 0 18px;padding:18px 20px;border:1px solid var(--line);border-radius:7px;background:#fff;line-height:1.6;overflow:auto}.email-preview img{max-width:100%;height:auto}.email-editor-modal{width:min(960px,calc(100vw - 40px))}.email-editor-form{display:grid;gap:15px}.email-editor-form>label,.email-editor-options label{display:grid;gap:6px;color:#53677f;font-size:11px}.email-editor-form input,.email-editor-form select{height:40px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font:inherit}.email-editor-options{display:grid;grid-template-columns:1fr 1fr;gap:13px}.rich-editor{border:1px solid var(--line);border-radius:7px;overflow:hidden;background:#fff}.rich-toolbar{display:flex;gap:3px;padding:7px 8px;border-bottom:1px solid var(--line);background:#f6f9fc}.rich-toolbar button{display:grid;place-items:center;width:32px;height:30px;padding:0;border:1px solid transparent;border-radius:5px;background:transparent;color:#526b87}.rich-toolbar button:hover{border-color:#a9c4e6;background:#edf5ff;color:var(--primary)}.rich-editor-content{min-height:250px;padding:14px 15px;outline:0;color:#273d57;line-height:1.7}.rich-editor-content:focus{box-shadow:inset 0 0 0 2px rgba(23,105,213,.12)}.recipient-picker{padding:12px;border:1px solid var(--line);border-radius:7px;background:#f8fafc}.recipient-picker-head{display:flex;align-items:center;gap:14px;margin-bottom:9px;color:#53677f;font-size:12px}.recipient-picker-head span{color:var(--muted);font-size:11px}.recipient-picker-head label{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px}.recipient-picker-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;max-height:210px;overflow:auto}.recipient-option{display:flex;align-items:flex-start;gap:7px;padding:8px;border:1px solid #e3ebf3;border-radius:6px;background:#fff;cursor:pointer}.recipient-option.disabled{opacity:.52;cursor:not-allowed}.recipient-option span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#324a66;font-size:11px}.recipient-option small{display:block;margin-top:2px;color:var(--muted);font-size:10px}.email-detail-modal{width:min(1100px,calc(100vw - 40px))}.email-detail-modal .supplier-metrics{margin-bottom:18px}@media(max-width:1000px){.email-settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.recipient-picker-list{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:760px){.email-header-row{align-items:flex-start;flex-direction:column}.email-header-actions{width:100%}.email-header-actions button{flex:1}.email-metric-grid{grid-template-columns:1fr}.email-settings-grid,.email-editor-options{grid-template-columns:1fr}.email-settings-footer{align-items:stretch;flex-wrap:wrap}.test-email{flex:1 1 100%}.test-email input{width:100%;min-width:0}.email-settings-footer .spacer{display:none}.email-settings-footer button{flex:1}.email-preference-actions{width:100%}.email-preference-actions .search-box{width:auto;flex:1}.recipient-picker-list{grid-template-columns:1fr}.recipient-picker-head{align-items:flex-start;flex-wrap:wrap}.recipient-picker-head label{margin-left:0;width:100%}.email-editor-modal,.email-detail-modal{width:100%}}
+</style>

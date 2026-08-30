@@ -165,6 +165,7 @@ export function loadConfig(env = process.env) {
     throw new Error('UPSTREAM_USD_TO_CNY_RATE is no longer supported; all FinOps accounting entries must be recorded in CNY');
   }
   const supplierCredentialsKey = env.SUPPLIER_CREDENTIALS_KEY?.trim() || '';
+  const emailCredentialsKey = env.FINOPS_EMAIL_CREDENTIALS_KEY?.trim() || supplierCredentialsKey;
   const syncUsageEnabled = sourceDatabaseUrl !== '' && boolValue(env.SYNC_USAGE_ENABLED, false);
   if (syncUsageEnabled) {
     throw new Error('SYNC_USAGE_ENABLED=true is no longer supported; usage must be queried from the read-only Sub2API administrator API');
@@ -230,6 +231,8 @@ export function loadConfig(env = process.env) {
     runtimeSnapshotIntervalSeconds: intValue(env.RUNTIME_SNAPSHOT_INTERVAL_SECONDS, 10, { min: 5, max: 300 }),
     runtimeLiveRefreshSeconds: intValue(env.RUNTIME_LIVE_REFRESH_SECONDS, 2, { min: 1, max: 30 }),
     supplierCredentialsKey,
+    emailCredentialsKey,
+    finopsPublicUrl: optionalHttpUrl(env.FINOPS_PUBLIC_URL, 'FINOPS_PUBLIC_URL') || (nodeEnv === 'production' ? '' : `http://${env.HOST || '127.0.0.1'}:${env.PORT || 8090}`),
     supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
     supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 3, { min: 3, max: 3600 }),
     supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 30_000, { min: 2_000, max: 30_000 }),
