@@ -3381,7 +3381,8 @@ export class PostgresRepository {
 
   async listEmailCampaigns({ page = 1, pageSize = 20 } = {}) {
     const offset = (page - 1) * pageSize;
-    const result = await this.pool.query(`SELECT c.*,COUNT(r.id)::int AS recipient_rows
+    const result = await this.pool.query(`SELECT c.*,COUNT(r.id)::int AS recipient_rows,
+      COUNT(r.id) FILTER (WHERE r.status='needs_review')::int AS review_count
       FROM ${this.schema}.finops_email_campaigns c LEFT JOIN ${this.schema}.finops_email_recipients r ON r.campaign_id=c.id
       GROUP BY c.id ORDER BY c.created_at DESC,c.id DESC LIMIT $1 OFFSET $2`, [pageSize, offset]);
     const total = await this.pool.query(`SELECT COUNT(*)::int AS count FROM ${this.schema}.finops_email_campaigns`);
@@ -3392,6 +3393,7 @@ export class PostgresRepository {
     return { id: Number(row.id), subject: row.subject, category: row.category, htmlContent: row.html_content,
       textContent: row.text_content, status: row.status, totalCount: Number(row.total_count || 0),
       sentCount: Number(row.sent_count || 0), failedCount: Number(row.failed_count || 0), skippedCount: Number(row.skipped_count || 0),
+      reviewCount: Number(row.review_count || 0),
       createdBy: row.created_by, sentAt: row.sent_at, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
@@ -3416,8 +3418,9 @@ export class PostgresRepository {
     const result = await client.query(`SELECT * FROM ${this.schema}.finops_email_campaigns WHERE id=$1`, [id]);
     if (!result.rowCount) throw httpError('email campaign not found', 404);
     const campaign = this.emailCampaign(result.rows[0]);
-    const recipients = await client.query(`SELECT id,source_user_id,email,status,error_message,sent_at FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 ORDER BY id`, [id]);
-    campaign.recipients = recipients.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: row.email, status: row.status, errorMessage: row.error_message || '', sentAt: row.sent_at }));
+    const recipients = await client.query(`SELECT id,source_user_id,email,status,error_message,sent_at,reviewed_at,reviewed_by FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 ORDER BY id`, [id]);
+    campaign.recipients = recipients.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: row.email, status: row.status, errorMessage: row.error_message || '', sentAt: row.sent_at, reviewedAt: row.reviewed_at, reviewedBy: row.reviewed_by || '' }));
+    campaign.reviewCount = campaign.recipients.filter((row) => row.status === 'needs_review').length;
     return campaign;
   }
 
@@ -3441,37 +3444,71 @@ export class PostgresRepository {
     await this.pool.query(`UPDATE ${this.schema}.finops_email_recipients SET status=$2,error_message=$3,sent_at=CASE WHEN $2='sent' THEN NOW() ELSE sent_at END WHERE id=$1`, [id, status, errorMessage]);
   }
 
-  async finishEmailCampaign(id) {
-    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns c SET
+  async recoverInterruptedEmailCampaigns() {
+    return inTransaction(this.pool, async (client) => {
+      const campaigns = await client.query(`SELECT id FROM ${this.schema}.finops_email_campaigns WHERE status='sending' FOR UPDATE`);
+      for (const row of campaigns.rows) {
+        await client.query(`UPDATE ${this.schema}.finops_email_recipients
+          SET status='needs_review',error_message='发送过程被中断，SMTP 结果待管理员确认'
+          WHERE campaign_id=$1 AND status='pending'`, [row.id]);
+        await client.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='interrupted',updated_at=NOW() WHERE id=$1`, [row.id]);
+        await this.recalculateEmailCampaign(row.id, client, { keepInterrupted: true });
+      }
+      return campaigns.rowCount;
+    });
+  }
+
+  async recalculateEmailCampaign(id, client = this.pool, { keepInterrupted = false } = {}) {
+    const result = await client.query(`UPDATE ${this.schema}.finops_email_campaigns c SET
       sent_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent'),
       failed_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed'),
       skipped_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status LIKE 'skipped_%'),
-      status=CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed')
-        THEN CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent') THEN 'partial_failed' ELSE 'failed' END
+      status=CASE
+        WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','needs_review'))
+          THEN CASE WHEN $2 THEN 'interrupted' ELSE c.status END
+        WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed')
+          THEN CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent') THEN 'partial_failed' ELSE 'failed' END
         ELSE 'completed' END,
-      sent_at=NOW(),updated_at=NOW() WHERE c.id=$1 RETURNING *`, [id]);
+      sent_at=CASE WHEN NOT EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','needs_review')) THEN COALESCE(c.sent_at,NOW()) ELSE c.sent_at END,
+      updated_at=NOW() WHERE c.id=$1 RETURNING *`, [id, keepInterrupted]);
     return this.emailCampaign(result.rows[0]);
+  }
+
+  async confirmEmailRecipientSent(campaignId, recipientId, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const result = await client.query(`UPDATE ${this.schema}.finops_email_recipients
+        SET status='sent',error_message='',sent_at=COALESCE(sent_at,NOW()),reviewed_at=NOW(),reviewed_by=$3
+        WHERE campaign_id=$1 AND id=$2 AND status='needs_review' RETURNING id`, [campaignId, recipientId, actor]);
+      if (!result.rowCount) throw httpError('收件人不是待确认状态，或邮件活动不存在', 409);
+      return this.recalculateEmailCampaign(campaignId, client);
+    });
+  }
+
+  async finishEmailCampaign(id) {
+    return this.recalculateEmailCampaign(id);
   }
 
   async listEmailPreferences({ page = 1, pageSize = 20, search = '', whitelist = 'all', subscribed = 'all' } = {}) {
     const offset = (page - 1) * pageSize;
-    const result = await this.pool.query(`SELECT u.source_user_id,u.email,u.username,u.exclude_from_balance_stats,COALESCE(p.subscribed,TRUE) AS subscribed,p.unsubscribed_at,p.resubscribed_at
+    const result = await this.pool.query(`SELECT u.source_user_id,u.email,u.username,u.exclude_from_balance_stats,
+      (u.source_deleted_at IS NULL AND u.status='active') AS active,
+      COALESCE(p.subscribed,TRUE) AS subscribed,p.unsubscribed_at,p.resubscribed_at
       FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
-      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')||' '||u.source_user_id::text) LIKE '%'||LOWER($1)||'%')
         AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
         AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))
       ORDER BY u.source_user_id LIMIT $4 OFFSET $5`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed, pageSize, offset]);
     const count = await this.pool.query(`SELECT COUNT(*)::int AS count
       FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
-      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')||' '||u.source_user_id::text) LIKE '%'||LOWER($1)||'%')
         AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
         AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed]);
     const summary = await this.pool.query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER (WHERE COALESCE(p.subscribed,TRUE))::int AS subscribed_count,COUNT(*) FILTER (WHERE NOT COALESCE(p.subscribed,TRUE))::int AS unsubscribed_count,COUNT(*) FILTER (WHERE u.exclude_from_balance_stats)::int AS whitelist_count
       FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
-      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')||' '||u.source_user_id::text) LIKE '%'||LOWER($1)||'%')
         AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
         AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed]);
-    return { items: result.rows.map((row) => ({ sourceUserId: Number(row.source_user_id), email: row.email || '', username: row.username || '', excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), subscribed: Boolean(row.subscribed), unsubscribedAt: row.unsubscribed_at, resubscribedAt: row.resubscribed_at })), total: Number(count.rows[0]?.count || 0), page, pageSize, summary: { total: Number(summary.rows[0]?.total || 0), subscribedCount: Number(summary.rows[0]?.subscribed_count || 0), unsubscribedCount: Number(summary.rows[0]?.unsubscribed_count || 0), whitelistCount: Number(summary.rows[0]?.whitelist_count || 0) } };
+    return { items: result.rows.map((row) => ({ sourceUserId: Number(row.source_user_id), email: row.email || '', username: row.username || '', excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), active: Boolean(row.active), subscribed: Boolean(row.subscribed), unsubscribedAt: row.unsubscribed_at, resubscribedAt: row.resubscribed_at })), total: Number(count.rows[0]?.count || 0), page, pageSize, summary: { total: Number(summary.rows[0]?.total || 0), subscribedCount: Number(summary.rows[0]?.subscribed_count || 0), unsubscribedCount: Number(summary.rows[0]?.unsubscribed_count || 0), whitelistCount: Number(summary.rows[0]?.whitelist_count || 0) } };
   }
 
   async getEmailUser(userId) {

@@ -369,3 +369,11 @@ test('FinOps email preference copy is isolated to the FinOps settings table', ()
   assert.match(migration, /preference_confirm_subscribe_button/);
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
+
+test('FinOps interrupted email recovery remains isolated', () => {
+  const migration = read('migrations/063_finops_email_interruption_recovery.sql');
+  assert.match(migration, /needs_review/);
+  assert.match(migration, /interrupted/);
+  assert.match(migration, /reviewed_at/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});

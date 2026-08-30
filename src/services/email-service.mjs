@@ -226,4 +226,8 @@ export class EmailService {
     transport.close();
     return this.repository.finishEmailCampaign(campaignId);
   }
+
+  async recoverInterruptedCampaigns() {
+    return this.repository.recoverInterruptedEmailCampaigns();
+  }
 }

@@ -59,6 +59,28 @@ test('email preference filters combine whitelist and subscription state', async 
   const unsubscribed = await repository.listEmailPreferences({ whitelist: 'included', subscribed: 'false', pageSize: 20 });
   assert.deepEqual(unsubscribed.items.map((item) => item.sourceUserId), [21]);
   assert.equal(unsubscribed.summary.unsubscribedCount, 1);
+
+  const byId = await repository.listEmailPreferences({ search: String(repository.users[1].id) });
+  assert.deepEqual(byId.items.map((item) => item.sourceUserId), [repository.users[1].id]);
+});
+
+test('interrupted campaigns require confirmation and never resend automatically', async () => {
+  const repository = new DemoRepository(config);
+  const service = new EmailService(repository, config);
+  const campaign = await service.createCampaign({ subject: '中断测试', category: 'announcement', htmlContent: '<p>内容</p>', textContent: '', recipientMode: 'selected', userIds: [1] }, 'tester');
+  await repository.markEmailCampaignSending(campaign.id);
+
+  assert.equal(await service.recoverInterruptedCampaigns(), 1);
+  let recovered = await repository.getEmailCampaign(campaign.id);
+  assert.equal(recovered.status, 'interrupted');
+  assert.equal(recovered.reviewCount, 1);
+  assert.equal(recovered.recipients[0].status, 'needs_review');
+
+  await repository.confirmEmailRecipientSent(campaign.id, recovered.recipients[0].id, 'tester');
+  recovered = await repository.getEmailCampaign(campaign.id);
+  assert.equal(recovered.status, 'completed');
+  assert.equal(recovered.sentCount, 1);
+  assert.equal(recovered.recipients[0].reviewedBy, 'tester');
 });
 
 test('subscription copy is customizable without changing signed preference links', () => {
