@@ -69,6 +69,7 @@ test('interrupted campaigns require confirmation and never resend automatically'
   const service = new EmailService(repository, config);
   const campaign = await service.createCampaign({ subject: '中断测试', category: 'announcement', htmlContent: '<p>内容</p>', textContent: '', recipientMode: 'selected', userIds: [1] }, 'tester');
   await repository.markEmailCampaignSending(campaign.id);
+  await repository.markEmailRecipientSending((await repository.getEmailCampaign(campaign.id)).recipients[0].id);
 
   assert.equal(await service.recoverInterruptedCampaigns(), 1);
   let recovered = await repository.getEmailCampaign(campaign.id);
@@ -81,6 +82,23 @@ test('interrupted campaigns require confirmation and never resend automatically'
   assert.equal(recovered.status, 'completed');
   assert.equal(recovered.sentCount, 1);
   assert.equal(recovered.recipients[0].reviewedBy, 'tester');
+});
+
+test('new delivery protocol preserves recipients that were not attempted', async () => {
+  const repository = new DemoRepository(config);
+  const service = new EmailService(repository, config);
+  const campaign = await service.createCampaign({ subject: '后台发送', category: 'announcement', htmlContent: '<p>内容</p>', textContent: '', recipientMode: 'selected', userIds: [1, 21] }, 'tester');
+  await repository.markEmailCampaignSending(campaign.id);
+  const recipients = (await repository.getEmailCampaign(campaign.id)).recipients;
+  await repository.markEmailRecipientSending(recipients[0].id);
+
+  await service.recoverInterruptedCampaigns();
+  const recovered = await repository.getEmailCampaign(campaign.id);
+  assert.equal(recovered.status, 'interrupted');
+  assert.equal(recovered.reviewCount, 1);
+  assert.equal(recovered.pendingCount, 1);
+  assert.equal(recovered.recipients[0].status, 'needs_review');
+  assert.equal(recovered.recipients[1].status, 'pending');
 });
 
 test('subscription copy is customizable without changing signed preference links', () => {

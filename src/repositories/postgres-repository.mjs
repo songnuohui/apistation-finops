@@ -3382,7 +3382,8 @@ export class PostgresRepository {
   async listEmailCampaigns({ page = 1, pageSize = 20 } = {}) {
     const offset = (page - 1) * pageSize;
     const result = await this.pool.query(`SELECT c.*,COUNT(r.id)::int AS recipient_rows,
-      COUNT(r.id) FILTER (WHERE r.status='needs_review')::int AS review_count
+      COUNT(r.id) FILTER (WHERE r.status='needs_review')::int AS review_count,
+      COUNT(r.id) FILTER (WHERE r.status='pending')::int AS pending_count
       FROM ${this.schema}.finops_email_campaigns c LEFT JOIN ${this.schema}.finops_email_recipients r ON r.campaign_id=c.id
       GROUP BY c.id ORDER BY c.created_at DESC,c.id DESC LIMIT $1 OFFSET $2`, [pageSize, offset]);
     const total = await this.pool.query(`SELECT COUNT(*)::int AS count FROM ${this.schema}.finops_email_campaigns`);
@@ -3393,7 +3394,7 @@ export class PostgresRepository {
     return { id: Number(row.id), subject: row.subject, category: row.category, htmlContent: row.html_content,
       textContent: row.text_content, status: row.status, totalCount: Number(row.total_count || 0),
       sentCount: Number(row.sent_count || 0), failedCount: Number(row.failed_count || 0), skippedCount: Number(row.skipped_count || 0),
-      reviewCount: Number(row.review_count || 0),
+      reviewCount: Number(row.review_count || 0), pendingCount: Number(row.pending_count || 0),
       createdBy: row.created_by, sentAt: row.sent_at, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
@@ -3421,12 +3422,22 @@ export class PostgresRepository {
     const recipients = await client.query(`SELECT id,source_user_id,email,status,error_message,sent_at,reviewed_at,reviewed_by FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 ORDER BY id`, [id]);
     campaign.recipients = recipients.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: row.email, status: row.status, errorMessage: row.error_message || '', sentAt: row.sent_at, reviewedAt: row.reviewed_at, reviewedBy: row.reviewed_by || '' }));
     campaign.reviewCount = campaign.recipients.filter((row) => row.status === 'needs_review').length;
+    campaign.pendingCount = campaign.recipients.filter((row) => row.status === 'pending').length;
     return campaign;
   }
 
   async markEmailCampaignSending(id) {
-    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='sending',updated_at=NOW() WHERE id=$1 AND status='draft' RETURNING *`, [id]);
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='sending',delivery_version=2,updated_at=NOW() WHERE id=$1 AND status='draft' RETURNING *`, [id]);
     if (!result.rowCount) throw httpError('邮件活动不存在或已发送', 409);
+    return this.emailCampaign(result.rows[0]);
+  }
+
+  async resumeEmailCampaign(id) {
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='sending',delivery_version=2,updated_at=NOW()
+      WHERE id=$1 AND status='interrupted' AND EXISTS(
+        SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='pending'
+      ) RETURNING *`, [id]);
+    if (!result.rowCount) throw httpError('没有可以继续发送的未尝试收件人', 409);
     return this.emailCampaign(result.rows[0]);
   }
 
@@ -3440,21 +3451,37 @@ export class PostgresRepository {
     return result.rows.map((row) => ({ id: Number(row.id), sourceUserId: Number(row.source_user_id), email: String(row.email || '').trim().toLowerCase(), excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), active: Boolean(row.active), subscribed: Boolean(row.subscribed) }));
   }
 
+  async markEmailRecipientSending(id) {
+    const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_recipients
+      SET status='sending',error_message='' WHERE id=$1 AND status='pending' RETURNING id`, [id]);
+    return Boolean(result.rowCount);
+  }
+
   async updateEmailRecipientStatus(id, status, errorMessage = '') {
-    await this.pool.query(`UPDATE ${this.schema}.finops_email_recipients SET status=$2,error_message=$3,sent_at=CASE WHEN $2='sent' THEN NOW() ELSE sent_at END WHERE id=$1`, [id, status, errorMessage]);
+    await this.pool.query(`UPDATE ${this.schema}.finops_email_recipients SET status=$2::varchar,error_message=$3::text,sent_at=CASE WHEN $2::text='sent' THEN NOW() ELSE sent_at END WHERE id=$1`, [id, status, errorMessage]);
   }
 
   async recoverInterruptedEmailCampaigns() {
     return inTransaction(this.pool, async (client) => {
-      const campaigns = await client.query(`SELECT id FROM ${this.schema}.finops_email_campaigns WHERE status='sending' FOR UPDATE`);
+      const campaigns = await client.query(`SELECT id,delivery_version FROM ${this.schema}.finops_email_campaigns WHERE status='sending' FOR UPDATE`);
       for (const row of campaigns.rows) {
         await client.query(`UPDATE ${this.schema}.finops_email_recipients
           SET status='needs_review',error_message='发送过程被中断，SMTP 结果待管理员确认'
-          WHERE campaign_id=$1 AND status='pending'`, [row.id]);
+          WHERE campaign_id=$1 AND (status='sending' OR ($2=1 AND status='pending'))`, [row.id, row.delivery_version]);
         await client.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='interrupted',updated_at=NOW() WHERE id=$1`, [row.id]);
         await this.recalculateEmailCampaign(row.id, client, { keepInterrupted: true });
       }
       return campaigns.rowCount;
+    });
+  }
+
+  async markEmailCampaignInterrupted(id, errorMessage = '') {
+    return inTransaction(this.pool, async (client) => {
+      await client.query(`UPDATE ${this.schema}.finops_email_recipients
+        SET status='needs_review',error_message=$2::text
+        WHERE campaign_id=$1 AND status='sending'`, [id, String(errorMessage || '发送过程被中断，SMTP 结果待管理员确认').slice(0, 1000)]);
+      await client.query(`UPDATE ${this.schema}.finops_email_campaigns SET status='interrupted',updated_at=NOW() WHERE id=$1 AND status='sending'`, [id]);
+      return this.recalculateEmailCampaign(id, client, { keepInterrupted: true });
     });
   }
 
@@ -3464,12 +3491,13 @@ export class PostgresRepository {
       failed_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed'),
       skipped_count=(SELECT COUNT(*) FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status LIKE 'skipped_%'),
       status=CASE
-        WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','needs_review'))
+        WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','sending'))
           THEN CASE WHEN $2 THEN 'interrupted' ELSE c.status END
+        WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='needs_review') THEN 'interrupted'
         WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='failed')
           THEN CASE WHEN EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status='sent') THEN 'partial_failed' ELSE 'failed' END
         ELSE 'completed' END,
-      sent_at=CASE WHEN NOT EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','needs_review')) THEN COALESCE(c.sent_at,NOW()) ELSE c.sent_at END,
+      sent_at=CASE WHEN NOT EXISTS(SELECT 1 FROM ${this.schema}.finops_email_recipients WHERE campaign_id=$1 AND status IN ('pending','sending','needs_review')) THEN COALESCE(c.sent_at,NOW()) ELSE c.sent_at END,
       updated_at=NOW() WHERE c.id=$1 RETURNING *`, [id, keepInterrupted]);
     return this.emailCampaign(result.rows[0]);
   }

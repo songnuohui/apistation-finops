@@ -176,55 +176,84 @@ export class EmailService {
     transport.close();
   }
 
-  async sendCampaign(campaignId) {
+  async emailTransportSettings() {
     const settings = await this.repository.getEmailSettings({ includeCredentials: true });
     if (!settings.enabled || !settings.smtpHost || !settings.fromEmail || !settings.credentialsCiphertext) {
       throw Object.assign(new Error('请先启用并完整配置 FinOps SMTP'), { statusCode: 400 });
     }
     const password = this.decryptPassword(settings.credentialsCiphertext);
     if (!password) throw Object.assign(new Error('SMTP 密码尚未配置'), { statusCode: 400 });
-    const campaign = await this.repository.markEmailCampaignSending(campaignId);
+    return { settings, password };
+  }
+
+  async sendCampaign(campaignId, { resume = false } = {}) {
+    const { settings, password } = await this.emailTransportSettings();
+    const campaign = resume
+      ? await this.repository.resumeEmailCampaign(campaignId)
+      : await this.repository.markEmailCampaignSending(campaignId);
+    return this.deliverCampaign(campaignId, campaign, settings, password);
+  }
+
+  async deliverCampaign(campaignId, campaign, settings, password) {
     const transport = nodemailer.createTransport({
       host: settings.smtpHost, port: Number(settings.smtpPort), secure: Boolean(settings.smtpSecure),
       auth: { user: settings.smtpUsername, pass: password },
       connectionTimeout: this.config.sub2apiAuthTimeoutMs,
     });
-    const recipients = await this.repository.listPendingEmailRecipients(campaignId);
-    for (const recipient of recipients) {
-      if (recipient.excludeFromBalanceStats) {
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_whitelist', '白名单用户');
-        continue;
+    try {
+      const recipients = await this.repository.listPendingEmailRecipients(campaignId);
+      for (const recipient of recipients) {
+        if (recipient.excludeFromBalanceStats) {
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_whitelist', '白名单用户');
+          continue;
+        }
+        if (!recipient.active) {
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_inactive', '用户已停用或删除');
+          continue;
+        }
+        if (!recipient.subscribed) {
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_unsubscribed', '用户已退订');
+          continue;
+        }
+        if (!EMAIL_RE.test(recipient.email)) {
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_invalid', '邮箱格式无效');
+          continue;
+        }
+        const claimed = await this.repository.markEmailRecipientSending(recipient.id);
+        if (!claimed) continue;
+        try {
+          const html = this.wrapHtml(campaign.htmlContent, recipient.sourceUserId, recipient.email, settings);
+          const copy = preferenceCopy(settings);
+          await transport.sendMail({
+            from: { address: settings.fromEmail, name: settings.fromName || undefined },
+            to: recipient.email,
+            subject: campaign.subject,
+            html,
+            text: `${campaign.textContent || htmlToText(campaign.htmlContent)}\n\n${copy.footerText}\n${copy.unsubscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}\n${copy.subscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'subscribe')}`,
+            headers: { 'List-Unsubscribe': `<${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}>` },
+          });
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'sent', '');
+        } catch (error) {
+          await this.repository.updateEmailRecipientStatus(recipient.id, 'failed', String(error?.message || error).slice(0, 1000));
+        }
       }
-      if (!recipient.active) {
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_inactive', '用户已停用或删除');
-        continue;
-      }
-      if (!recipient.subscribed) {
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_unsubscribed', '用户已退订');
-        continue;
-      }
-      if (!EMAIL_RE.test(recipient.email)) {
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'skipped_invalid', '邮箱格式无效');
-        continue;
-      }
-      try {
-        const html = this.wrapHtml(campaign.htmlContent, recipient.sourceUserId, recipient.email, settings);
-        const copy = preferenceCopy(settings);
-        await transport.sendMail({
-          from: { address: settings.fromEmail, name: settings.fromName || undefined },
-          to: recipient.email,
-          subject: campaign.subject,
-          html,
-          text: `${campaign.textContent || htmlToText(campaign.htmlContent)}\n\n${copy.footerText}\n${copy.unsubscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}\n${copy.subscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'subscribe')}`,
-          headers: { 'List-Unsubscribe': `<${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}>` },
-        });
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'sent', '');
-      } catch (error) {
-        await this.repository.updateEmailRecipientStatus(recipient.id, 'failed', String(error?.message || error).slice(0, 1000));
-      }
+      return this.repository.finishEmailCampaign(campaignId);
+    } catch (error) {
+      try { await this.repository.markEmailCampaignInterrupted(campaignId); } catch (recoveryError) { console.error('[email recovery]', recoveryError); }
+      throw error;
+    } finally {
+      transport.close();
     }
-    transport.close();
-    return this.repository.finishEmailCampaign(campaignId);
+  }
+
+  async queueCampaign(campaignId, { resume = false } = {}) {
+    const { settings, password } = await this.emailTransportSettings();
+    const campaign = resume
+      ? await this.repository.resumeEmailCampaign(campaignId)
+      : await this.repository.markEmailCampaignSending(campaignId);
+    setImmediate(() => this.deliverCampaign(campaignId, campaign, settings, password)
+      .catch((error) => console.error('[email delivery]', error)));
+    return campaign;
   }
 
   async recoverInterruptedCampaigns() {

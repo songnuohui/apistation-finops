@@ -377,3 +377,10 @@ test('FinOps interrupted email recovery remains isolated', () => {
   assert.match(migration, /reviewed_at/);
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
+
+test('FinOps background email delivery state remains isolated', () => {
+  const migration = read('migrations/064_finops_email_background_delivery.sql');
+  assert.match(migration, /delivery_version/);
+  assert.match(migration, /'sending'/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});
