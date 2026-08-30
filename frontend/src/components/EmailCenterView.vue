@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Bold, Image, Italic, Link, List, Mail, RefreshCw, Search, Send, Settings2, Underline, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
 
@@ -31,6 +31,7 @@ const selectedUsers = ref(new Set<number>());
 const detail = ref<AnyRecord | null>(null);
 let preferenceSearchTimer: number | undefined;
 let recipientSearchTimer: number | undefined;
+let deliveryRefreshTimer: number | undefined;
 
 const settingForm = ref({ enabled: false, smtpHost: '', smtpPort: 587, smtpSecure: false, smtpUsername: '', smtpPassword: '', fromEmail: '', fromName: '', footerText: '', unsubscribeLabel: '', subscribeLabel: '', unsubscribedTitle: '', unsubscribedDescription: '', subscribedTitle: '', subscribedDescription: '', confirmUnsubscribeTitle: '', confirmUnsubscribeDescription: '', confirmUnsubscribeButton: '', confirmSubscribeTitle: '', confirmSubscribeDescription: '', confirmSubscribeButton: '', credentialsConfigured: false, clearCredentials: false });
 const preferenceRows = computed(() => preferences.value.items || []);
@@ -144,6 +145,8 @@ watch([preferenceSearch, preferenceWhitelist, preferenceSubscribed], schedulePre
 watch(recipientSearch, scheduleRecipientSearch);
 watch(() => editor.value?.recipientMode, (mode) => { if (mode === 'selected') { recipientPage.value = 1; loadRecipientOptions(); } });
 onMounted(load);
+onMounted(() => { deliveryRefreshTimer = window.setInterval(() => { if (!loading.value && campaignRows.value.some((row: AnyRecord) => row.status === 'sending')) load(); }, 3000); });
+onBeforeUnmount(() => { if (deliveryRefreshTimer) window.clearInterval(deliveryRefreshTimer); if (preferenceSearchTimer) window.clearTimeout(preferenceSearchTimer); if (recipientSearchTimer) window.clearTimeout(recipientSearchTimer); });
 </script>
 
 <template>
