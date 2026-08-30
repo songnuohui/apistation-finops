@@ -361,3 +361,11 @@ test('FinOps email center remains isolated and stores no plaintext SMTP password
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(migration, /smtp_password\s+(?:TEXT|VARCHAR)/i);
 });
+
+test('FinOps email preference copy is isolated to the FinOps settings table', () => {
+  const migration = read('migrations/062_finops_email_preference_copy.sql');
+  assert.match(migration, /ALTER TABLE .*finops_email_settings/);
+  assert.match(migration, /preference_footer_text/);
+  assert.match(migration, /preference_confirm_subscribe_button/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+});

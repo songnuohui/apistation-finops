@@ -3348,6 +3348,13 @@ export class PostgresRepository {
       enabled: Boolean(row.enabled), smtpHost: row.smtp_host || '', smtpPort: Number(row.smtp_port || 587),
       smtpSecure: Boolean(row.smtp_secure), smtpUsername: row.smtp_username || '', fromEmail: row.from_email || '',
       fromName: row.from_name || '', credentialsConfigured: Boolean(row.smtp_credentials_ciphertext),
+      footerText: row.preference_footer_text || '', unsubscribeLabel: row.preference_unsubscribe_label || '',
+      subscribeLabel: row.preference_subscribe_label || '', unsubscribedTitle: row.preference_unsubscribed_title || '',
+      unsubscribedDescription: row.preference_unsubscribed_description || '', subscribedTitle: row.preference_subscribed_title || '',
+      subscribedDescription: row.preference_subscribed_description || '', confirmUnsubscribeTitle: row.preference_confirm_unsubscribe_title || '',
+      confirmUnsubscribeDescription: row.preference_confirm_unsubscribe_description || '', confirmUnsubscribeButton: row.preference_confirm_unsubscribe_button || '',
+      confirmSubscribeTitle: row.preference_confirm_subscribe_title || '', confirmSubscribeDescription: row.preference_confirm_subscribe_description || '',
+      confirmSubscribeButton: row.preference_confirm_subscribe_button || '',
       credentialsCiphertext: includeCredentials ? row.smtp_credentials_ciphertext || '' : undefined,
       updatedAt: row.updated_at || null, updatedBy: row.updated_by || '',
     };
@@ -3356,9 +3363,19 @@ export class PostgresRepository {
   async updateEmailSettings(input, ciphertext, actor = 'admin') {
     const result = await this.pool.query(`UPDATE ${this.schema}.finops_email_settings SET
       enabled=$1,smtp_host=$2,smtp_port=$3,smtp_secure=$4,smtp_username=$5,
-      smtp_credentials_ciphertext=$6,from_email=$7,from_name=$8,updated_by=$9,updated_at=NOW() WHERE id=1
+      smtp_credentials_ciphertext=$6,from_email=$7,from_name=$8,
+      preference_footer_text=$9,preference_unsubscribe_label=$10,preference_subscribe_label=$11,
+      preference_unsubscribed_title=$12,preference_unsubscribed_description=$13,
+      preference_subscribed_title=$14,preference_subscribed_description=$15,
+      preference_confirm_unsubscribe_title=$16,preference_confirm_unsubscribe_description=$17,
+      preference_confirm_unsubscribe_button=$18,preference_confirm_subscribe_title=$19,
+      preference_confirm_subscribe_description=$20,preference_confirm_subscribe_button=$21,
+      updated_by=$22,updated_at=NOW() WHERE id=1
       RETURNING *`, [input.enabled, input.smtpHost, input.smtpPort, input.smtpSecure, input.smtpUsername,
-      ciphertext || '', input.fromEmail, input.fromName, actor]);
+      ciphertext || '', input.fromEmail, input.fromName, input.footerText, input.unsubscribeLabel, input.subscribeLabel,
+      input.unsubscribedTitle, input.unsubscribedDescription, input.subscribedTitle, input.subscribedDescription,
+      input.confirmUnsubscribeTitle, input.confirmUnsubscribeDescription, input.confirmUnsubscribeButton,
+      input.confirmSubscribeTitle, input.confirmSubscribeDescription, input.confirmSubscribeButton, actor]);
     return this.getEmailSettings();
   }
 

@@ -4,6 +4,28 @@ import { SupplierCredentialVault } from './supplier-credentials.mjs';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+export const DEFAULT_EMAIL_PREFERENCE_COPY = Object.freeze({
+  footerText: '这是 FinOps 公告/活动邮件。',
+  unsubscribeLabel: '退订 FinOps 邮件',
+  subscribeLabel: '重新订阅 FinOps 邮件',
+  unsubscribedTitle: '已退订 FinOps 邮件',
+  unsubscribedDescription: '之后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。',
+  subscribedTitle: '已重新订阅 FinOps 邮件',
+  subscribedDescription: '之后将继续接收 FinOps 的公告和活动邮件。',
+  confirmUnsubscribeTitle: '确认退订 FinOps 邮件',
+  confirmUnsubscribeDescription: '确认后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。',
+  confirmUnsubscribeButton: '确认退订',
+  confirmSubscribeTitle: '确认重新订阅 FinOps 邮件',
+  confirmSubscribeDescription: '确认后将继续接收 FinOps 的公告和活动邮件。',
+  confirmSubscribeButton: '确认重新订阅',
+});
+
+function preferenceCopy(settings = {}) {
+  return Object.fromEntries(Object.entries(DEFAULT_EMAIL_PREFERENCE_COPY).map(([key, fallback]) => [
+    key, String(settings?.[key] ?? '').trim() || fallback,
+  ]));
+}
+
 function sign(value, secret) {
   return crypto.createHmac('sha256', secret || 'finops-email-preferences-demo').update(value).digest('base64url');
 }
@@ -74,6 +96,7 @@ export class EmailService {
       fromEmail: settings?.fromEmail || '',
       fromName: settings?.fromName || '',
       credentialsConfigured: Boolean(settings?.credentialsConfigured),
+      ...preferenceCopy(settings),
       updatedAt: settings?.updatedAt || null,
     };
   }
@@ -106,20 +129,22 @@ export class EmailService {
 
   decodePreference(token) { return decodeEmailPreferenceToken(token, this.config); }
 
-  renderPreferencePage(result) {
-    const title = result.subscribed ? '已重新订阅 FinOps 邮件' : '已退订 FinOps 邮件';
-    const detail = result.subscribed ? '之后将继续接收 FinOps 的公告和活动邮件。' : '之后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。';
+  renderPreferencePage(result, settings = {}) {
+    const copy = preferenceCopy(settings);
+    const title = result.subscribed ? copy.subscribedTitle : copy.unsubscribedTitle;
+    const detail = result.subscribed ? copy.subscribedDescription : copy.unsubscribedDescription;
     const oppositeAction = result.subscribed ? 'unsubscribe' : 'subscribe';
-    const oppositeLabel = result.subscribed ? '退订 FinOps 邮件' : '重新订阅 FinOps 邮件';
+    const oppositeLabel = result.subscribed ? copy.unsubscribeLabel : copy.subscribeLabel;
     const token = createEmailPreferenceToken({ userId: result.sourceUserId, email: result.email }, this.config);
     return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{margin:0;background:#f3f6fa;color:#17263d;font:16px/1.6 Arial,sans-serif}.box{max-width:520px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #dbe5f0;border-radius:10px;box-shadow:0 12px 35px #203b5d12}h1{font-size:22px;margin:0 0 12px}p{color:#607087}a{color:#1769d5}</style></head><body><main class="box"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p><p><a href="/email/preferences?action=${oppositeAction}&t=${encodeURIComponent(token)}">${escapeHtml(oppositeLabel)}</a></p></main></body></html>`;
   }
 
-  renderPreferenceConfirmation(value, action) {
+  renderPreferenceConfirmation(value, action, settings = {}) {
+    const copy = preferenceCopy(settings);
     const subscribe = action === 'subscribe';
-    const title = subscribe ? '确认重新订阅 FinOps 邮件' : '确认退订 FinOps 邮件';
-    const detail = subscribe ? '确认后将继续接收 FinOps 的公告和活动邮件。' : '确认后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。';
-    const label = subscribe ? '确认重新订阅' : '确认退订';
+    const title = subscribe ? copy.confirmSubscribeTitle : copy.confirmUnsubscribeTitle;
+    const detail = subscribe ? copy.confirmSubscribeDescription : copy.confirmUnsubscribeDescription;
+    const label = subscribe ? copy.confirmSubscribeButton : copy.confirmUnsubscribeButton;
     const token = createEmailPreferenceToken(value, this.config);
     return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{margin:0;background:#f3f6fa;color:#17263d;font:16px/1.6 Arial,sans-serif}.box{max-width:520px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #dbe5f0;border-radius:10px;box-shadow:0 12px 35px #203b5d12}h1{font-size:22px;margin:0 0 12px}p{color:#607087}button{padding:10px 18px;border:0;border-radius:7px;background:#1769d5;color:#fff;font-size:15px;cursor:pointer}</style></head><body><main class="box"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p><form method="post" action="/email/preferences?action=${action}&t=${encodeURIComponent(token)}"><button type="submit">${escapeHtml(label)}</button></form></main></body></html>`;
   }
@@ -130,11 +155,12 @@ export class EmailService {
     return `${base}/email/preferences?action=${action}&t=${encodeURIComponent(token)}`;
   }
 
-  wrapHtml(html, userId, email) {
+  wrapHtml(html, userId, email, settings = {}) {
+    const copy = preferenceCopy(settings);
     const safe = stripUnsafeMarkup(html);
     const unsubscribe = this.preferenceUrl(userId, email, 'unsubscribe');
     const subscribe = this.preferenceUrl(userId, email, 'subscribe');
-    return `${safe}<hr style="margin-top:32px;border:0;border-top:1px solid #e5e7eb"><p style="font:12px/1.6 Arial,sans-serif;color:#6b7280">这是 FinOps 公告/活动邮件。<a href="${unsubscribe}">退订 FinOps 邮件</a> · <a href="${subscribe}">重新订阅</a></p>`;
+    return `${safe}<hr style="margin-top:32px;border:0;border-top:1px solid #e5e7eb"><p style="font:12px/1.6 Arial,sans-serif;color:#6b7280">${escapeHtml(copy.footerText)} <a href="${unsubscribe}">${escapeHtml(copy.unsubscribeLabel)}</a> · <a href="${subscribe}">${escapeHtml(copy.subscribeLabel)}</a></p>`;
   }
 
   async test(settings, to) {
@@ -182,13 +208,14 @@ export class EmailService {
         continue;
       }
       try {
-        const html = this.wrapHtml(campaign.htmlContent, recipient.sourceUserId, recipient.email);
+        const html = this.wrapHtml(campaign.htmlContent, recipient.sourceUserId, recipient.email, settings);
+        const copy = preferenceCopy(settings);
         await transport.sendMail({
           from: { address: settings.fromEmail, name: settings.fromName || undefined },
           to: recipient.email,
           subject: campaign.subject,
           html,
-          text: `${campaign.textContent || htmlToText(campaign.htmlContent)}\n\nFinOps 邮件设置：\n退订：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}\n重新订阅：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'subscribe')}`,
+          text: `${campaign.textContent || htmlToText(campaign.htmlContent)}\n\n${copy.footerText}\n${copy.unsubscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}\n${copy.subscribeLabel}：${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'subscribe')}`,
           headers: { 'List-Unsubscribe': `<${this.preferenceUrl(recipient.sourceUserId, recipient.email, 'unsubscribe')}>` },
         });
         await this.repository.updateEmailRecipientStatus(recipient.id, 'sent', '');

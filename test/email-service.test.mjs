@@ -60,3 +60,28 @@ test('email preference filters combine whitelist and subscription state', async 
   assert.deepEqual(unsubscribed.items.map((item) => item.sourceUserId), [21]);
   assert.equal(unsubscribed.summary.unsubscribedCount, 1);
 });
+
+test('subscription copy is customizable without changing signed preference links', () => {
+  const repository = new DemoRepository(config);
+  const service = new EmailService(repository, config);
+  const settings = {
+    footerText: '品牌通知',
+    unsubscribeLabel: '停止接收',
+    subscribeLabel: '继续接收',
+    unsubscribedTitle: '你已停止接收',
+    unsubscribedDescription: '退订成功。',
+    subscribedTitle: '你已恢复接收',
+    subscribedDescription: '订阅成功。',
+    confirmUnsubscribeTitle: '确定停止接收？',
+    confirmUnsubscribeDescription: '确认后不再发送。',
+    confirmUnsubscribeButton: '确认停止',
+    confirmSubscribeTitle: '确定继续接收？',
+    confirmSubscribeDescription: '确认后继续发送。',
+    confirmSubscribeButton: '确认继续',
+  };
+  const token = new URL(service.preferenceUrl(1, 'nuohuisong@gmail.com', 'unsubscribe')).searchParams.get('t');
+  assert.match(service.renderPreferenceConfirmation(service.decodePreference(token), 'unsubscribe', settings), /确定停止接收？/);
+  assert.match(service.renderPreferencePage({ sourceUserId: 1, email: 'nuohuisong@gmail.com', subscribed: false }, settings), /你已停止接收/);
+  assert.match(service.wrapHtml('<p>公告</p>', 1, 'nuohuisong@gmail.com', settings), /品牌通知/);
+  assert.match(service.wrapHtml('<p>公告</p>', 1, 'nuohuisong@gmail.com', settings), /停止接收/);
+});

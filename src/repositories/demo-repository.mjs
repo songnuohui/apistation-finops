@@ -193,7 +193,7 @@ export class DemoRepository {
     this.accounts = accounts.map((item) => ({ ...item, tags: [...item.tags] }));
     this.cashTransactions = cashTransactions.map((item) => ({ ...item }));
     this.nonCashBalanceCredits = nonCashBalanceCredits.map((item) => ({ ...item }));
-    this.emailSettings = { enabled: false, smtpHost: '', smtpPort: 587, smtpSecure: false, smtpUsername: '', fromEmail: '', fromName: '', credentialsConfigured: false, smtpCredentialsCiphertext: '', updatedAt: null };
+    this.emailSettings = { enabled: false, smtpHost: '', smtpPort: 587, smtpSecure: false, smtpUsername: '', fromEmail: '', fromName: '', credentialsConfigured: false, smtpCredentialsCiphertext: '', footerText: '这是 FinOps 公告/活动邮件。', unsubscribeLabel: '退订 FinOps 邮件', subscribeLabel: '重新订阅 FinOps 邮件', unsubscribedTitle: '已退订 FinOps 邮件', unsubscribedDescription: '之后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。', subscribedTitle: '已重新订阅 FinOps 邮件', subscribedDescription: '之后将继续接收 FinOps 的公告和活动邮件。', confirmUnsubscribeTitle: '确认退订 FinOps 邮件', confirmUnsubscribeDescription: '确认后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。', confirmUnsubscribeButton: '确认退订', confirmSubscribeTitle: '确认重新订阅 FinOps 邮件', confirmSubscribeDescription: '确认后将继续接收 FinOps 的公告和活动邮件。', confirmSubscribeButton: '确认重新订阅', updatedAt: null };
     this.emailPreferences = new Map();
     this.emailCampaigns = [];
     this.emailRecipients = new Map();
@@ -2344,7 +2344,7 @@ export class DemoRepository {
   async getEmailSettings({ includeCredentials = false } = {}) { return { ...this.emailSettings, credentialsCiphertext: includeCredentials ? this.emailSettings.smtpCredentialsCiphertext : undefined }; }
 
   async updateEmailSettings(input, ciphertext) {
-    this.emailSettings = { ...this.emailSettings, enabled: input.enabled, smtpHost: input.smtpHost, smtpPort: input.smtpPort, smtpSecure: input.smtpSecure, smtpUsername: input.smtpUsername, fromEmail: input.fromEmail, fromName: input.fromName, credentialsConfigured: Boolean(ciphertext), smtpCredentialsCiphertext: ciphertext || '', updatedAt: new Date().toISOString() };
+    this.emailSettings = { ...this.emailSettings, enabled: input.enabled, smtpHost: input.smtpHost, smtpPort: input.smtpPort, smtpSecure: input.smtpSecure, smtpUsername: input.smtpUsername, fromEmail: input.fromEmail, fromName: input.fromName, footerText: input.footerText, unsubscribeLabel: input.unsubscribeLabel, subscribeLabel: input.subscribeLabel, unsubscribedTitle: input.unsubscribedTitle, unsubscribedDescription: input.unsubscribedDescription, subscribedTitle: input.subscribedTitle, subscribedDescription: input.subscribedDescription, confirmUnsubscribeTitle: input.confirmUnsubscribeTitle, confirmUnsubscribeDescription: input.confirmUnsubscribeDescription, confirmUnsubscribeButton: input.confirmUnsubscribeButton, confirmSubscribeTitle: input.confirmSubscribeTitle, confirmSubscribeDescription: input.confirmSubscribeDescription, confirmSubscribeButton: input.confirmSubscribeButton, credentialsConfigured: Boolean(ciphertext), smtpCredentialsCiphertext: ciphertext || '', updatedAt: new Date().toISOString() };
     return this.getEmailSettings();
   }
 

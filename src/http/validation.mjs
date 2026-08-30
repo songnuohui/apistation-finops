@@ -18,6 +18,21 @@ const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier
 const SUB2API_SERVICE_AUTH_MODES = new Set(['password', 'api_key']);
 const EMAIL_CATEGORIES = new Set(['announcement', 'promotion']);
 const EMAIL_RECIPIENT_MODES = new Set(['all', 'selected']);
+const EMAIL_PREFERENCE_COPY_DEFAULTS = {
+  footerText: '这是 FinOps 公告/活动邮件。',
+  unsubscribeLabel: '退订 FinOps 邮件',
+  subscribeLabel: '重新订阅 FinOps 邮件',
+  unsubscribedTitle: '已退订 FinOps 邮件',
+  unsubscribedDescription: '之后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。',
+  subscribedTitle: '已重新订阅 FinOps 邮件',
+  subscribedDescription: '之后将继续接收 FinOps 的公告和活动邮件。',
+  confirmUnsubscribeTitle: '确认退订 FinOps 邮件',
+  confirmUnsubscribeDescription: '确认后将不再接收 FinOps 的公告和活动邮件。sub2api 的系统邮件不受影响。',
+  confirmUnsubscribeButton: '确认退订',
+  confirmSubscribeTitle: '确认重新订阅 FinOps 邮件',
+  confirmSubscribeDescription: '确认后将继续接收 FinOps 的公告和活动邮件。',
+  confirmSubscribeButton: '确认重新订阅',
+};
 
 function badRequest(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -533,6 +548,18 @@ export function normalizeEmailSettings(input) {
   const smtpPassword = textValue(input.smtpPassword, 'smtpPassword', { required: false, max: 8192 });
   const fromEmail = emailValue(input.fromEmail, 'fromEmail', { required: enabled });
   const fromName = textValue(input.fromName, 'fromName', { required: false, max: 160 });
+  const copy = {};
+  const copyFields = [
+    ['footerText', 255], ['unsubscribeLabel', 80], ['subscribeLabel', 80],
+    ['unsubscribedTitle', 160], ['unsubscribedDescription', 1000],
+    ['subscribedTitle', 160], ['subscribedDescription', 1000],
+    ['confirmUnsubscribeTitle', 160], ['confirmUnsubscribeDescription', 1000],
+    ['confirmUnsubscribeButton', 80], ['confirmSubscribeTitle', 160],
+    ['confirmSubscribeDescription', 1000], ['confirmSubscribeButton', 80],
+  ];
+  for (const [field, max] of copyFields) {
+    copy[field] = textValue(input[field] ?? EMAIL_PREFERENCE_COPY_DEFAULTS[field], field, { required: false, max });
+  }
   if (enabled && !smtpPassword && input.credentialsConfigured !== true) {
     throw badRequest('smtpPassword is required when no saved password exists');
   }
@@ -545,6 +572,7 @@ export function normalizeEmailSettings(input) {
     smtpPassword,
     fromEmail,
     fromName,
+    ...copy,
     clearCredentials: input.clearCredentials === undefined ? false : booleanValue(input.clearCredentials, 'clearCredentials'),
   };
 }
