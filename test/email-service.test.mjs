@@ -32,7 +32,7 @@ test('demo email campaign snapshots recipients and keeps preferences FinOps-only
   assert.doesNotMatch(campaign.htmlContent, /script/);
 });
 
-test('preference confirmation is read-only until the action is submitted', async () => {
+test('preference links can execute a one-click action while remaining signed', async () => {
   const repository = new DemoRepository(config);
   const service = new EmailService(repository, config);
   const token = new URL(service.preferenceUrl(1, 'nuohuisong@gmail.com', 'unsubscribe')).searchParams.get('t');
@@ -45,6 +45,7 @@ test('preference confirmation is read-only until the action is submitted', async
   const result = await service.preferenceAction(token, 'unsubscribe');
   assert.equal(result.subscribed, false);
   assert.equal((await repository.listEmailPreferences()).items[0].subscribed, false);
+  assert.equal(service.decodePreference(`${token}x`), null);
 });
 
 test('email preference filters combine whitelist and subscription state', async () => {

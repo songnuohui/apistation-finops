@@ -1228,14 +1228,6 @@ const server=http.createServer(async(request,res)=>{
       try {
         const token=url.searchParams.get('t')||'';
         const action=url.searchParams.get('action')||'';
-        if(request.method==='GET'){
-          const value=emailService.decodePreference(token);
-          if(!value||!['subscribe','unsubscribe'].includes(action)) throw Object.assign(new Error('退订链接无效或已过期'),{statusCode:400});
-          const page=Buffer.from(emailService.renderPreferenceConfirmation(value,action,await repository.getEmailSettings()));
-          setHeaders(res);
-          res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Length':page.length});
-          return res.end(page);
-        }
         const result=await emailService.preferenceAction(token,action);
         const page=Buffer.from(emailService.renderPreferencePage(result,await repository.getEmailSettings()));
         setHeaders(res);
