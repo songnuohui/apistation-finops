@@ -263,6 +263,16 @@ function detailPagination(searchParams,prefix){
   });
   return pagination(params);
 }
+function emailPreferenceQuery(searchParams){
+  const pageResult=pagination(searchParams);
+  const rawPageSize=searchParams.get('page_size');
+  if(rawPageSize && !['20','50','100'].includes(rawPageSize))throw Object.assign(new Error('email preference page_size must be 20, 50, or 100'),{statusCode:400});
+  const whitelist=searchParams.get('whitelist')||'all';
+  const subscribed=searchParams.get('subscribed')||'all';
+  if(!['all','included','excluded'].includes(whitelist))throw Object.assign(new Error('invalid email preference whitelist filter'),{statusCode:400});
+  if(!['all','true','false'].includes(subscribed))throw Object.assign(new Error('invalid email preference subscribed filter'),{statusCode:400});
+  return {...pageResult,whitelist,subscribed};
+}
 function userSort(searchParams){
   const sort=searchParams.get('sort')||'userChargeCny';
   const direction=searchParams.get('direction')||'desc';
@@ -356,7 +366,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&emailCampaignId) return json(res,200,await repository.getEmailCampaign(Number(emailCampaignId[1])));
   const emailCampaignSend=/^\/api\/email\/campaigns\/(\d+)\/send$/.exec(url.pathname);
   if(request.method==='POST'&&emailCampaignSend) return json(res,200,await emailService.sendCampaign(Number(emailCampaignSend[1])));
-  if(request.method==='GET'&&url.pathname==='/api/email/preferences') return json(res,200,await repository.listEmailPreferences({ ...page(), search:searchTerm(url.searchParams) }));
+  if(request.method==='GET'&&url.pathname==='/api/email/preferences') return json(res,200,await repository.listEmailPreferences({ ...emailPreferenceQuery(url.searchParams), search:searchTerm(url.searchParams) }));
   const emailPreferenceId=/^\/api\/email\/preferences\/(\d+)$/.exec(url.pathname);
   if(request.method==='PATCH'&&emailPreferenceId){
     const input=await body(request);

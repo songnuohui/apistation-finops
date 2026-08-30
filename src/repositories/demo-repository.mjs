@@ -2348,12 +2348,17 @@ export class DemoRepository {
     return this.getEmailSettings();
   }
 
-  async listEmailPreferences({ page = 1, pageSize = 30, search = '' } = {}) {
+  async listEmailPreferences({ page = 1, pageSize = 20, search = '', whitelist = 'all', subscribed = 'all' } = {}) {
     const term = String(search || '').toLowerCase();
     const items = this.users.filter((user) => `${user.email} ${user.username}`.toLowerCase().includes(term)).map((user) => {
       const preference = this.emailPreferences.get(Number(user.id));
       return { sourceUserId: Number(user.id), email: user.email || '', username: user.username || '', excludeFromBalanceStats: Boolean(user.excludeFromBalanceStats), subscribed: preference?.subscribed !== false, unsubscribedAt: preference?.unsubscribedAt || null, resubscribedAt: preference?.resubscribedAt || null };
-    });
+    }).filter((item) => whitelist === 'all'
+      || (whitelist === 'included' && !item.excludeFromBalanceStats)
+      || (whitelist === 'excluded' && item.excludeFromBalanceStats))
+      .filter((item) => subscribed === 'all'
+        || (subscribed === 'true' && item.subscribed)
+        || (subscribed === 'false' && !item.subscribed));
     return { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize, summary: { total: items.length, subscribedCount: items.filter((item) => item.subscribed).length, unsubscribedCount: items.filter((item) => !item.subscribed).length, whitelistCount: items.filter((item) => item.excludeFromBalanceStats).length } };
   }
 

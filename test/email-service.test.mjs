@@ -46,3 +46,17 @@ test('preference confirmation is read-only until the action is submitted', async
   assert.equal(result.subscribed, false);
   assert.equal((await repository.listEmailPreferences()).items[0].subscribed, false);
 });
+
+test('email preference filters combine whitelist and subscription state', async () => {
+  const repository = new DemoRepository(config);
+  repository.users[0].excludeFromBalanceStats = true;
+  await repository.setEmailPreference(repository.users[1].id, repository.users[1].email, false);
+
+  const whitelist = await repository.listEmailPreferences({ whitelist: 'excluded' });
+  assert.deepEqual(whitelist.items.map((item) => item.sourceUserId), [1]);
+  assert.equal(whitelist.summary.whitelistCount, 1);
+
+  const unsubscribed = await repository.listEmailPreferences({ whitelist: 'included', subscribed: 'false', pageSize: 20 });
+  assert.deepEqual(unsubscribed.items.map((item) => item.sourceUserId), [21]);
+  assert.equal(unsubscribed.summary.unsubscribedCount, 1);
+});

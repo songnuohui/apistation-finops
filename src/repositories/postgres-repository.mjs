@@ -3436,14 +3436,24 @@ export class PostgresRepository {
     return this.emailCampaign(result.rows[0]);
   }
 
-  async listEmailPreferences({ page = 1, pageSize = 30, search = '' } = {}) {
+  async listEmailPreferences({ page = 1, pageSize = 20, search = '', whitelist = 'all', subscribed = 'all' } = {}) {
     const offset = (page - 1) * pageSize;
     const result = await this.pool.query(`SELECT u.source_user_id,u.email,u.username,u.exclude_from_balance_stats,COALESCE(p.subscribed,TRUE) AS subscribed,p.unsubscribed_at,p.resubscribed_at
       FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
       WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
-      ORDER BY u.source_user_id LIMIT $2 OFFSET $3`, [search, pageSize, offset]);
-    const count = await this.pool.query(`SELECT COUNT(*)::int AS count FROM ${this.schema}.dim_users u WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')`, [search]);
-    const summary = await this.pool.query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER (WHERE COALESCE(p.subscribed,TRUE))::int AS subscribed_count,COUNT(*) FILTER (WHERE NOT COALESCE(p.subscribed,TRUE))::int AS unsubscribed_count,COUNT(*) FILTER (WHERE u.exclude_from_balance_stats)::int AS whitelist_count FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')`, [search]);
+        AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
+        AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))
+      ORDER BY u.source_user_id LIMIT $4 OFFSET $5`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed, pageSize, offset]);
+    const count = await this.pool.query(`SELECT COUNT(*)::int AS count
+      FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+        AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
+        AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed]);
+    const summary = await this.pool.query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER (WHERE COALESCE(p.subscribed,TRUE))::int AS subscribed_count,COUNT(*) FILTER (WHERE NOT COALESCE(p.subscribed,TRUE))::int AS unsubscribed_count,COUNT(*) FILTER (WHERE u.exclude_from_balance_stats)::int AS whitelist_count
+      FROM ${this.schema}.dim_users u LEFT JOIN ${this.schema}.finops_email_preferences p ON p.source_user_id=u.source_user_id
+      WHERE ($1='' OR LOWER(COALESCE(u.email,'')||' '||COALESCE(u.username,'')) LIKE '%'||LOWER($1)||'%')
+        AND ($2='' OR ($2='included' AND NOT COALESCE(u.exclude_from_balance_stats,FALSE)) OR ($2='excluded' AND COALESCE(u.exclude_from_balance_stats,FALSE)))
+        AND ($3='' OR ($3='true' AND COALESCE(p.subscribed,TRUE)) OR ($3='false' AND NOT COALESCE(p.subscribed,TRUE)))`, [search, whitelist === 'all' ? '' : whitelist, subscribed === 'all' ? '' : subscribed]);
     return { items: result.rows.map((row) => ({ sourceUserId: Number(row.source_user_id), email: row.email || '', username: row.username || '', excludeFromBalanceStats: Boolean(row.exclude_from_balance_stats), subscribed: Boolean(row.subscribed), unsubscribedAt: row.unsubscribed_at, resubscribedAt: row.resubscribed_at })), total: Number(count.rows[0]?.count || 0), page, pageSize, summary: { total: Number(summary.rows[0]?.total || 0), subscribedCount: Number(summary.rows[0]?.subscribed_count || 0), unsubscribedCount: Number(summary.rows[0]?.unsubscribed_count || 0), whitelistCount: Number(summary.rows[0]?.whitelist_count || 0) } };
   }
 
