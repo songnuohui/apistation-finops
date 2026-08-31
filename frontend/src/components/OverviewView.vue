@@ -223,7 +223,9 @@ watch(detailTab, () => { if (detailType.value === 'consumption') { detailPage.va
 onMounted(() => {
   void load();
   void loadRuntime();
-  runtimeTimer = window.setInterval(loadRuntime, 3_000);
+  runtimeTimer = window.setInterval(() => {
+    if (!document.hidden && !runtimeLoading.value) void loadRuntime();
+  }, 10_000);
 });
 onUnmounted(() => {
   loadRequestId += 1;

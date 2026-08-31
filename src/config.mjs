@@ -223,7 +223,7 @@ export function loadConfig(env = process.env) {
     finopsRedisConnectTimeoutMs: intValue(env.FINOPS_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
     dashboardCacheTtlSeconds: intValue(env.DASHBOARD_CACHE_TTL_SECONDS, 5, { min: 1, max: 60 }),
     listCacheTtlSeconds: intValue(env.LIST_CACHE_TTL_SECONDS, 3, { min: 1, max: 60 }),
-    runtimeCacheTtlSeconds: intValue(env.RUNTIME_CACHE_TTL_SECONDS, 2, { min: 1, max: 30 }),
+    runtimeCacheTtlSeconds: intValue(env.RUNTIME_CACHE_TTL_SECONDS, 10, { min: 1, max: 30 }),
     sub2apiRedisUrl: sourceRedisUrl(env.SUB2API_REDIS_URL, 'SUB2API_REDIS_URL'),
     sub2apiRedisConnectTimeoutMs: intValue(env.SUB2API_REDIS_CONNECT_TIMEOUT_MS, 1_500, { min: 250, max: 10_000 }),
     sub2apiRedisRuntimeUserLimit: intValue(env.SUB2API_REDIS_RUNTIME_USER_LIMIT, 500, { min: 1, max: 5_000 }),
