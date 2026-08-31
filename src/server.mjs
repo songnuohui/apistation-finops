@@ -51,8 +51,7 @@ import { ReplenishmentRepository } from './repositories/replenishment-repository
 import { SourceUsageRepository } from './repositories/source-usage-repository.mjs';
 import {
   completeSub2ApiAdministratorTwoFactor,
-  getSub2ApiRuntimeQueueStatus,
-  listSub2ApiAdministratorUserConcurrency,
+  getSub2ApiAdministratorUserConcurrencySnapshot,
   listSub2ApiChannelMonitors,
   listSub2ApiAdminGroups,
   loginSub2ApiAdministrator,
@@ -114,9 +113,14 @@ syncService?.setChannelMonitorReader(({accessToken,authHeaders})=>listSub2ApiCha
 syncService?.setSourceGroupCatalogReader(({accessToken,authHeaders})=>listSub2ApiAdminGroups({accessToken,authHeaders},config));
 syncService?.setSourceGroupCatalogWriter((groups)=>repository.upsertSourceGroupCatalog(groups));
 syncService?.setRuntimeStatusReader(({accessToken,authHeaders})=>Promise.all([
-  getSub2ApiRuntimeQueueStatus({accessToken,authHeaders},config),
-  listSub2ApiAdministratorUserConcurrency({accessToken,authHeaders},config),
-]).then(([queue, users])=>({queue,users})));
+  getSub2ApiAdministratorUserConcurrencySnapshot({accessToken,authHeaders},config),
+]).then(([snapshot])=>({
+  queue: null,
+  users: snapshot.users,
+  usersEnabled: snapshot.enabled,
+  usersSource: 'sub2api_ops_user_concurrency',
+  observedAt: snapshot.observedAt,
+})));
 syncService?.setRuntimeConcurrencyReader(()=>sub2ApiRedisRuntimeReader.listRuntimeConcurrency());
 syncService?.setReadCacheInvalidator(()=>responseCache.invalidate('runtime'));
 supplierMonitorService?.setCostRefreshHandler(async()=>{

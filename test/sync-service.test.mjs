@@ -78,6 +78,43 @@ test('runtime refresh shares an in-flight source read and respects the live refr
   assert.equal(await service.refreshRuntimeSnapshots({ minIntervalMs: 2_000 }), 0);
 });
 
+test('dedicated Sub2API ops concurrency remains authoritative over Redis fallback data', async () => {
+  const service = new SyncService(null, {
+    finopsSchema: 'finops', sourceSchema: 'public', sourceBalanceUnit: 'CNY',
+  }, { warn() {}, error() {}, info() {} });
+  service.setSub2ApiAccessToken('administrator-token');
+  service.setRuntimeStatusReader(async () => ({
+    usersSource: 'sub2api_ops_user_concurrency',
+    usersEnabled: true,
+    observedAt: '2026-08-31T08:30:00Z',
+    users: [{
+      sourceUserId: 41,
+      currentConcurrency: 4,
+      waitingCount: 2,
+      maxConcurrency: 5,
+      loadPercentage: 80,
+    }],
+  }));
+  service.setRuntimeConcurrencyReader(async () => ({
+    users: [{ sourceUserId: 41, currentConcurrency: 1, waitingCount: 0 }],
+    accounts: [{ sourceAccountId: 7, currentConcurrency: 3, waitingCount: 1 }],
+  }));
+
+  const result = await service.readLiveRuntime();
+
+  assert.equal(result.usersSource, 'sub2api_ops_user_concurrency');
+  assert.equal(result.usersEnabled, true);
+  assert.equal(result.observedAt, '2026-08-31T08:30:00Z');
+  assert.deepEqual(result.users, [{
+    sourceUserId: 41,
+    currentConcurrency: 4,
+    waitingCount: 2,
+    maxConcurrency: 5,
+    loadPercentage: 80,
+  }]);
+  assert.deepEqual(result.accounts, [{ sourceAccountId: 7, currentConcurrency: 3, waitingCount: 1 }]);
+});
+
 test('channel monitor summaries use operational and degraded checks as available', () => {
   assert.deepEqual(summarizeChannelMonitorGroup([
     { enabled: true, primaryStatus: 'operational', availability7d: 99.5, primaryLatencyMs: 120, primaryPingLatencyMs: 5 },

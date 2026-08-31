@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { Activity, AlertTriangle, BarChart3, ChevronDown, RefreshCw, X } from 'lucide-vue-next';
+import {
+  Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronDown, CircleAlert, Gauge,
+  ListOrdered, RefreshCw, UsersRound, X,
+} from 'lucide-vue-next';
 import { get, query, rangeQuery } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -14,6 +17,9 @@ const runtime = ref<AnyRecord>({});
 const dashboardLoading = ref(false);
 const trendLoading = ref(false);
 const modelsLoading = ref(false);
+const runtimeLoading = ref(false);
+const runtimeError = ref('');
+const runtimeFilter = ref<'all' | 'queued' | 'busy'>('all');
 const detail = ref<AnyRecord | null>(null);
 const detailType = ref<DetailType>(null);
 const detailTab = ref<'users' | 'models'>('users');
@@ -30,7 +36,34 @@ const summary = computed(() => dashboard.value.summary || {});
 const operations = computed(() => summary.value.operations || {});
 const cash = computed(() => summary.value.cash || {});
 const usage = computed(() => summary.value.usage || {});
-const runtimeUsers = computed(() => runtime.value.users || []);
+const runtimeUsers = computed(() => [...(runtime.value.users || [])].sort((a, b) => (
+  Number(b.waitingCount || 0) - Number(a.waitingCount || 0)
+  || Number(b.currentConcurrency || 0) - Number(a.currentConcurrency || 0)
+  || Number(b.usagePercent || 0) - Number(a.usagePercent || 0)
+  || Number(a.id || 0) - Number(b.id || 0)
+)));
+const visibleRuntimeUsers = computed(() => runtimeUsers.value.filter((item) => {
+  if (runtimeFilter.value === 'queued') return Number(item.waitingCount || 0) > 0;
+  if (runtimeFilter.value === 'busy') return Number(item.currentConcurrency || 0) > 0;
+  return true;
+}));
+const runtimeActiveUsers = computed(() => runtimeUsers.value.filter((item) => Number(item.currentConcurrency || 0) > 0));
+const runtimeQueuedUsers = computed(() => runtimeUsers.value.filter((item) => Number(item.waitingCount || 0) > 0));
+const runtimeCurrentConcurrency = computed(() => runtimeUsers.value.reduce((total, item) => total + Number(item.currentConcurrency || 0), 0));
+const runtimeWaitingCount = computed(() => runtimeUsers.value.reduce((total, item) => total + Number(item.waitingCount || 0), 0));
+const runtimeCapacity = computed(() => runtimeUsers.value.reduce((total, item) => total + Number(item.maxConcurrency || 0), 0));
+const runtimeUsagePercent = computed(() => runtimeCapacity.value > 0
+  ? Math.min(100, runtimeCurrentConcurrency.value * 100 / runtimeCapacity.value)
+  : null);
+const runtimeMaxUsagePercent = computed(() => runtimeUsers.value.reduce(
+  (max, item) => Math.max(max, Number(item.usagePercent || 0)),
+  0,
+));
+const runtimeObservedAt = computed(() => runtime.value.observedAt || null);
+const runtimeSource = computed(() => runtime.value.source === 'sub2api_ops_user_concurrency'
+  ? 'Sub2API 运维聚合接口'
+  : runtime.value.source === 'finops_snapshot' ? 'FinOps 快照' : '等待数据源');
+const runtimeIsAvailable = computed(() => runtime.value.source === 'sub2api_ops_user_concurrency' && runtime.value.enabled !== false);
 const totalTokens = computed(() => Number(usage.value.inputTokens || 0) + Number(usage.value.outputTokens || 0) + Number(usage.value.cacheTokens || 0));
 const consumption = computed(() => Number(operations.value.consumptionCny ?? operations.value.userChargeCny ?? 0));
 const totalCost = computed(() => Number(operations.value.effectiveCostCny ?? operations.value.bookedCostCny ?? 0));
@@ -54,9 +87,32 @@ function dateLabel(value: any) { return String(value || '').slice(5); }
 function statusClass(value: any) { return ['priced', 'complete', 'ok'].includes(String(value)) ? 'success' : ['missing', 'failed'].includes(String(value)) ? 'danger' : 'warning'; }
 function notify(message: string) { emit('toast', message); }
 
+function integer(value: any) {
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(Number(value || 0));
+}
+function runtimeStatus(item: AnyRecord) {
+  if (Number(item.waitingCount || 0) > 0) return '排队中';
+  if (Number(item.currentConcurrency || 0) > 0 && Number(item.usagePercent || 0) >= 90) return '接近上限';
+  return '执行中';
+}
+function runtimeStatusClass(item: AnyRecord) {
+  if (Number(item.waitingCount || 0) > 0) return 'warning';
+  if (Number(item.usagePercent || 0) >= 90) return 'danger';
+  return 'success';
+}
+function runtimeBarWidth(item: AnyRecord) {
+  return `${Math.min(100, Math.max(0, Number(item.usagePercent || 0)))}%`;
+}
 async function loadRuntime() {
-  try { runtime.value = await get('/runtime?live=1'); }
-  catch (error: any) { notify(error.message); }
+  runtimeLoading.value = true;
+  runtimeError.value = '';
+  try {
+    runtime.value = await get('/runtime?live=1');
+  } catch (error: any) {
+    runtimeError.value = error.message;
+  } finally {
+    runtimeLoading.value = false;
+  }
 }
 async function load() {
   const requestId = ++loadRequestId;
@@ -187,10 +243,63 @@ onUnmounted(() => {
       <button class="metric-card metric-action good" @click="metricValue('consumption')"><span>毛利率</span><strong>{{ percent(grossMargin) }}</strong><small>毛利 ÷ 实际消费</small></button>
     </div>
     <div class="overview-grid">
-      <section class="panel runtime-panel">
-        <div class="panel-head"><div><h2>实时并发与排队</h2><p>读取 sub2api 实时状态，用户身份来自 FinOps 资料</p></div><Activity :size="20" class="head-icon" /></div>
-        <div class="runtime-summary"><div><span>队列长度</span><strong>{{ compact(runtime.queue?.queueLength) }}</strong></div><div><span>活动工作线程</span><strong>{{ runtime.queue?.activeWorkers ?? '--' }} / {{ runtime.queue?.workerCount ?? '--' }}</strong></div><div><span>当前用户</span><strong>{{ runtimeUsers.length }}</strong></div></div>
-        <div v-if="runtimeUsers.length" class="runtime-list"><div v-for="item in runtimeUsers.slice(0, 8)" :key="item.id" class="runtime-row"><div><span class="identity">{{ item.email || item.username || `用户 #${item.id}` }}</span><small>{{ item.username && item.username !== item.email ? item.username : `ID ${item.id}` }}</small></div><span v-if="item.waitingCount" class="queue-badge">{{ item.waitingCount }} 排队</span><strong>{{ item.currentConcurrency }} 并发</strong></div></div><div v-else class="empty">当前没有执行中的用户请求</div>
+      <section class="panel runtime-panel runtime-panel-modern">
+        <div class="runtime-panel-head">
+          <div class="runtime-panel-title">
+            <span class="runtime-kicker"><Activity :size="13" /> LIVE / SUB2API</span>
+            <h2>实时并发与排队</h2>
+            <p>按用户聚合读取 Sub2API 当前执行中的请求与等待队列</p>
+          </div>
+          <div class="runtime-head-actions">
+            <span class="runtime-live-state" :class="{ offline: !runtimeIsAvailable }"><i></i>{{ runtimeIsAvailable ? '实时连接' : '暂不可用' }}</span>
+            <button class="icon-button" type="button" title="刷新实时并发" aria-label="刷新实时并发" :disabled="runtimeLoading" @click="loadRuntime"><RefreshCw :size="17" :class="{ spin: runtimeLoading }" /></button>
+          </div>
+        </div>
+        <div v-if="runtimeError" class="runtime-error"><CircleAlert :size="16" /><span>{{ runtimeError }}</span></div>
+        <div v-else-if="runtimeLoading && !runtimeUsers.length" class="runtime-empty runtime-loading"><RefreshCw :size="18" class="spin" /><span>正在读取 Sub2API 实时状态</span></div>
+        <template v-else>
+          <div class="runtime-kpi-grid">
+            <div class="runtime-kpi runtime-kpi-blue"><span class="runtime-kpi-label"><Activity :size="14" />当前并发</span><strong>{{ integer(runtimeCurrentConcurrency) }}</strong><small>{{ integer(runtimeActiveUsers.length) }} 个用户正在执行</small></div>
+            <div class="runtime-kpi runtime-kpi-amber"><span class="runtime-kpi-label"><ListOrdered :size="14" />排队请求</span><strong>{{ integer(runtimeWaitingCount) }}</strong><small>{{ integer(runtimeQueuedUsers.length) }} 个用户正在等待</small></div>
+            <div class="runtime-kpi runtime-kpi-green"><span class="runtime-kpi-label"><UsersRound :size="14" />活跃用户</span><strong>{{ integer(runtimeUsers.length) }}</strong><small>{{ integer(runtimeActiveUsers.length) }} 执行 · {{ integer(runtimeQueuedUsers.length) }} 排队</small></div>
+            <div class="runtime-kpi runtime-kpi-violet"><span class="runtime-kpi-label"><Gauge :size="14" />容量占用</span><strong>{{ runtimeUsagePercent === null ? '--' : `${runtimeUsagePercent.toFixed(1)}%` }}</strong><small>{{ integer(runtimeCurrentConcurrency) }} / {{ runtimeCapacity ? integer(runtimeCapacity) : '--' }} 并发槽位</small></div>
+          </div>
+          <div class="runtime-meta">
+            <span><i class="runtime-meta-dot"></i>{{ runtimeSource }}</span>
+            <span v-if="runtimeObservedAt">观测于 {{ dateTime(runtimeObservedAt) }}</span>
+            <span v-if="runtimeMaxUsagePercent >= 90" class="runtime-meta-alert"><CircleAlert :size="13" />最高用户占用 {{ runtimeMaxUsagePercent.toFixed(1) }}%</span>
+          </div>
+          <div class="runtime-users-head">
+            <div><h3>用户实时负载</h3><p>仅展示当前有并发或排队请求的用户，按排队数优先排序</p></div>
+            <div class="runtime-filter" role="group" aria-label="用户实时负载筛选">
+              <button type="button" :class="{ active: runtimeFilter === 'all' }" @click="runtimeFilter = 'all'">全部 {{ runtimeUsers.length }}</button>
+              <button type="button" :class="{ active: runtimeFilter === 'queued' }" @click="runtimeFilter = 'queued'">排队 {{ runtimeQueuedUsers.length }}</button>
+              <button type="button" :class="{ active: runtimeFilter === 'busy' }" @click="runtimeFilter = 'busy'">执行中 {{ runtimeActiveUsers.length }}</button>
+            </div>
+          </div>
+          <div v-if="visibleRuntimeUsers.length" class="runtime-user-viewport">
+            <div class="runtime-user-list">
+              <div v-for="(item, index) in visibleRuntimeUsers" :key="item.id" class="runtime-user-row">
+                <span class="runtime-user-rank">{{ String(index + 1).padStart(2, '0') }}</span>
+                <div class="runtime-user-identity">
+                  <strong>{{ item.email || item.username || `用户 #${item.id}` }}</strong>
+                  <small>{{ item.username && item.username !== item.email ? `${item.username} · ` : '' }}ID {{ item.id }}</small>
+                </div>
+                <div class="runtime-user-load">
+                  <div class="runtime-user-load-head"><span>并发占用</span><strong>{{ integer(item.currentConcurrency) }}<em>/ {{ item.maxConcurrency ? integer(item.maxConcurrency) : '--' }}</em></strong></div>
+                  <div class="runtime-load-track"><i :class="runtimeStatusClass(item)" :style="{ width: runtimeBarWidth(item) }"></i></div>
+                </div>
+                <div class="runtime-user-queue">
+                  <span class="runtime-user-queue-label">等待</span>
+                  <strong :class="{ active: Number(item.waitingCount || 0) > 0 }">{{ integer(item.waitingCount) }}</strong>
+                </div>
+                <div class="runtime-user-status"><span class="status-pill" :class="runtimeStatusClass(item)">{{ runtimeStatus(item) }}</span><small>{{ Number(item.usagePercent || 0).toFixed(1) }}% 占用</small></div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="runtime-empty"><CheckCircle2 :size="20" /><div><strong>{{ runtimeFilter === 'all' ? '当前没有实时请求' : '没有匹配的用户' }}</strong><span>{{ runtimeFilter === 'all' ? 'Sub2API 当前没有用户并发或排队活动' : '切换筛选条件查看其他用户' }}</span></div></div>
+          <div class="runtime-definition">排队请求为 Sub2API 运维接口返回的 <code>waiting_in_queue</code> 汇总，并发占用为 <code>current_in_use</code> 汇总。</div>
+        </template>
       </section>
       <section class="panel"><div class="panel-head"><div><h2>待处理事项</h2><p>需要关注的经营和成本问题</p></div><AlertTriangle :size="20" class="head-icon warning-icon" /></div><div class="alert-list"><div v-for="alert in summary.alerts || []" :key="alert.title" class="alert-row" :class="alert.severity"><span></span><div><strong>{{ alert.title }}</strong><p>{{ alert.detail }}</p></div></div><div v-if="!(summary.alerts || []).length" class="empty">没有待处理事项</div></div></section>
     </div>

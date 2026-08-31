@@ -623,6 +623,53 @@ test('runtime dashboard enriches Redis-only concurrency snapshots with FinOps us
   assert.match(userQuery, /COALESCE\(NULLIF\(live\.email,''\),users\.email,''\) AS email/);
 });
 
+test('live runtime dashboard preserves Sub2API ops queue and load fields', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('dim_users')) {
+        return {
+          rows: [{ source_user_id: '41', email: 'stored@example.com', username: 'stored' }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('dim_accounts')) return { rows: [], rowCount: 0 };
+      assert.fail(`unexpected query: ${text}`);
+    },
+  };
+  const repository = new PostgresRepository(pool, config);
+  const dashboard = await repository.getRuntimeDashboard({
+    usersSource: 'sub2api_ops_user_concurrency',
+    usersEnabled: true,
+    observedAt: '2026-08-31T08:30:00Z',
+    users: [{
+      sourceUserId: 41,
+      email: 'live@example.com',
+      username: 'live',
+      maxConcurrency: 5,
+      currentConcurrency: 4,
+      waitingCount: 2,
+      loadPercentage: 80,
+    }],
+    accounts: [],
+  });
+
+  assert.equal(dashboard.source, 'sub2api_ops_user_concurrency');
+  assert.equal(dashboard.enabled, true);
+  assert.equal(dashboard.observedAt, '2026-08-31T08:30:00Z');
+  assert.deepEqual(dashboard.users, [{
+    id: 41,
+    email: 'live@example.com',
+    username: 'live',
+    maxConcurrency: 5,
+    currentConcurrency: 4,
+    waitingCount: 2,
+    usagePercent: 80,
+    observedAt: '2026-08-31T08:30:00Z',
+  }]);
+});
+
 test('usage event details are read from FinOps facts with searchable model fallback and immutable cost status', async () => {
   const queries = [];
   const pool = {

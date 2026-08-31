@@ -2154,11 +2154,15 @@ export class DemoRepository {
   }
 
   async getRuntimeDashboard() {
+    const observedAt = new Date().toISOString();
     return {
+      source: 'sub2api_ops_user_concurrency',
+      enabled: true,
+      observedAt,
       queue: {
         available: true, enabled: true, mode: 'observe', workerCount: 4, activeWorkers: 1, idleWorkers: 3,
         queueSize: 32768, queueLength: 2, queueUsagePercent: 0.01, processed: 256, errors: 0,
-        observedAt: new Date().toISOString(),
+        observedAt,
       },
       users: this.users.slice(0, 5).map((user, index) => ({
         id: user.id,
@@ -2166,8 +2170,9 @@ export class DemoRepository {
         username: user.username || '',
         maxConcurrency: index ? 100 : 2000,
         currentConcurrency: index ? 1 : 2,
+        waitingCount: index === 1 ? 2 : 0,
         usagePercent: index ? 1 : 0.1,
-        observedAt: new Date().toISOString(),
+        observedAt,
       })),
     };
   }

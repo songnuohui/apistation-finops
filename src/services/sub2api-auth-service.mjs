@@ -205,11 +205,11 @@ export async function listSub2ApiChannelMonitors({ accessToken, clientIp = '', a
   });
 }
 
-export async function listSub2ApiAdministratorUserConcurrency({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
+export async function getSub2ApiAdministratorUserConcurrencySnapshot({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
   const token = String(accessToken || '').trim();
   const payload = await request(
     config.sub2apiAuthUrl,
-    `/api/v1/admin/users?page=1&page_size=${config.sub2apiRuntimePageSize}&status=active&sort_by=current_concurrency&sort_order=desc`,
+    `/api/v1/admin/ops/user-concurrency?timezone=${encodeURIComponent(config.timezone || 'Asia/Shanghai')}`,
     {
       method: 'GET',
       headers: administratorHeaders(token, clientIp, authHeaders),
@@ -217,17 +217,39 @@ export async function listSub2ApiAdministratorUserConcurrency({ accessToken, cli
     config.sub2apiAuthTimeoutMs,
     fetchImpl,
   );
-  return pagedItems(payload).flatMap((user) => {
-    const sourceUserId = optionalInteger(user?.id);
+  const userMap = payload?.user;
+  if (payload?.enabled !== false && (!userMap || typeof userMap !== 'object' || Array.isArray(userMap))) {
+    throw new Sub2ApiAuthError('upstream_unavailable', 'sub2api returned an invalid user concurrency snapshot', 503);
+  }
+  const users = Object.values(userMap || {}).flatMap((user) => {
+    const sourceUserId = optionalInteger(user?.user_id);
     if (!sourceUserId || sourceUserId <= 0) return [];
+    const maxConcurrency = Math.max(0, optionalInteger(user?.max_capacity) || 0);
+    const currentConcurrency = Math.max(0, optionalInteger(user?.current_in_use) || 0);
+    const waitingCount = Math.max(0, optionalInteger(user?.waiting_in_queue) || 0);
     return [{
       sourceUserId,
-      email: String(user.email || '').trim().slice(0, 255),
+      email: String(user.user_email || '').trim().slice(0, 255),
       username: String(user.username || '').trim().slice(0, 100),
-      maxConcurrency: Math.max(0, optionalInteger(user.concurrency) || 0),
-      currentConcurrency: Math.max(0, optionalInteger(user.current_concurrency) || 0),
+      maxConcurrency,
+      currentConcurrency,
+      waitingCount,
+      loadPercentage: Math.max(0, optionalNumber(user.load_percentage) || 0),
     }];
-  });
+  }).sort((a, b) => b.waitingCount - a.waitingCount || b.currentConcurrency - a.currentConcurrency || a.sourceUserId - b.sourceUserId);
+  return {
+    enabled: payload?.enabled !== false,
+    users,
+    observedAt: payload?.timestamp || null,
+  };
+}
+
+export async function listSub2ApiAdministratorUserConcurrency({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {
+  return (await getSub2ApiAdministratorUserConcurrencySnapshot(
+    { accessToken, clientIp, authHeaders },
+    config,
+    fetchImpl,
+  )).users;
 }
 
 export async function getSub2ApiRuntimeQueueStatus({ accessToken, clientIp = '', authHeaders = null }, config, fetchImpl = fetch) {

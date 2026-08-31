@@ -5989,6 +5989,9 @@ export class PostgresRepository {
       const accountDetails = new Map(accountsResult.rows.map((row) => [Number(row.source_account_id), row]));
       const observedAt = liveRuntime.observedAt || new Date();
       return {
+        source: liveRuntime.usersSource || 'finops_snapshot',
+        enabled: liveRuntime.usersEnabled !== false,
+        observedAt,
         queue: liveRuntime.queue ? {
           available: true,
           ...liveRuntime.queue,
@@ -6006,7 +6009,9 @@ export class PostgresRepository {
             maxConcurrency,
             currentConcurrency,
             waitingCount: number(item.waitingCount),
-            usagePercent: maxConcurrency > 0 ? Math.min(100, currentConcurrency * 100 / maxConcurrency) : null,
+            usagePercent: item.loadPercentage === null || item.loadPercentage === undefined
+              ? (maxConcurrency > 0 ? Math.min(100, currentConcurrency * 100 / maxConcurrency) : null)
+              : number(item.loadPercentage),
             observedAt,
           };
         }).sort((a,b) => b.waitingCount-a.waitingCount || b.currentConcurrency-a.currentConcurrency),

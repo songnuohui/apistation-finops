@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  getSub2ApiAdministratorUserConcurrencySnapshot,
   listSub2ApiAdminGroups,
   listSub2ApiChannelMonitors,
   loginSub2ApiAdministrator,
@@ -10,6 +11,7 @@ import {
 const config = {
   sub2apiAuthUrl: 'http://127.0.0.1:8080',
   sub2apiAuthTimeoutMs: 1_000,
+  timezone: 'Asia/Shanghai',
 };
 
 function json(data, status = 200) {
@@ -135,6 +137,72 @@ test('sub2api user channel monitor list keeps only public status fields needed b
     availability7d: 99.1,
     lastCheckedAt: null,
   }]);
+});
+
+test('sub2api realtime user concurrency uses the dedicated ops aggregation endpoint', async () => {
+  const result = await getSub2ApiAdministratorUserConcurrencySnapshot(
+    { accessToken: 'short-lived-token' },
+    config,
+    async (url, options) => {
+      assert.equal(
+        url,
+        'http://127.0.0.1:8080/api/v1/admin/ops/user-concurrency?timezone=Asia%2FShanghai',
+      );
+      assert.equal(options.headers.Authorization, 'Bearer short-lived-token');
+      return json({
+        code: 0,
+        data: {
+          enabled: true,
+          user: {
+            '41': {
+              user_id: 41,
+              user_email: 'busy@example.com',
+              username: 'busy',
+              current_in_use: 4,
+              max_capacity: 5,
+              load_percentage: 80,
+              waiting_in_queue: 2,
+            },
+            '42': {
+              user_id: 42,
+              user_email: 'running@example.com',
+              username: 'running',
+              current_in_use: 1,
+              max_capacity: 10,
+              load_percentage: 10,
+              waiting_in_queue: 0,
+            },
+          },
+          timestamp: '2026-08-31T08:30:00Z',
+        },
+      });
+    },
+  );
+
+  assert.deepEqual(result, {
+    enabled: true,
+    observedAt: '2026-08-31T08:30:00Z',
+    users: [
+      {
+        sourceUserId: 41,
+        email: 'busy@example.com',
+        username: 'busy',
+        maxConcurrency: 5,
+        currentConcurrency: 4,
+        waitingCount: 2,
+        loadPercentage: 80,
+      },
+      {
+        sourceUserId: 42,
+        email: 'running@example.com',
+        username: 'running',
+        maxConcurrency: 10,
+        currentConcurrency: 1,
+        waitingCount: 0,
+        loadPercentage: 10,
+      },
+    ],
+  });
 });
 
 test('sub2api login keeps a TOTP challenge server-side', async () => {

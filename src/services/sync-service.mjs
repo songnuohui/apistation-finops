@@ -313,11 +313,17 @@ export class SyncService {
   async refreshRuntimeSnapshotsUnsafe() {
     let queue = null;
     let users = [];
+    let usersSource = '';
+    let usersEnabled = true;
+    let observedAt = null;
     try {
       if (this.runtimeStatusReader) {
         const result = await this.withSub2ApiAccessToken((authentication) => this.runtimeStatusReader(authentication));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
+        usersSource = String(result?.usersSource || '');
+        usersEnabled = result?.usersEnabled !== false;
+        observedAt = result?.observedAt || null;
       }
     } catch (error) {
       await this.markSourceError('runtime_load', error);
@@ -326,7 +332,7 @@ export class SyncService {
     try {
       const redisRuntime = await this.runtimeConcurrencyReader?.();
       const redisUsers = Array.isArray(redisRuntime) ? redisRuntime : redisRuntime?.users;
-      if (Array.isArray(redisUsers) && redisUsers.length) {
+      if (usersSource !== 'sub2api_ops_user_concurrency' && Array.isArray(redisUsers) && redisUsers.length) {
         const userMap = new Map(users.map((user) => [Number(user.sourceUserId), user]));
         for (const user of redisUsers) {
           const sourceUserId = Number(user?.sourceUserId);
@@ -393,11 +399,17 @@ export class SyncService {
     let queue = null;
     let users = [];
     let accounts = [];
+    let usersSource = '';
+    let usersEnabled = true;
+    let observedAt = null;
     if (this.runtimeStatusReader) {
       try {
         const result = await this.withSub2ApiAccessToken((authentication) => this.runtimeStatusReader(authentication));
         queue = result?.queue || null;
         users = Array.isArray(result?.users) ? result.users : [];
+        usersSource = String(result?.usersSource || '');
+        usersEnabled = result?.usersEnabled !== false;
+        observedAt = result?.observedAt || null;
       } catch (error) {
         this.logger.warn('[runtime] live Sub2API API read failed', error?.code || error?.message || error);
       }
@@ -406,7 +418,7 @@ export class SyncService {
       const redisRuntime = await this.runtimeConcurrencyReader?.();
       const redisUsers = Array.isArray(redisRuntime) ? redisRuntime : redisRuntime?.users;
       accounts = Array.isArray(redisRuntime?.accounts) ? redisRuntime.accounts : [];
-      if (Array.isArray(redisUsers)) {
+      if (usersSource !== 'sub2api_ops_user_concurrency' && Array.isArray(redisUsers)) {
         const userMap = new Map(users.map((user) => [Number(user.sourceUserId), user]));
         for (const user of redisUsers) {
           const sourceUserId = Number(user?.sourceUserId);
@@ -418,7 +430,14 @@ export class SyncService {
     } catch (error) {
       this.logger.warn('[runtime] live Sub2API Redis read failed', error?.code || error?.message || error);
     }
-    return { queue, users, accounts, observedAt: new Date() };
+    return {
+      queue,
+      users,
+      accounts,
+      usersSource,
+      usersEnabled,
+      observedAt: observedAt || new Date(),
+    };
   }
 
   async validateSourceSchema() {

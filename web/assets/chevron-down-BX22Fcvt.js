@@ -1,0 +1,1 @@
+import{m as e}from"./index-CR5wHfPV.js";var t=e(`ChevronDownIcon`,[[`path`,{d:`m6 9 6 6 6-6`,key:`qrunsl`}]]);export{t};
