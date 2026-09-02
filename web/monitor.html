@@ -4,37 +4,66 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>分组状态监控</title>
-  <link rel="stylesheet" href="/monitor.css?v=0.2.0">
+  <title>分组状态监控 | ApiStation FinOps</title>
+  <link rel="stylesheet" href="/monitor.css?v=0.3.0">
 </head>
 <body>
   <main class="monitor-shell">
     <header class="monitor-header">
-      <div>
-        <p class="monitor-kicker">ApiStation FinOps</p>
-        <h1>分组状态监控</h1>
-        <p class="monitor-subtitle">查看各分组当前计费倍率与运行状态</p>
+      <div class="monitor-brand">
+        <div class="brand-mark" aria-hidden="true">
+          <img src="/icons/activity.svg" alt="">
+        </div>
+        <div>
+          <p class="monitor-kicker">ApiStation FinOps</p>
+          <h1>分组状态监控</h1>
+          <p class="monitor-subtitle">按分组查看当前计费倍率与整体可用状态</p>
+        </div>
       </div>
       <div class="monitor-actions">
-        <span class="monitor-updated" id="updated-label">正在读取</span>
-        <button class="icon-button" id="refresh-button" type="button" title="刷新监控数据" aria-label="刷新监控数据">
+        <span class="overall-status is-unknown" id="overall-status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="overall-status-label">等待数据</span>
+        </span>
+        <button class="icon-button" id="refresh-button" type="button" title="立即刷新监控数据" aria-label="立即刷新监控数据">
           <img src="/icons/refresh-cw.svg" alt="">
         </button>
       </div>
     </header>
-    <section class="monitor-board" aria-live="polite">
-      <div class="monitor-toolbar">
-        <div>
-          <strong id="group-count">分组</strong>
-          <span id="status-summary">正在读取监控状态</span>
+
+    <section class="monitor-overview" aria-live="polite">
+      <div>
+        <p class="overview-label">当前状态</p>
+        <h2 id="summary-title">正在读取监控状态</h2>
+        <p class="overview-detail" id="summary-detail">监控数据来自 FinOps 已保存快照</p>
+      </div>
+      <div class="overview-controls">
+        <div class="range-switch" aria-label="可用率统计范围">
+          <button class="active" type="button" aria-pressed="true">7 天</button>
+          <button type="button" disabled aria-pressed="false">15 天</button>
+          <button type="button" disabled aria-pressed="false">30 天</button>
         </div>
-        <span class="monitor-refresh-note">自动刷新配置中</span>
+        <div class="auto-refresh">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <span>自动刷新</span>
+          <strong id="refresh-countdown">--</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="monitor-content">
+      <div class="content-heading">
+        <div>
+          <h2 id="group-count">监控分组</h2>
+          <span id="status-summary">正在读取监控数据</span>
+        </div>
+        <span class="content-note">仅展示分组级别当前值</span>
       </div>
       <div class="group-grid" id="group-grid">
         <div class="monitor-loading"><span></span>正在读取监控数据</div>
       </div>
     </section>
   </main>
-  <script type="module" src="/monitor.js?v=0.2.0"></script>
+  <script type="module" src="/monitor.js?v=0.3.0"></script>
 </body>
 </html>

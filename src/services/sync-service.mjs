@@ -113,7 +113,7 @@ function cursorTimeKey(value) {
 }
 
 function normalizedGroupName(value) {
-  return String(value || '').trim().toLocaleLowerCase('zh-CN');
+  return String(value || '').trim().replace(/\s+/g, '').toLocaleLowerCase('zh-CN');
 }
 
 export function summarizeChannelMonitorGroup(monitors = []) {
@@ -741,7 +741,8 @@ export class SyncService {
           normalizedGroupName(group.source_group_name),
         ].filter(Boolean));
         const monitors = channelMonitors.filter((monitor) => (
-          monitor?.enabled !== false && groupNames.has(normalizedGroupName(monitor.groupName))
+          monitor?.enabled !== false
+          && groupNames.has(normalizedGroupName(monitor.groupName || monitor.name))
         ));
         const summary = summarizeChannelMonitorGroup(monitors);
         await client.query(`

@@ -419,19 +419,42 @@ export class DemoRepository {
   }
 
   async getPublicMonitorDashboard() {
+    const groups = this.monitorGroups
+      .filter((group) => group.enabled)
+      .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
+    const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
+    const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
+    const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
+    const overallStatus = !groups.length
+      ? 'unknown'
+      : unavailableGroups > 0
+        ? 'unavailable'
+        : degradedGroups > 0 || healthyGroups < groups.length
+          ? 'degraded'
+          : 'healthy';
     return {
       generatedAt: new Date().toISOString(),
       refreshIntervalSeconds: (await this.getMonitorSettings()).refreshIntervalSeconds,
-      groups: this.monitorGroups
-        .filter((group) => group.enabled)
-        .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id)
-        .map((group) => ({
-          id: group.id,
-          name: group.name,
-          status: group.status,
-          currentMultiplier: group.currentMultiplier,
-          lastObservedAt: group.lastObservedAt,
-        })),
+      summary: {
+        overallStatus,
+        totalGroups: groups.length,
+        healthyGroups,
+        degradedGroups,
+        unavailableGroups,
+      },
+      groups: groups.map((group) => ({
+        id: group.id,
+        name: group.name,
+        modelLabel: group.modelLabel,
+        status: group.status,
+        currentMultiplier: group.currentMultiplier,
+        availabilityPercent: group.availabilityPercent,
+        availableAccountCount: group.availableAccountCount,
+        totalAccountCount: group.totalAccountCount,
+        averageLatencyMs: group.averageLatencyMs,
+        averagePingLatencyMs: group.averagePingLatencyMs,
+        lastObservedAt: group.lastObservedAt,
+      })),
     };
   }
 

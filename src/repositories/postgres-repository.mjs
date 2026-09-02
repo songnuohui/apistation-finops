@@ -2576,23 +2576,54 @@ export class PostgresRepository {
       this.getMonitorSettings(),
     ]);
     const groups = allGroups.filter((group) => group.enabled);
+    const publicGroups = groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      modelLabel: group.modelLabel,
+      status: group.status,
+      currentMultiplier: group.currentMultiplier,
+      availabilityPercent: group.availabilityPercent,
+      availableAccountCount: group.availableAccountCount,
+      totalAccountCount: group.totalAccountCount,
+      averageLatencyMs: group.averageLatencyMs,
+      averagePingLatencyMs: group.averagePingLatencyMs,
+      lastObservedAt: group.lastObservedAt,
+    }));
+    const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
+    const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
+    const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
+    const overallStatus = !groups.length
+      ? 'unknown'
+      : unavailableGroups > 0
+        ? 'unavailable'
+        : degradedGroups > 0 || healthyGroups < groups.length
+          ? 'degraded'
+          : 'healthy';
     if (!groups.length) {
       return {
         generatedAt: new Date().toISOString(),
         refreshIntervalSeconds: settings.refreshIntervalSeconds,
+        summary: {
+          overallStatus,
+          totalGroups: 0,
+          healthyGroups: 0,
+          degradedGroups: 0,
+          unavailableGroups: 0,
+        },
         groups: [],
       };
     }
     return {
       generatedAt: new Date().toISOString(),
       refreshIntervalSeconds: settings.refreshIntervalSeconds,
-      groups: groups.map((group) => ({
-        id: group.id,
-        name: group.name,
-        status: group.status,
-        currentMultiplier: group.currentMultiplier,
-        lastObservedAt: group.lastObservedAt,
-      })),
+      summary: {
+        overallStatus,
+        totalGroups: groups.length,
+        healthyGroups,
+        degradedGroups,
+        unavailableGroups,
+      },
+      groups: publicGroups,
     };
   }
 
