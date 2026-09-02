@@ -42,7 +42,7 @@ fi
 
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 "${compose[@]}" build "$SERVICE_NAME"
-"${compose[@]}" run --rm --no-deps "$SERVICE_NAME" pnpm migrate
+"${compose[@]}" run --rm --no-deps "$SERVICE_NAME" node scripts/migrate.mjs
 
 ln -sfn "$REPO_DIR" "$CURRENT_LINK"
 "${compose[@]}" up -d --no-deps --force-recreate "$SERVICE_NAME"
