@@ -2592,7 +2592,8 @@ export class PostgresRepository {
     const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
     const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
     const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
-    const overallStatus = !groups.length
+    const knownGroups = healthyGroups + degradedGroups + unavailableGroups;
+    const overallStatus = !groups.length || knownGroups === 0
       ? 'unknown'
       : unavailableGroups > 0
         ? 'unavailable'
