@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Edit3, Plus, RefreshCw, Save, Settings2, X } from 'lucide-vue-next';
+import { Edit3, ExternalLink, Plus, RefreshCw, Save, Settings2, X } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -142,6 +142,7 @@ onMounted(load);
         <button class="icon-button" type="button" title="刷新分组与候选" aria-label="刷新分组与候选" :disabled="loading" @click="load">
           <RefreshCw :size="17" :class="{ spin: loading }" />
         </button>
+        <a class="secondary-button monitor-preview-link" href="/monitor" target="_blank" rel="noreferrer"><ExternalLink :size="16" />打开公开监控页</a>
         <button class="primary-button" type="button" @click="openEditor()"><Plus :size="16" />新增监控分组</button>
       </div>
     </div>
@@ -245,6 +246,7 @@ onMounted(load);
 .section-title{margin:0;color:var(--ink);font-size:18px}
 .section-subtitle{margin:4px 0 0;color:var(--muted);font-size:12px}
 .group-monitor-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.monitor-preview-link{display:inline-flex;align-items:center;text-decoration:none}
 .monitor-sync-state,.monitor-catalog-time{color:var(--muted);font-size:11px}
 .group-monitor-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
 .group-monitor-table{min-width:980px!important}

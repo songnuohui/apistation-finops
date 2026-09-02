@@ -175,7 +175,7 @@ export async function listSub2ApiChannelMonitors({ accessToken, clientIp = '', a
   const token = String(accessToken || '').trim();
   const payload = await request(
     config.sub2apiAuthUrl,
-    '/api/v1/channel-monitors',
+    '/api/v1/admin/channel-monitors',
     {
       method: 'GET',
       headers: administratorHeaders(token, clientIp, authHeaders),
