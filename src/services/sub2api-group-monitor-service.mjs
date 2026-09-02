@@ -99,25 +99,84 @@ function availability(stats) {
     : null;
 }
 
-function groupWindowStats(source, monitorIds, days) {
+function timestamp(value) {
+  const parsed = new Date(value || '').getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function dateAt(value) {
+  const parsed = new Date(value || '');
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : null;
+}
+
+function historyStats(rows) {
   const stats = emptyStats();
-  const today = source.todayDate;
-  const cutoff = previousDate(today, days - 1);
-  if (!today || !cutoff) return stats;
-  for (const row of source.rollups || []) {
-    if (!monitorIds.has(Number(row.monitorId))) continue;
-    const bucketDate = String(row.bucketDate || '').slice(0, 10);
-    if (bucketDate >= cutoff && bucketDate < today) sumStats(stats, row);
-  }
-  for (const row of source.todayStats || []) {
-    if (monitorIds.has(Number(row.monitorId))) sumStats(stats, row);
+  for (const row of rows) {
+    stats.total += 1;
+    if (status(row.status) === 'healthy' || status(row.status) === 'degraded') stats.ok += 1;
+    const latency = metricNumber(row.latencyMs);
+    if (latency !== null) {
+      stats.sumLatency += latency;
+      stats.countLatency += 1;
+    }
+    const pingLatency = metricNumber(row.pingLatencyMs);
+    if (pingLatency !== null) {
+      stats.sumPingLatency += pingLatency;
+      stats.countPingLatency += 1;
+    }
   }
   return stats;
 }
 
-function historyForGroup(source, monitorIds) {
-  return (source.histories || [])
-    .filter((row) => monitorIds.has(Number(row.monitorId)))
+function addStats(target, source) {
+  target.total += source.total;
+  target.ok += source.ok;
+  target.sumLatency += source.sumLatency;
+  target.countLatency += source.countLatency;
+  target.sumPingLatency += source.sumPingLatency;
+  target.countPingLatency += source.countPingLatency;
+}
+
+function groupHistoryRows(source, monitorIds, historyStartedAt) {
+  const start = timestamp(historyStartedAt);
+  return (source.histories || []).filter((row) => {
+    if (!monitorIds.has(Number(row.monitorId))) return false;
+    const checkedAt = timestamp(row.checkedAt);
+    return checkedAt !== null && (start === null || checkedAt >= start);
+  });
+}
+
+function groupWindowStats(source, monitorIds, days, historyStartedAt) {
+  const stats = emptyStats();
+  const today = source.todayDate;
+  const cutoff = previousDate(today, days - 1);
+  if (!today || !cutoff) return stats;
+  const historyStartDate = dateAt(historyStartedAt);
+  for (const row of source.rollups || []) {
+    if (!monitorIds.has(Number(row.monitorId))) continue;
+    const bucketDate = String(row.bucketDate || '').slice(0, 10);
+    if (
+      bucketDate >= cutoff
+      && bucketDate < today
+      && (!historyStartDate || bucketDate > historyStartDate)
+    ) sumStats(stats, row);
+  }
+  if (!historyStartDate) {
+    for (const row of source.todayStats || []) {
+      if (monitorIds.has(Number(row.monitorId))) sumStats(stats, row);
+    }
+    return stats;
+  }
+  const directRows = groupHistoryRows(source, monitorIds, historyStartedAt).filter((row) => {
+    const checkedDate = dateAt(row.checkedAt);
+    return checkedDate && checkedDate >= cutoff && (checkedDate === today || checkedDate === historyStartDate);
+  });
+  addStats(stats, historyStats(directRows));
+  return stats;
+}
+
+function historyForGroup(source, monitorIds, historyStartedAt) {
+  return groupHistoryRows(source, monitorIds, historyStartedAt)
     .sort((left, right) => {
       const time = new Date(left.checkedAt).getTime() - new Date(right.checkedAt).getTime();
       return time || Number(left.id) - Number(right.id);
@@ -138,11 +197,12 @@ function latestMetric(monitors, latestByMonitor, field) {
   return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
 }
 
-function latestObservedAt(monitors, latestByMonitor) {
+function latestObservedAt(monitors, latestByMonitor, historyStartedAt) {
+  const start = timestamp(historyStartedAt);
   const timestamps = monitors
-    .map((monitor) => latestByMonitor.get(Number(monitor.id))?.checkedAt || monitor.lastCheckedAt)
+    .map((monitor) => latestByMonitor.get(Number(monitor.id))?.checkedAt || null)
     .map((value) => new Date(value || '').getTime())
-    .filter(Number.isFinite);
+    .filter((value) => Number.isFinite(value) && (start === null || value >= start));
   return timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : null;
 }
 
@@ -152,11 +212,17 @@ function groupData(group, source) {
   ));
   const monitorIds = new Set(monitors.map((monitor) => Number(monitor.id)));
   const latestByMonitor = new Map(
-    (source.latest || []).map((row) => [Number(row.monitorId), row]),
+    (source.latest || [])
+      .filter((row) => {
+        const start = timestamp(group.historyStartedAt);
+        const checkedAt = timestamp(row.checkedAt);
+        return checkedAt !== null && (start === null || checkedAt >= start);
+      })
+      .map((row) => [Number(row.monitorId), row]),
   );
   const current = summarizeStatuses(monitors, latestByMonitor);
   const statsByWindow = Object.fromEntries(
-    [7, 15, 30].map((days) => [days, groupWindowStats(source, monitorIds, days)]),
+    [7, 15, 30].map((days) => [days, groupWindowStats(source, monitorIds, days, group.historyStartedAt)]),
   );
   const sourceGroupMultiplier = metricNumber(group.sourceGroupMultiplier);
   const currentMultiplier = group.displayMultiplier ?? sourceGroupMultiplier;
@@ -181,11 +247,11 @@ function groupData(group, source) {
     configuredGroupMultiplier: currentMultiplier,
     averageLatencyMs: latestMetric(monitors, latestByMonitor, 'latencyMs'),
     averagePingLatencyMs: latestMetric(monitors, latestByMonitor, 'pingLatencyMs'),
-    lastObservedAt: latestObservedAt(monitors, latestByMonitor),
+    lastObservedAt: latestObservedAt(monitors, latestByMonitor, group.historyStartedAt),
     availabilityByWindow,
     availabilitySampleCount,
     availabilityPercent: availabilityByWindow['7d'],
-    history: historyForGroup(source, monitorIds),
+    history: historyForGroup(source, monitorIds, group.historyStartedAt),
   };
 }
 
@@ -212,7 +278,7 @@ export class Sub2ApiGroupMonitorService {
   constructor(repository, sourceReader, config, logger = console) {
     this.repository = repository;
     this.sourceReader = sourceReader;
-    this.cacheTtlMs = Math.max(1, Number(config?.sub2apiUsageCacheTtlSeconds || 30)) * 1_000;
+    this.maximumCacheTtlMs = Math.max(1, Number(config?.sub2apiUsageCacheTtlSeconds || 30)) * 1_000;
     this.logger = logger;
     this.cached = null;
     this.cachedAt = 0;
@@ -226,11 +292,18 @@ export class Sub2ApiGroupMonitorService {
     this.cacheGeneration += 1;
   }
 
+  cacheTtlMs() {
+    const intervals = (this.cached?.groups || [])
+      .map((group) => Number(group.refreshIntervalSeconds))
+      .filter((value) => Number.isFinite(value) && value >= 15 && value <= 3600);
+    return Math.min(
+      this.maximumCacheTtlMs,
+      (intervals.length ? Math.min(...intervals) : 30) * 1_000,
+    );
+  }
+
   async readGroupsUncached() {
-    const [configuredGroups, settings] = await Promise.all([
-      this.repository.listMonitorGroups(),
-      this.repository.getMonitorSettings(),
-    ]);
+    const configuredGroups = await this.repository.listMonitorGroups();
     let source = null;
     try {
       source = await this.sourceReader?.read();
@@ -244,11 +317,11 @@ export class Sub2ApiGroupMonitorService {
       rollups: [],
       todayStats: [],
     }));
-    return { groups, settings };
+    return { groups };
   }
 
   async readGroups({ force = false } = {}) {
-    if (!force && this.cached && Date.now() - this.cachedAt < this.cacheTtlMs) return this.cached;
+    if (!force && this.cached && Date.now() - this.cachedAt < this.cacheTtlMs()) return this.cached;
     if (this.inflight) return this.inflight;
     const generation = this.cacheGeneration;
     this.inflight = this.readGroupsUncached()
@@ -270,7 +343,7 @@ export class Sub2ApiGroupMonitorService {
   }
 
   async getPublicDashboard() {
-    const { groups, settings } = await this.readGroups();
+    const { groups } = await this.readGroups();
     const publicGroups = groups
       .filter((group) => group.enabled)
       .map((group) => ({
@@ -278,6 +351,8 @@ export class Sub2ApiGroupMonitorService {
         name: group.name,
         provider: group.provider,
         modelLabel: group.modelLabel,
+        refreshIntervalSeconds: group.refreshIntervalSeconds,
+        historyStartedAt: group.historyStartedAt,
         status: group.status,
         currentMultiplier: group.currentMultiplier,
         availabilityPercent: group.availabilityPercent,
@@ -291,9 +366,12 @@ export class Sub2ApiGroupMonitorService {
         history: group.history,
       }));
     const summary = overallStatus(publicGroups);
+    const refreshIntervals = publicGroups
+      .map((group) => Number(group.refreshIntervalSeconds))
+      .filter((value) => Number.isFinite(value) && value >= 15 && value <= 3600);
     return {
       generatedAt: new Date().toISOString(),
-      refreshIntervalSeconds: settings.refreshIntervalSeconds,
+      refreshIntervalSeconds: refreshIntervals.length ? Math.min(...refreshIntervals) : 30,
       summary: {
         overallStatus: summary.overallStatus,
         totalGroups: publicGroups.length,

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>分组状态监控 | ApiStation FinOps</title>
-  <link rel="stylesheet" href="/monitor.css?v=0.4.0">
+  <link rel="stylesheet" href="/monitor.css?v=0.5.0">
 </head>
 <body>
   <main class="monitor-shell">
@@ -35,7 +35,7 @@
       <div>
         <p class="overview-label">当前状态</p>
         <h2 id="summary-title">正在读取监控状态</h2>
-        <p class="overview-detail" id="summary-detail">监控数据来自 FinOps 已保存快照</p>
+          <p class="overview-detail" id="summary-detail">监控数据由 FinOps 通过只读连接实时汇总 Sub2API 状态</p>
       </div>
       <div class="overview-controls">
         <div class="range-switch" aria-label="可用率统计范围">
@@ -64,6 +64,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="/monitor.js?v=0.4.0"></script>
+  <script type="module" src="/monitor.js?v=0.5.0"></script>
 </body>
 </html>

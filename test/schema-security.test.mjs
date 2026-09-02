@@ -91,6 +91,14 @@ test('monitor settings migration remains FinOps-owned and excludes account pool 
   assert.doesNotMatch(migration, /account_count|account pool/i);
 });
 
+test('per-group monitor refresh migration remains FinOps-owned and stores no source history', () => {
+  const migration = read('migrations/067_monitor_group_refresh_config.sql');
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS refresh_interval_seconds INTEGER/);
+  assert.match(migration, /history_started_at TIMESTAMPTZ/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+public\./i);
+  assert.doesNotMatch(migration, /channel_monitor_histories|channel_monitor_daily_rollups/i);
+});
+
 test('monitor PING latency migration remains FinOps-owned', () => {
   const migration = read('migrations/009_monitor_ping_latency.sql');
   assert.match(migration, /ADD COLUMN IF NOT EXISTS average_ping_latency_ms INTEGER/);

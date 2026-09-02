@@ -507,6 +507,9 @@ export function normalizeMonitorGroup(input) {
     sourceGroupId: integerValue(input.sourceGroupId, 'sourceGroupId', { min: 1, max: Number.MAX_SAFE_INTEGER }),
     modelLabel: textValue(input.modelLabel, 'modelLabel', { required: false, max: 120 }),
     displayMultiplier: optionalDecimal(input.displayMultiplier, 'displayMultiplier', { min: 0, allowZero: false }),
+    refreshIntervalSeconds: input.refreshIntervalSeconds === undefined || input.refreshIntervalSeconds === ''
+      ? 30
+      : integerValue(input.refreshIntervalSeconds, 'refreshIntervalSeconds', { min: 15, max: 3600 }),
     displayOrder: input.displayOrder === undefined || input.displayOrder === ''
       ? 0
       : integerValue(input.displayOrder, 'displayOrder', { min: 0, max: 100000 }),

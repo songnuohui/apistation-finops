@@ -175,7 +175,7 @@ function card(group) {
       <div class="history-axis"><span>过去</span><span>${escapeHtml(relativeTime(group.lastObservedAt))}</span><span>现在</span></div>
     </section>
     <footer class="group-card-footer">
-      <span><img src="/icons/refresh-cw.svg" alt="">最近观测</span>
+      <span><img src="/icons/refresh-cw.svg" alt="">读取间隔 ${escapeHtml(`${Math.max(15, Number(group.refreshIntervalSeconds) || 30)} 秒`)}</span>
       <time datetime="${escapeHtml(group.lastObservedAt || '')}">${escapeHtml(formatDateTime(group.lastObservedAt))}</time>
     </footer>
   </article>`;
@@ -183,7 +183,7 @@ function card(group) {
 
 function setRefreshInterval(value) {
   const parsed = Number(value);
-  if (Number.isFinite(parsed)) refreshIntervalSeconds = Math.min(3600, Math.max(5, Math.round(parsed)));
+  if (Number.isFinite(parsed)) refreshIntervalSeconds = Math.min(3600, Math.max(15, Math.round(parsed)));
 }
 
 function stopTimers() {

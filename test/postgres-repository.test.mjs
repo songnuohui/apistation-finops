@@ -1068,6 +1068,8 @@ test('monitor candidates merge the sanitized source catalog with usage activity'
     latestModel: 'gpt-5.6',
   });
   assert.match(queries[0].text, /source_group_catalog/);
+  assert.match(queries[0].text, /WHERE c\.status='active'/);
+  assert.doesNotMatch(queries[0].text, /FULL OUTER JOIN/);
   assert.doesNotMatch(queries[0].text, /credentials|model_routing/i);
 });
 

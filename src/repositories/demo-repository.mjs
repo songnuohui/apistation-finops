@@ -159,6 +159,8 @@ const demoMonitorDefinitions = [
   sourceGroupId,
   modelLabel,
   displayOrder: index,
+  refreshIntervalSeconds: 30,
+  historyStartedAt: new Date(Date.now() - 7 * 86_400_000).toISOString(),
   enabled: true,
   status: 'healthy',
   availableAccountCount: index < 2 ? 12 : 8,
@@ -388,6 +390,7 @@ export class DemoRepository {
     const group = {
       id: Math.max(0, ...this.monitorGroups.map((item) => item.id)) + 1,
       ...input,
+      historyStartedAt: new Date().toISOString(),
       status: 'unknown',
       availableAccountCount: 0,
       totalAccountCount: 0,
@@ -412,7 +415,9 @@ export class DemoRepository {
     if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
     const duplicate = this.monitorGroups.find((item) => item.id !== group.id && Number(item.sourceGroupId) === Number(input.sourceGroupId));
     if (duplicate) throw Object.assign(new Error('source group is already configured'), { statusCode: 409 });
+    const sourceChanged = Number(group.sourceGroupId) !== Number(input.sourceGroupId);
     Object.assign(group, input);
+    if (sourceChanged) group.historyStartedAt = new Date().toISOString();
     group.currentMultiplier = group.displayMultiplier ?? group.sourceGroupMultiplier ?? group.groupMultiplier ?? null;
     group.configuredGroupMultiplier = group.currentMultiplier;
     return { ...group };
@@ -464,11 +469,11 @@ export class DemoRepository {
           '30d': group.availabilityPercent,
         },
         availabilitySampleCount: group.availabilitySampleCount || { '7d': 60, '15d': 60, '30d': 60 },
-        availableAccountCount: group.availableAccountCount,
-        totalAccountCount: group.totalAccountCount,
         averageLatencyMs: group.averageLatencyMs,
         averagePingLatencyMs: group.averagePingLatencyMs,
         lastObservedAt: group.lastObservedAt,
+        refreshIntervalSeconds: group.refreshIntervalSeconds || 30,
+        historyStartedAt: group.historyStartedAt || null,
         history: group.history || demoMonitorHistory(group),
       })),
     };

@@ -185,12 +185,17 @@ test('CNY cash amounts are server-derived and contradictory values are rejected'
 
 test('monitor group configuration validates a positive source group ID and display settings', () => {
   assert.deepEqual(normalizeMonitorGroup({
-    name: 'GPT PLUS', sourceGroupId: '12', modelLabel: 'gpt-5.4', displayOrder: '4', enabled: 'false',
+    name: 'GPT PLUS', sourceGroupId: '12', modelLabel: 'gpt-5.4',
+    refreshIntervalSeconds: '45', displayOrder: '4', enabled: 'false',
   }), {
-    name: 'GPT PLUS', sourceGroupId: 12, modelLabel: 'gpt-5.4', displayOrder: 4, enabled: false,
+    name: 'GPT PLUS', sourceGroupId: 12, modelLabel: 'gpt-5.4', displayMultiplier: null,
+    refreshIntervalSeconds: 45, displayOrder: 4, enabled: false,
   });
   assert.throws(() => normalizeMonitorGroup({ name: 'invalid', sourceGroupId: '0' }), /invalid sourceGroupId/);
   assert.throws(() => normalizeMonitorGroup({ name: 'invalid', sourceGroupId: 'abc' }), /invalid sourceGroupId/);
+  assert.throws(() => normalizeMonitorGroup({
+    name: 'invalid', sourceGroupId: '1', refreshIntervalSeconds: '14',
+  }), /invalid refreshIntervalSeconds/);
 });
 
 test('monitor settings validate a bounded refresh interval', () => {

@@ -2268,10 +2268,13 @@ export class PostgresRepository {
   async listMonitorGroups() {
     const result = await this.pool.query(`
       SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
-             g.display_multiplier,c.name AS source_group_name,c.platform,
+             g.display_multiplier,g.refresh_interval_seconds,g.history_started_at,
+             c.name AS source_group_name,c.platform,
              c.rate_multiplier AS source_group_multiplier
       FROM ${this.schema}.monitor_groups g
-      LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
+      JOIN ${this.schema}.source_group_catalog c
+        ON c.source_group_id=g.source_group_id
+       AND c.status='active'
       ORDER BY g.display_order,g.id`);
     return result.rows.map((row) => ({
       id: number(row.id),
@@ -2282,6 +2285,8 @@ export class PostgresRepository {
       provider: row.platform || '',
       displayOrder: number(row.display_order),
       enabled: Boolean(row.enabled),
+      refreshIntervalSeconds: number(row.refresh_interval_seconds),
+      historyStartedAt: row.history_started_at || null,
       status: 'unknown',
       availableAccountCount: 0,
       totalAccountCount: 0,
@@ -2352,20 +2357,20 @@ export class PostgresRepository {
         WHERE source_group_id > 0
         GROUP BY source_group_id
       )
-      SELECT COALESCE(c.source_group_id,u.source_group_id) AS source_group_id,
-             COALESCE(c.name,'') AS name,
-             COALESCE(c.platform,'') AS platform,
-             COALESCE(c.status,'') AS status,
+      SELECT c.source_group_id,
+             c.name,
+             c.platform,
+             c.status,
              c.rate_multiplier,c.sort_order,
-             COALESCE(c.default_model,'') AS default_model,
+             c.default_model,
              c.synced_at AS catalog_synced_at,
              COALESCE(u.requests,0)::int AS requests,
              u.last_used_at,
              COALESCE(u.latest_model,'') AS latest_model
       FROM ${this.schema}.source_group_catalog c
-      FULL OUTER JOIN usage_candidates u ON u.source_group_id=c.source_group_id
-      ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END,
-               c.sort_order ASC NULLS LAST,u.last_used_at DESC NULLS LAST,source_group_id`);
+      LEFT JOIN usage_candidates u ON u.source_group_id=c.source_group_id
+      WHERE c.status='active'
+      ORDER BY c.sort_order ASC,u.last_used_at DESC NULLS LAST,c.source_group_id`);
     return result.rows.map((row) => ({
       sourceGroupId: number(row.source_group_id),
       name: row.name || '',
@@ -2497,11 +2502,22 @@ export class PostgresRepository {
 
   async createMonitorGroup(input, actor='admin') {
     return inTransaction(this.pool, async (client) => {
+      const source = await client.query(`
+        SELECT source_group_id
+        FROM ${this.schema}.source_group_catalog
+        WHERE source_group_id=$1 AND status='active'
+        FOR SHARE`, [input.sourceGroupId]);
+      if (!source.rowCount) throw httpError('source group is unavailable or deleted', 409);
       const result = await client.query(`
-        INSERT INTO ${this.schema}.monitor_groups(name,source_group_id,model_label,display_multiplier,display_order,enabled,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7)
+        INSERT INTO ${this.schema}.monitor_groups(
+          name,source_group_id,model_label,display_multiplier,refresh_interval_seconds,
+          display_order,enabled,history_started_at,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8)
         RETURNING *`,
-      [input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.displayOrder,input.enabled,actor]);
+      [
+        input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.refreshIntervalSeconds,
+        input.displayOrder,input.enabled,actor,
+      ]);
       const created = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'create','monitor_group',$2,$3::jsonb)`,
@@ -2512,6 +2528,8 @@ export class PostgresRepository {
         sourceGroupId: number(created.source_group_id),
         modelLabel: created.model_label || '',
         displayMultiplier: nullableNumber(created.display_multiplier),
+        refreshIntervalSeconds: number(created.refresh_interval_seconds),
+        historyStartedAt: created.history_started_at || null,
         displayOrder: number(created.display_order),
         enabled: Boolean(created.enabled),
       };
@@ -2526,13 +2544,24 @@ export class PostgresRepository {
       );
       if (!beforeResult.rowCount) throw httpError('monitor group not found', 404);
       const before = beforeResult.rows[0];
+      const source = await client.query(`
+        SELECT source_group_id
+        FROM ${this.schema}.source_group_catalog
+        WHERE source_group_id=$1 AND status='active'
+        FOR SHARE`, [input.sourceGroupId]);
+      if (!source.rowCount) throw httpError('source group is unavailable or deleted', 409);
       const result = await client.query(`
         UPDATE ${this.schema}.monitor_groups
         SET name=$2,source_group_id=$3,model_label=$4,display_multiplier=$5,
-            display_order=$6,enabled=$7,updated_at=NOW()
+            refresh_interval_seconds=$6,display_order=$7,enabled=$8,
+            history_started_at=CASE WHEN source_group_id IS DISTINCT FROM $3 THEN NOW() ELSE history_started_at END,
+            updated_at=NOW()
         WHERE id=$1
         RETURNING *`,
-      [id,input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.displayOrder,input.enabled]);
+      [
+        id,input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.refreshIntervalSeconds,
+        input.displayOrder,input.enabled,
+      ]);
       const updated = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value,after_value)
         VALUES($1,'update','monitor_group',$2,$3::jsonb,$4::jsonb)`,
@@ -2543,6 +2572,8 @@ export class PostgresRepository {
         sourceGroupId: number(updated.source_group_id),
         modelLabel: updated.model_label || '',
         displayMultiplier: nullableNumber(updated.display_multiplier),
+        refreshIntervalSeconds: number(updated.refresh_interval_seconds),
+        historyStartedAt: updated.history_started_at || null,
         displayOrder: number(updated.display_order),
         enabled: Boolean(updated.enabled),
       };
