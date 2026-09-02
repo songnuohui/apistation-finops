@@ -18,14 +18,10 @@ const statusText = {
   unknown: '等待数据',
 };
 
-function number(value, digits = 0) {
-  if (value === null || value === undefined || value === '') return '--';
-  return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits });
-}
-
 function multiplier(value) {
-  if (value === null || value === undefined) return '--';
-  return `${Number(value).toFixed(3).replace(/\.?0+$/, '')}x`;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return '--';
+  return `${parsed.toFixed(3).replace(/\.?0+$/, '')}x`;
 }
 
 function scheduleRefresh() {
@@ -39,52 +35,38 @@ function setRefreshInterval(value) {
   if (refreshNote) refreshNote.textContent = `自动刷新 ${refreshIntervalSeconds} 秒`;
 }
 
-function relativeTime(value) {
+function formatDateTime(value) {
   if (!value) return '暂无观测';
-  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
-  const minutes = Math.round(elapsed / 60_000);
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return `${Math.round(hours / 24)} 天前`;
-}
-
-function historyBars(history = []) {
-  const items = history.length ? history : Array.from({ length: 60 }, () => ({ status: 'unknown' }));
-  return items.slice(-60).map((item) => `<span class="history-bar is-${escapeHtml(item.status || 'unknown')}" title="${escapeHtml(statusText[item.status] || '等待数据')}"></span>`).join('');
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '暂无观测';
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
 }
 
 function card(group) {
   const status = group.status || 'unknown';
-  const latency = group.averageLatencyMs === null || group.averageLatencyMs === undefined
-    ? '--'
-    : `${number(group.averageLatencyMs)}<span class="metric-unit">ms</span>`;
-  const pingLatency = group.averagePingLatencyMs === null || group.averagePingLatencyMs === undefined
-    ? '--'
-    : `${number(group.averagePingLatencyMs)}<span class="metric-unit">ms</span>`;
   return `<article class="group-card is-${escapeHtml(status)}">
     <header class="group-card-header">
       <div class="group-title">
-        <span class="group-mark"><img src="/icons/server-cog.svg" alt=""></span>
         <div>
           <h2 class="group-name">${escapeHtml(group.name)}</h2>
-          <span class="group-model">${escapeHtml(group.modelLabel || `分组 #${group.sourceGroupId}`)}</span>
+          <span class="group-id">分组 #${escapeHtml(group.id)}</span>
         </div>
       </div>
       <span class="status-badge is-${escapeHtml(status)}">${escapeHtml(statusText[status] || statusText.unknown)}</span>
     </header>
-    <div class="group-multiplier"><span>当前倍率</span><strong>${escapeHtml(multiplier(group.configuredGroupMultiplier))}</strong></div>
-    <div class="metric-row">
-      <div class="metric-box"><span class="metric-label">对话延迟</span><strong class="metric-value">${latency}</strong></div>
-      <div class="metric-box"><span class="metric-label">站点 PING</span><strong class="metric-value">${pingLatency}</strong></div>
+    <div class="group-card-body">
+      <span class="metric-label">当前计费倍率</span>
+      <strong class="metric-value">${escapeHtml(multiplier(group.currentMultiplier))}</strong>
     </div>
-    <section class="availability">
-      <div class="availability-head"><span>可用性 · 7 天</span><strong>${group.availabilityPercent === null || group.availabilityPercent === undefined ? '--' : `${number(group.availabilityPercent, 2)}%`}</strong></div>
-      <div class="history-head"><span>近 60 次观测</span><span>${escapeHtml(relativeTime(group.lastObservedAt))}</span></div>
-      <div class="history" aria-label="近 60 次观测状态">${historyBars(group.history)}</div>
-      <div class="history-labels"><span>past</span><span>now</span></div>
-    </section>
+    <footer class="group-card-footer">
+      <span>状态数据</span>
+      <time datetime="${escapeHtml(group.lastObservedAt || '')}">${escapeHtml(formatDateTime(group.lastObservedAt))}</time>
+    </footer>
   </article>`;
 }
 

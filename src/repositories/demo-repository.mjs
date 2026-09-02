@@ -163,6 +163,9 @@ const demoMonitorDefinitions = [
   status: 'healthy',
   availableAccountCount: index < 2 ? 12 : 8,
   totalAccountCount: index < 2 ? 12 : 8,
+  displayMultiplier: null,
+  sourceGroupMultiplier: effectiveMultiplier,
+  currentMultiplier: effectiveMultiplier,
   configuredGroupMultiplier: effectiveMultiplier,
   groupMultiplier: effectiveMultiplier,
   userMultiplier: effectiveMultiplier,
@@ -389,7 +392,10 @@ export class DemoRepository {
       availableAccountCount: 0,
       totalAccountCount: 0,
       groupMultiplier: null,
-      configuredGroupMultiplier: null,
+      displayMultiplier: input.displayMultiplier ?? null,
+      sourceGroupMultiplier: null,
+      currentMultiplier: input.displayMultiplier ?? null,
+      configuredGroupMultiplier: input.displayMultiplier ?? null,
       userMultiplier: null,
       effectiveMultiplier: null,
       averageLatencyMs: null,
@@ -407,6 +413,8 @@ export class DemoRepository {
     const duplicate = this.monitorGroups.find((item) => item.id !== group.id && Number(item.sourceGroupId) === Number(input.sourceGroupId));
     if (duplicate) throw Object.assign(new Error('source group is already configured'), { statusCode: 409 });
     Object.assign(group, input);
+    group.currentMultiplier = group.displayMultiplier ?? group.sourceGroupMultiplier ?? group.groupMultiplier ?? null;
+    group.configuredGroupMultiplier = group.currentMultiplier;
     return { ...group };
   }
 
@@ -417,16 +425,12 @@ export class DemoRepository {
       groups: this.monitorGroups
         .filter((group) => group.enabled)
         .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id)
-        .map(({
-          availableAccountCount: _availableAccountCount,
-          totalAccountCount: _totalAccountCount,
-          groupMultiplier: _groupMultiplier,
-          userMultiplier: _userMultiplier,
-          effectiveMultiplier: _effectiveMultiplier,
-          ...group
-        }) => ({
-          ...group,
-          history: demoMonitorHistory(group),
+        .map((group) => ({
+          id: group.id,
+          name: group.name,
+          status: group.status,
+          currentMultiplier: group.currentMultiplier,
+          lastObservedAt: group.lastObservedAt,
         })),
     };
   }

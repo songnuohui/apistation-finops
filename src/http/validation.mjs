@@ -506,6 +506,7 @@ export function normalizeMonitorGroup(input) {
     name: textValue(input.name, 'name', { max: 120 }),
     sourceGroupId: integerValue(input.sourceGroupId, 'sourceGroupId', { min: 1, max: Number.MAX_SAFE_INTEGER }),
     modelLabel: textValue(input.modelLabel, 'modelLabel', { required: false, max: 120 }),
+    displayMultiplier: optionalDecimal(input.displayMultiplier, 'displayMultiplier', { min: 0, allowZero: false }),
     displayOrder: input.displayOrder === undefined || input.displayOrder === ''
       ? 0
       : integerValue(input.displayOrder, 'displayOrder', { min: 0, max: 100000 }),

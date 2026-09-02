@@ -14,6 +14,7 @@ const UserFinanceView = defineAsyncComponent(() => import('./components/UserFina
 const UsageView = defineAsyncComponent(() => import('./components/UsageView.vue'));
 const AccountCostsView = defineAsyncComponent(() => import('./components/AccountCostsView.vue'));
 const SupplierManagementView = defineAsyncComponent(() => import('./components/SupplierManagementView.vue'));
+const GroupMonitorView = defineAsyncComponent(() => import('./components/GroupMonitorView.vue'));
 const OAuthSupplyView = defineAsyncComponent(() => import('./components/OAuthSupplyView.vue'));
 const ReplenishmentView = defineAsyncComponent(() => import('./components/ReplenishmentView.vue'));
 const EmailCenterView = defineAsyncComponent(() => import('./components/EmailCenterView.vue'));
@@ -50,6 +51,7 @@ const userRefreshToken = ref(0);
 const usageRefreshToken = ref(0);
 const qualityRefreshToken = ref(0);
 const supplierKeyRefreshToken = ref(0);
+const groupMonitorRefreshToken = ref(0);
 const oauthSupplyRefreshToken = ref(0);
 const replenishmentRefreshToken = ref(0);
 const emailRefreshToken = ref(0);
@@ -65,6 +67,7 @@ const nav = [
   { id: 'usage', label: '总消耗', icon: BarChart3, group: '经营分析' },
   { id: 'accounts', label: '账号成本', icon: WalletCards, group: '资源与成本' },
   { id: 'suppliers', label: '供应商管理', icon: ServerCog, group: '资源与成本' },
+  { id: 'group-monitor', label: '分组监控', icon: Activity, group: '资源与成本' },
   { id: 'oauth-supply', label: 'OAuth Supply', icon: PlugZap, group: '自动化接入' },
   { id: 'replenishment', label: '自动补号', icon: RefreshCw, group: '自动化接入' },
   { id: 'email', label: '邮件中心', icon: Mail, group: '运营工具' },
@@ -75,6 +78,7 @@ const pageMeta: Record<string, [string, string]> = {
   usage: ['总消耗', '用户和模型两个维度查看实际消耗、成本与利润'],
   accounts: ['账号成本', '账号采购、成本归属、实时成本和毛利'],
   suppliers: ['供应商管理', '连接、密钥、账号分组和供应商质量统一管理'],
+  'group-monitor': ['分组监控', '维护公开分组状态和用户可见的计费倍率'],
   'oauth-supply': ['OAuth Supply 接入', '独立配置客户账号，登录并安全取得采购 Token'],
   replenishment: ['自动补号', '库存、订单、验号、Sub2API 导入和采购成本统一管理'],
   email: ['邮件中心', '公告、活动、订阅和发送记录'],
@@ -101,6 +105,7 @@ const statusClass = (value: any) => ['ok', 'healthy', 'active', 'complete', 'pri
 const showRangeControl = computed(() => (
   page.value !== 'oauth-supply'
   && page.value !== 'email'
+  && page.value !== 'group-monitor'
   && (page.value !== 'suppliers' || supplierTab.value === 'quality')
 ));
 const customRangeError = computed(() => {
@@ -180,6 +185,7 @@ async function loadPage() {
     else if (page.value === 'accounts') accountRefreshToken.value += 1;
     else if (page.value === 'suppliers') supplierRefreshToken.value += 1;
     else if (page.value === 'supplier-keys') supplierKeyRefreshToken.value += 1;
+    else if (page.value === 'group-monitor') groupMonitorRefreshToken.value += 1;
     else if (page.value === 'supplier-quality') qualityRefreshToken.value += 1;
     else if (page.value === 'oauth-supply') oauthSupplyRefreshToken.value += 1;
     else if (page.value === 'replenishment') replenishmentRefreshToken.value += 1;
@@ -469,6 +475,7 @@ function syncBodyScrollLock() {
         </div>
         <AccountCostsView v-else-if="page === 'accounts'" :refresh-token="accountRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
         <SupplierManagementView v-else-if="page === 'suppliers'" :refresh-token="supplierRefreshToken + supplierKeyRefreshToken + qualityRefreshToken" :range="range" :range-start="customStart" :range-end="customEnd" @toast="showToast" />
+        <GroupMonitorView v-else-if="page === 'group-monitor'" :refresh-token="groupMonitorRefreshToken" @toast="showToast" />
         <OAuthSupplyView v-else-if="page === 'oauth-supply'" :refresh-token="oauthSupplyRefreshToken" @toast="showToast" />
         <ReplenishmentView
           v-else-if="page === 'replenishment'"

@@ -13,6 +13,7 @@ const routes = [
   { path: '/suppliers', component: App },
   { path: '/supplier-keys', redirect: '/suppliers?tab=keys' },
   { path: '/supplier-quality', redirect: '/suppliers?tab=quality' },
+  { path: '/group-monitor', component: App },
   { path: '/oauth-supply', component: App },
   { path: '/replenishment', component: App },
   { path: '/email', component: App },

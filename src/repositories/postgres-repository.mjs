@@ -2285,8 +2285,10 @@ export class PostgresRepository {
         ORDER BY monitor_group_id,observed_at DESC,id DESC
       )
       SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
+             g.display_multiplier,
              l.status,l.available_account_count,l.total_account_count,
-             c.rate_multiplier AS configured_group_multiplier,
+             c.rate_multiplier AS source_group_multiplier,
+             COALESCE(g.display_multiplier,c.rate_multiplier) AS current_multiplier,
              l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,
              l.average_ping_latency_ms,l.source_availability_percent,l.observed_at,
              r.observation_count,r.available_count
@@ -2305,7 +2307,10 @@ export class PostgresRepository {
       status: row.status || 'unknown',
       availableAccountCount: number(row.available_account_count),
       totalAccountCount: number(row.total_account_count),
-      configuredGroupMultiplier: nullableNumber(row.configured_group_multiplier),
+      displayMultiplier: nullableNumber(row.display_multiplier),
+      sourceGroupMultiplier: nullableNumber(row.source_group_multiplier),
+      currentMultiplier: nullableNumber(row.current_multiplier),
+      configuredGroupMultiplier: nullableNumber(row.current_multiplier),
       groupMultiplier: nullableNumber(row.group_multiplier),
       userMultiplier: nullableNumber(row.user_multiplier),
       effectiveMultiplier: nullableNumber(row.effective_multiplier),
@@ -2511,10 +2516,10 @@ export class PostgresRepository {
   async createMonitorGroup(input, actor='admin') {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`
-        INSERT INTO ${this.schema}.monitor_groups(name,source_group_id,model_label,display_order,enabled,created_by)
-        VALUES($1,$2,$3,$4,$5,$6)
+        INSERT INTO ${this.schema}.monitor_groups(name,source_group_id,model_label,display_multiplier,display_order,enabled,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7)
         RETURNING *`,
-      [input.name,input.sourceGroupId,input.modelLabel,input.displayOrder,input.enabled,actor]);
+      [input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.displayOrder,input.enabled,actor]);
       const created = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
         VALUES($1,'create','monitor_group',$2,$3::jsonb)`,
@@ -2524,6 +2529,7 @@ export class PostgresRepository {
         name: created.name,
         sourceGroupId: number(created.source_group_id),
         modelLabel: created.model_label || '',
+        displayMultiplier: nullableNumber(created.display_multiplier),
         displayOrder: number(created.display_order),
         enabled: Boolean(created.enabled),
       };
@@ -2540,10 +2546,11 @@ export class PostgresRepository {
       const before = beforeResult.rows[0];
       const result = await client.query(`
         UPDATE ${this.schema}.monitor_groups
-        SET name=$2,source_group_id=$3,model_label=$4,display_order=$5,enabled=$6,updated_at=NOW()
+        SET name=$2,source_group_id=$3,model_label=$4,display_multiplier=$5,
+            display_order=$6,enabled=$7,updated_at=NOW()
         WHERE id=$1
         RETURNING *`,
-      [id,input.name,input.sourceGroupId,input.modelLabel,input.displayOrder,input.enabled]);
+      [id,input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.displayOrder,input.enabled]);
       const updated = result.rows[0];
       if (Number(before.source_group_id) !== Number(updated.source_group_id)) {
         await client.query(`DELETE FROM ${this.schema}.monitor_group_observations WHERE monitor_group_id=$1`, [id]);
@@ -2556,6 +2563,7 @@ export class PostgresRepository {
         name: updated.name,
         sourceGroupId: number(updated.source_group_id),
         modelLabel: updated.model_label || '',
+        displayMultiplier: nullableNumber(updated.display_multiplier),
         displayOrder: number(updated.display_order),
         enabled: Boolean(updated.enabled),
       };
@@ -2575,40 +2583,16 @@ export class PostgresRepository {
         groups: [],
       };
     }
-    const publicGroups = groups.map(({
-      availableAccountCount: _availableAccountCount,
-      totalAccountCount: _totalAccountCount,
-      groupMultiplier: _groupMultiplier,
-      userMultiplier: _userMultiplier,
-      effectiveMultiplier: _effectiveMultiplier,
-      ...group
-    }) => group);
-    const result = await this.pool.query(`
-      WITH ranked AS (
-        SELECT monitor_group_id,observed_at,status,
-               ROW_NUMBER() OVER (PARTITION BY monitor_group_id ORDER BY observed_at DESC,id DESC) AS row_number
-      FROM ${this.schema}.monitor_group_observations
-        WHERE monitor_group_id=ANY($1::bigint[])
-          AND observation_source='sub2api_channel_monitor'
-      )
-      SELECT monitor_group_id,observed_at,status
-      FROM ranked
-      WHERE row_number <= 60
-      ORDER BY monitor_group_id,observed_at`,
-    [groups.map((group) => group.id)]);
-    const history = new Map();
-    for (const row of result.rows) {
-      const id = number(row.monitor_group_id);
-      if (!history.has(id)) history.set(id, []);
-      history.get(id).push({
-        observedAt: row.observed_at,
-        status: row.status,
-      });
-    }
     return {
       generatedAt: new Date().toISOString(),
       refreshIntervalSeconds: settings.refreshIntervalSeconds,
-      groups: publicGroups.map((group) => ({ ...group, history: history.get(group.id) || [] })),
+      groups: groups.map((group) => ({
+        id: group.id,
+        name: group.name,
+        status: group.status,
+        currentMultiplier: group.currentMultiplier,
+        lastObservedAt: group.lastObservedAt,
+      })),
     };
   }
 
