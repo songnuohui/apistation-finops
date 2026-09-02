@@ -1070,6 +1070,9 @@ async function api(request,res,url){
   if(request.method==='PATCH'&&monitorGroupId){
     return json(res,200,await repository.updateMonitorGroup(monitorGroupId,normalizeMonitorGroup(await body(request)),auth.actor));
   }
+  if(request.method==='DELETE'&&monitorGroupId){
+    return json(res,200,await repository.deleteMonitorGroup(monitorGroupId,auth.actor));
+  }
   if(request.method==='POST'&&url.pathname==='/api/cost-profiles'){
     return json(res,201,await repository.createCostProfile(normalizeCostProfile(await body(request)),auth.actor));
   }

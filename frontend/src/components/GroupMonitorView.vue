@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Edit3, ExternalLink, Plus, RefreshCw, Save, Settings2, X } from 'lucide-vue-next';
+import { Edit3, ExternalLink, Plus, RefreshCw, Save, Settings2, Trash2, X } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -13,6 +13,7 @@ const candidates = ref<AnyRecord[]>([]);
 const settings = ref<AnyRecord>({ refreshIntervalSeconds: 30 });
 const loading = ref(false);
 const saving = ref(false);
+const deleting = ref<number | null>(null);
 const savingSettings = ref(false);
 const editor = ref<AnyRecord | null>(null);
 
@@ -110,6 +111,22 @@ async function saveGroup() {
   }
 }
 
+async function deleteGroup(group: AnyRecord) {
+  const label = group.name || `分组 #${group.sourceGroupId}`;
+  if (!window.confirm(`确定删除监控分组“${label}”吗？\n\n只会删除 FinOps 中的监控展示配置，不会修改 Sub2API。`)) return;
+  deleting.value = Number(group.id);
+  try {
+    await send(`/monitor-groups/${group.id}`, 'DELETE', {});
+    if (editor.value?.id === group.id) editor.value = null;
+    await load();
+    emit('toast', '监控分组已删除');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    deleting.value = null;
+  }
+}
+
 async function saveMonitorSettings() {
   savingSettings.value = true;
   try {
@@ -173,7 +190,7 @@ onMounted(load);
               <td><strong>{{ multiplier(group.sourceGroupMultiplier) }}</strong><small>Sub2API 当前值</small></td>
               <td><span class="monitor-source-label" :class="{ custom: group.displayMultiplier !== null && group.displayMultiplier !== undefined }">{{ group.displayMultiplier === null || group.displayMultiplier === undefined ? '跟随 Sub2API' : 'FinOps 自定义' }}</span></td>
               <td><span class="status-pill" :class="group.enabled ? 'success' : 'warning'">{{ group.enabled ? '已启用' : '已停用' }}</span></td>
-              <td><button class="icon-button mini" type="button" title="编辑分组监控" aria-label="编辑分组监控" @click="openEditor(group)"><Edit3 :size="15" /></button></td>
+              <td><div class="row-actions"><button class="icon-button mini" type="button" title="编辑分组监控" aria-label="编辑分组监控" @click="openEditor(group)"><Edit3 :size="15" /></button><button class="icon-button mini danger-action" type="button" title="删除监控分组" aria-label="删除监控分组" :disabled="deleting === Number(group.id)" @click="deleteGroup(group)"><RefreshCw v-if="deleting === Number(group.id)" :size="15" class="spin" /><Trash2 v-else :size="15" /></button></div></td>
             </tr>
             <tr v-if="!loading && !groups.length"><td colspan="7" class="table-empty">暂无已配置监控分组，请点击右上角新增监控分组。</td></tr>
             <tr v-if="loading"><td colspan="7" class="table-empty">正在读取分组监控配置</td></tr>

@@ -418,6 +418,13 @@ export class DemoRepository {
     return { ...group };
   }
 
+  async deleteMonitorGroup(id) {
+    const index = this.monitorGroups.findIndex((item) => Number(item.id) === Number(id));
+    if (index < 0) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    this.monitorGroups.splice(index, 1);
+    return { id: Number(id), deleted: true };
+  }
+
   async getPublicMonitorDashboard() {
     const groups = this.monitorGroups
       .filter((group) => group.enabled)

@@ -2549,6 +2549,23 @@ export class PostgresRepository {
     });
   }
 
+  async deleteMonitorGroup(id, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const beforeResult = await client.query(
+        `DELETE FROM ${this.schema}.monitor_groups
+         WHERE id=$1
+         RETURNING *`,
+        [id],
+      );
+      if (!beforeResult.rowCount) throw httpError('monitor group not found', 404);
+      const deleted = beforeResult.rows[0];
+      await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value)
+        VALUES($1,'delete','monitor_group',$2,$3::jsonb)`,
+      [actor,String(id),JSON.stringify(deleted)]);
+      return { id: number(deleted.id), deleted: true };
+    });
+  }
+
   async ensureSupplierInTransaction(client, name, actor='admin') {
     const normalized = String(name || '').trim();
     if (!normalized) return null;
