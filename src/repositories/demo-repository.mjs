@@ -446,15 +446,23 @@ export class DemoRepository {
       groups: groups.map((group) => ({
         id: group.id,
         name: group.name,
+        provider: group.provider || 'openai',
         modelLabel: group.modelLabel,
         status: group.status,
         currentMultiplier: group.currentMultiplier,
         availabilityPercent: group.availabilityPercent,
+        availabilityByWindow: group.availabilityByWindow || {
+          '7d': group.availabilityPercent,
+          '15d': group.availabilityPercent,
+          '30d': group.availabilityPercent,
+        },
+        availabilitySampleCount: group.availabilitySampleCount || { '7d': 60, '15d': 60, '30d': 60 },
         availableAccountCount: group.availableAccountCount,
         totalAccountCount: group.totalAccountCount,
         averageLatencyMs: group.averageLatencyMs,
         averagePingLatencyMs: group.averagePingLatencyMs,
         lastObservedAt: group.lastObservedAt,
+        history: group.history || demoMonitorHistory(group),
       })),
     };
   }

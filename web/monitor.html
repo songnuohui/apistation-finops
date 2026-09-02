@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>分组状态监控 | ApiStation FinOps</title>
-  <link rel="stylesheet" href="/monitor.css?v=0.3.0">
+  <link rel="stylesheet" href="/monitor.css?v=0.4.0">
 </head>
 <body>
   <main class="monitor-shell">
@@ -39,9 +39,9 @@
       </div>
       <div class="overview-controls">
         <div class="range-switch" aria-label="可用率统计范围">
-          <button class="active" type="button" aria-pressed="true">7 天</button>
-          <button type="button" disabled aria-pressed="false">15 天</button>
-          <button type="button" disabled aria-pressed="false">30 天</button>
+          <button class="active" type="button" data-window="7d" aria-pressed="true">7 天</button>
+          <button type="button" data-window="15d" aria-pressed="false">15 天</button>
+          <button type="button" data-window="30d" aria-pressed="false">30 天</button>
         </div>
         <div class="auto-refresh">
           <span class="pulse-dot" aria-hidden="true"></span>
@@ -64,6 +64,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="/monitor.js?v=0.3.0"></script>
+  <script type="module" src="/monitor.js?v=0.4.0"></script>
 </body>
 </html>

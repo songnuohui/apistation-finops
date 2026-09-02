@@ -2267,13 +2267,38 @@ export class PostgresRepository {
 
   async listMonitorGroups() {
     const result = await this.pool.query(`
-      WITH recent AS (
+      WITH window_stats AS (
         SELECT monitor_group_id,
-               COUNT(*)::int AS observation_count,
-               COUNT(*) FILTER (WHERE status IN ('healthy','degraded'))::int AS available_count
+               ROUND((AVG(source_availability_percent) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '7 days'
+               ))::numeric, 2) AS source_availability_7d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '7 days'
+                   AND status <> 'unknown'
+               )::int AS samples_7d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '7 days'
+                   AND status IN ('healthy','degraded')
+               )::int AS available_samples_7d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '15 days'
+                   AND status <> 'unknown'
+               )::int AS samples_15d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '15 days'
+                   AND status IN ('healthy','degraded')
+               )::int AS available_samples_15d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '30 days'
+                   AND status <> 'unknown'
+               )::int AS samples_30d,
+               COUNT(*) FILTER (
+                 WHERE observed_at >= NOW() - INTERVAL '30 days'
+                   AND status IN ('healthy','degraded')
+               )::int AS available_samples_30d
         FROM ${this.schema}.monitor_group_observations
         WHERE observation_source='sub2api_channel_monitor'
-          AND observed_at >= NOW() - INTERVAL '7 days'
+          AND observed_at >= NOW() - INTERVAL '30 days'
         GROUP BY monitor_group_id
       ), latest AS (
         SELECT DISTINCT ON (monitor_group_id)
@@ -2283,25 +2308,51 @@ export class PostgresRepository {
         FROM ${this.schema}.monitor_group_observations
         WHERE observation_source='sub2api_channel_monitor'
         ORDER BY monitor_group_id,observed_at DESC,id DESC
+      ), history_rows AS (
+        SELECT id,monitor_group_id,status,average_latency_ms,average_ping_latency_ms,observed_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY monitor_group_id
+                 ORDER BY observed_at DESC,id DESC
+               ) AS history_rank
+        FROM ${this.schema}.monitor_group_observations
+        WHERE observation_source='sub2api_channel_monitor'
+      ), history AS (
+        SELECT monitor_group_id,
+               JSON_AGG(
+                 JSON_BUILD_OBJECT(
+                   'status',status,
+                   'latencyMs',average_latency_ms,
+                   'pingLatencyMs',average_ping_latency_ms,
+                   'observedAt',observed_at
+                 )
+                 ORDER BY observed_at,id
+               ) AS history
+        FROM history_rows
+        WHERE history_rank <= 60
+        GROUP BY monitor_group_id
       )
       SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
              g.display_multiplier,
              l.status,l.available_account_count,l.total_account_count,
-             c.rate_multiplier AS source_group_multiplier,
+             c.platform,c.rate_multiplier AS source_group_multiplier,
              COALESCE(g.display_multiplier,c.rate_multiplier) AS current_multiplier,
              l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,
              l.average_ping_latency_ms,l.source_availability_percent,l.observed_at,
-             r.observation_count,r.available_count
+             w.source_availability_7d,w.samples_7d,w.available_samples_7d,
+             w.samples_15d,w.available_samples_15d,w.samples_30d,w.available_samples_30d,
+             h.history
       FROM ${this.schema}.monitor_groups g
       LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
       LEFT JOIN latest l ON l.monitor_group_id=g.id
-      LEFT JOIN recent r ON r.monitor_group_id=g.id
+      LEFT JOIN window_stats w ON w.monitor_group_id=g.id
+      LEFT JOIN history h ON h.monitor_group_id=g.id
       ORDER BY g.display_order,g.id`);
     return result.rows.map((row) => ({
       id: number(row.id),
       name: row.name,
       sourceGroupId: number(row.source_group_id),
       modelLabel: row.model_label || '',
+      provider: row.platform || '',
       displayOrder: number(row.display_order),
       enabled: Boolean(row.enabled),
       status: row.status || 'unknown',
@@ -2317,10 +2368,28 @@ export class PostgresRepository {
       averageLatencyMs: nullableNumber(row.average_latency_ms),
       averagePingLatencyMs: nullableNumber(row.average_ping_latency_ms),
       lastObservedAt: row.observed_at || null,
-      availabilityPercent: nullableNumber(row.source_availability_percent)
-        ?? (row.status && row.status !== 'unknown' && number(row.observation_count)
-          ? Number((number(row.available_count) * 100 / number(row.observation_count)).toFixed(2))
+      availabilityByWindow: {
+        '7d': nullableNumber(row.source_availability_7d)
+          ?? (number(row.samples_7d)
+            ? Number((number(row.available_samples_7d) * 100 / number(row.samples_7d)).toFixed(2))
+            : null),
+        '15d': number(row.samples_15d)
+          ? Number((number(row.available_samples_15d) * 100 / number(row.samples_15d)).toFixed(2))
+          : null,
+        '30d': number(row.samples_30d)
+          ? Number((number(row.available_samples_30d) * 100 / number(row.samples_30d)).toFixed(2))
+          : null,
+      },
+      availabilitySampleCount: {
+        '7d': number(row.samples_7d),
+        '15d': number(row.samples_15d),
+        '30d': number(row.samples_30d),
+      },
+      availabilityPercent: nullableNumber(row.source_availability_7d)
+        ?? (number(row.samples_7d)
+          ? Number((number(row.available_samples_7d) * 100 / number(row.samples_7d)).toFixed(2))
           : null),
+      history: Array.isArray(row.history) ? row.history : [],
     }));
   }
 
@@ -2579,15 +2648,19 @@ export class PostgresRepository {
     const publicGroups = groups.map((group) => ({
       id: group.id,
       name: group.name,
+      provider: group.provider,
       modelLabel: group.modelLabel,
       status: group.status,
       currentMultiplier: group.currentMultiplier,
       availabilityPercent: group.availabilityPercent,
+      availabilityByWindow: group.availabilityByWindow,
+      availabilitySampleCount: group.availabilitySampleCount,
       availableAccountCount: group.availableAccountCount,
       totalAccountCount: group.totalAccountCount,
       averageLatencyMs: group.averageLatencyMs,
       averagePingLatencyMs: group.averagePingLatencyMs,
       lastObservedAt: group.lastObservedAt,
+      history: group.history,
     }));
     const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
     const degradedGroups = groups.filter((group) => group.status === 'degraded').length;

@@ -7,11 +7,14 @@ const overallStatusLabel = document.querySelector('#overall-status-label');
 const summaryTitle = document.querySelector('#summary-title');
 const summaryDetail = document.querySelector('#summary-detail');
 const refreshCountdown = document.querySelector('#refresh-countdown');
+const rangeButtons = [...document.querySelectorAll('[data-window]')];
 
 let refreshTimer = null;
 let countdownTimer = null;
 let refreshIntervalSeconds = 30;
 let countdownSeconds = 30;
+let selectedWindow = '7d';
+let currentData = null;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
@@ -22,6 +25,13 @@ const statusText = {
   degraded: '部分可用',
   unavailable: '不可用',
   unknown: '等待数据',
+};
+
+const statusClass = {
+  healthy: 'healthy',
+  degraded: 'degraded',
+  unavailable: 'unavailable',
+  unknown: 'unknown',
 };
 
 const overallText = {
@@ -36,6 +46,19 @@ const statusDescription = {
   degraded: '部分分组当前存在不可用节点',
   unavailable: '当前没有可用的监控分组',
   unknown: '等待 FinOps 完成首次监控同步',
+};
+
+const windowText = {
+  '7d': '7 天',
+  '15d': '15 天',
+  '30d': '30 天',
+};
+
+const providerText = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  grok: 'Grok',
 };
 
 function multiplier(value) {
@@ -55,13 +78,6 @@ function milliseconds(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? `${Math.round(parsed)} ms` : '--';
 }
 
-function accountCount(group) {
-  const available = Number(group.availableAccountCount);
-  const total = Number(group.totalAccountCount);
-  if (!Number.isFinite(available) || !Number.isFinite(total) || total <= 0) return '--';
-  return `${Math.max(0, Math.round(available))}/${Math.max(0, Math.round(total))}`;
-}
-
 function formatDateTime(value) {
   if (!value) return '暂无观测';
   const date = new Date(value);
@@ -74,16 +90,57 @@ function formatDateTime(value) {
   }).format(date);
 }
 
+function relativeTime(value) {
+  if (!value) return '暂无更新';
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return '暂无更新';
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return '刚刚更新';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  return formatDateTime(value);
+}
+
+function normalizedHistory(group) {
+  const history = Array.isArray(group.history) ? group.history : [];
+  return history.slice(-60);
+}
+
+function historyBar(point) {
+  const status = statusClass[point?.status] || 'unknown';
+  const details = [
+    statusText[status],
+    formatDateTime(point?.observedAt),
+    milliseconds(point?.latencyMs) !== '--' ? `对话 ${milliseconds(point?.latencyMs)}` : '',
+    milliseconds(point?.pingLatencyMs) !== '--' ? `PING ${milliseconds(point?.pingLatencyMs)}` : '',
+  ].filter(Boolean).join(' · ');
+  return `<span class="history-bar is-${status}" title="${escapeHtml(details)}"></span>`;
+}
+
 function card(group) {
-  const status = statusText[group.status] ? group.status : 'unknown';
-  const model = group.modelLabel ? escapeHtml(group.modelLabel) : '分组整体状态';
+  const status = statusClass[group.status] || 'unknown';
+  const history = normalizedHistory(group);
+  const availabilityByWindow = group.availabilityByWindow || { '7d': group.availabilityPercent };
+  const availability = availabilityByWindow[selectedWindow];
+  const sampleCount = Number(group.availabilitySampleCount?.[selectedWindow] || 0);
+  const provider = providerText[String(group.provider || '').toLowerCase()] || group.provider || '上游分组';
+  const model = group.modelLabel || '分组整体状态';
+  const historyBars = Array.from({ length: Math.max(0, 60 - history.length) }, () => null)
+    .concat(history)
+    .map((point) => point ? historyBar(point) : '<span class="history-bar is-unknown"></span>')
+    .join('');
+  const historyNote = history.length
+    ? `${history.length} 次采样${sampleCount ? ` · ${sampleCount} 次窗口样本` : ''}`
+    : '等待首次同步';
   return `<article class="group-card is-${escapeHtml(status)}">
     <header class="group-card-header">
       <div class="group-title">
         <div class="group-symbol" aria-hidden="true"><img src="/icons/activity.svg" alt=""></div>
         <div class="group-heading">
           <h3 class="group-name">${escapeHtml(group.name || `分组 #${group.id}`)}</h3>
-          <span class="group-model">${model}</span>
+          <div class="group-tags">
+            <span class="provider-tag">${escapeHtml(provider)}</span>
+            <span class="model-tag">${escapeHtml(model)}</span>
+          </div>
         </div>
       </div>
       <span class="status-badge is-${escapeHtml(status)}">
@@ -91,30 +148,32 @@ function card(group) {
         ${escapeHtml(statusText[status])}
       </span>
     </header>
+    <div class="group-rate">
+      <span class="metric-label">当前计费倍率</span>
+      <strong class="rate-value">${escapeHtml(multiplier(group.currentMultiplier))}</strong>
+    </div>
     <div class="group-card-metrics">
       <div class="metric-box">
-        <span class="metric-label">当前计费倍率</span>
-        <strong class="metric-value">${escapeHtml(multiplier(group.currentMultiplier))}</strong>
+        <span class="metric-label">对话延迟</span>
+        <strong class="metric-value">${escapeHtml(milliseconds(group.averageLatencyMs))}</strong>
       </div>
       <div class="metric-box">
-        <span class="metric-label">可用率 · 7 天</span>
-        <strong class="metric-value metric-value-percent">${escapeHtml(percent(group.availabilityPercent))}</strong>
+        <span class="metric-label">端点 PING</span>
+        <strong class="metric-value">${escapeHtml(milliseconds(group.averagePingLatencyMs))}</strong>
       </div>
     </div>
-    <div class="group-card-stats">
-      <div>
-        <span class="stat-label">可用账号</span>
-        <strong>${escapeHtml(accountCount(group))}</strong>
+    <section class="availability-section">
+      <div class="availability-heading">
+        <span class="metric-label">可用性 · ${escapeHtml(windowText[selectedWindow])}</span>
+        <strong class="availability-value">${escapeHtml(percent(availability))}</strong>
       </div>
-      <div>
-        <span class="stat-label">平均响应</span>
-        <strong>${escapeHtml(milliseconds(group.averageLatencyMs))}</strong>
+      <div class="history-heading">
+        <span>近 60 次记录</span>
+        <span>${escapeHtml(historyNote)}</span>
       </div>
-      <div>
-        <span class="stat-label">节点 PING</span>
-        <strong>${escapeHtml(milliseconds(group.averagePingLatencyMs))}</strong>
-      </div>
-    </div>
+      <div class="history-bars" aria-label="${escapeHtml(`${group.name || '分组'}最近状态记录`)}">${historyBars}</div>
+      <div class="history-axis"><span>过去</span><span>${escapeHtml(relativeTime(group.lastObservedAt))}</span><span>现在</span></div>
+    </section>
     <footer class="group-card-footer">
       <span><img src="/icons/refresh-cw.svg" alt="">最近观测</span>
       <time datetime="${escapeHtml(group.lastObservedAt || '')}">${escapeHtml(formatDateTime(group.lastObservedAt))}</time>
@@ -155,17 +214,36 @@ function renderSummary(data, groups) {
         : 'unknown';
   const status = statusText[data.summary?.overallStatus] ? data.summary.overallStatus : fallbackStatus;
   const summary = data.summary || {};
-  const healthy = Number(summary.healthyGroups || groups.filter((group) => group.status === 'healthy').length);
-  const degraded = Number(summary.degradedGroups || groups.filter((group) => group.status === 'degraded').length);
-  const unavailable = Number(summary.unavailableGroups || groups.filter((group) => group.status === 'unavailable').length);
+  const healthy = Number(summary.healthyGroups ?? groups.filter((group) => group.status === 'healthy').length);
+  const degraded = Number(summary.degradedGroups ?? groups.filter((group) => group.status === 'degraded').length);
+  const unavailable = Number(summary.unavailableGroups ?? groups.filter((group) => group.status === 'unavailable').length);
   overallStatus.className = `overall-status is-${status}`;
   overallStatusLabel.textContent = overallText[status];
   summaryTitle.textContent = statusText[status];
-  summaryDetail.textContent = statusDescription[status];
+  summaryDetail.textContent = `${statusDescription[status]} · 当前查看 ${windowText[selectedWindow]}可用性`;
   groupCount.textContent = `${groups.length} 个监控分组`;
   statusSummary.textContent = groups.length
     ? `${healthy} 个正常 · ${degraded} 个部分可用 · ${unavailable} 个不可用`
     : '暂未配置公开监控分组';
+}
+
+function renderGroups(data) {
+  const groups = Array.isArray(data?.groups) ? data.groups : [];
+  renderSummary(data || {}, groups);
+  grid.innerHTML = groups.length
+    ? groups.map(card).join('')
+    : '<div class="empty-monitor">暂无已启用的监控分组</div>';
+}
+
+function selectWindow(value) {
+  if (!windowText[value]) return;
+  selectedWindow = value;
+  rangeButtons.forEach((button) => {
+    const active = button.dataset.window === selectedWindow;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (currentData) renderGroups(currentData);
 }
 
 async function load() {
@@ -175,12 +253,9 @@ async function load() {
     const response = await fetch('/api/public/group-monitor', { cache: 'no-store' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    currentData = data;
     setRefreshInterval(data.refreshIntervalSeconds);
-    const groups = Array.isArray(data.groups) ? data.groups : [];
-    renderSummary(data, groups);
-    grid.innerHTML = groups.length
-      ? groups.map(card).join('')
-      : '<div class="empty-monitor">暂无已启用的监控分组</div>';
+    renderGroups(data);
   } catch (error) {
     overallStatus.className = 'overall-status is-unavailable';
     overallStatusLabel.textContent = 'OFFLINE';
@@ -196,5 +271,6 @@ async function load() {
   }
 }
 
+rangeButtons.forEach((button) => button.addEventListener('click', () => selectWindow(button.dataset.window)));
 refreshButton.addEventListener('click', load);
 load();
