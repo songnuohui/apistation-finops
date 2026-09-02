@@ -112,8 +112,10 @@ function cursorTimeKey(value) {
   return value?.cursor_time_key || value?.updated_at || value?.occurred_at || value?.created_at;
 }
 
-function normalizedGroupName(value) {
-  return String(value || '').trim().replace(/\s+/g, '').toLocaleLowerCase('zh-CN');
+function monitorMetricNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 export function summarizeChannelMonitorGroup(monitors = []) {
@@ -130,28 +132,23 @@ export function summarizeChannelMonitorGroup(monitors = []) {
   }
   const statuses = enabled.map((monitor) => String(monitor.primaryStatus || '').trim().toLowerCase());
   const known = statuses.filter(Boolean);
-  const availableCount = statuses.filter((status) => status === 'operational' || status === 'degraded').length;
-  const totalCount = enabled.length;
+  const availableCount = statuses.filter((value) => value === 'operational' || value === 'degraded').length;
   const availabilityValues = enabled
     .filter((monitor) => String(monitor.primaryStatus || '').trim())
     .map((monitor) => Number(monitor.availability7d))
     .filter(Number.isFinite);
-  const latencyValues = enabled
-    .map((monitor) => Number(monitor.primaryLatencyMs))
-    .filter((value) => Number.isFinite(value) && value >= 0);
-  const pingLatencyValues = enabled
-    .map((monitor) => Number(monitor.primaryPingLatencyMs))
-    .filter((value) => Number.isFinite(value) && value >= 0);
-  let status = 'unknown';
-  if (known.length) {
-    if (!availableCount) status = 'unavailable';
-    else if (availableCount < totalCount || statuses.some((value) => value === 'degraded')) status = 'degraded';
-    else status = 'healthy';
-  }
+  const latencyValues = enabled.map((monitor) => monitorMetricNumber(monitor.primaryLatencyMs)).filter((value) => value !== null);
+  const pingLatencyValues = enabled.map((monitor) => monitorMetricNumber(monitor.primaryPingLatencyMs)).filter((value) => value !== null);
   return {
-    status,
+    status: !known.length
+      ? 'unknown'
+      : !availableCount
+        ? 'unavailable'
+        : availableCount < enabled.length || statuses.includes('degraded')
+          ? 'degraded'
+          : 'healthy',
     availableCount,
-    totalCount,
+    totalCount: enabled.length,
     availabilityPercent: availabilityValues.length
       ? Number((availabilityValues.reduce((total, value) => total + value, 0) / availabilityValues.length).toFixed(2))
       : null,
@@ -189,7 +186,6 @@ export class SyncService {
     this.costRefreshPromise = null;
     this.lastRuntimeRefreshAt = 0;
     this.runtimeTimer = null;
-    this.channelMonitorReader = null;
     this.sourceGroupCatalogReader = null;
     this.sourceGroupCatalogWriter = null;
     this.runtimeStatusReader = null;
@@ -198,10 +194,6 @@ export class SyncService {
     this.readCacheInvalidator = null;
     this.sub2ApiAccessToken = '';
     this.sub2ApiAccessTokenProvider = null;
-  }
-
-  setChannelMonitorReader(reader) {
-    this.channelMonitorReader = typeof reader === 'function' ? reader : null;
   }
 
   setSourceGroupCatalogReader(reader) {
@@ -268,16 +260,6 @@ export class SyncService {
     }
   }
 
-  async readChannelMonitors() {
-    if (!this.channelMonitorReader) return null;
-    try {
-      return await this.withSub2ApiAccessToken((authentication) => this.channelMonitorReader(authentication));
-    } catch (error) {
-      this.logger.warn('[monitor] failed to read sub2api channel monitors', error?.code || error?.message || error);
-      return null;
-    }
-  }
-
   async refreshSourceGroupCatalog() {
     if (!this.sourceGroupCatalogReader || !this.sourceGroupCatalogWriter) return null;
     try {
@@ -289,13 +271,6 @@ export class SyncService {
       this.logger.warn('[monitor] failed to refresh sub2api group catalog', error?.code || error?.message || error);
       return null;
     }
-  }
-
-  async refreshChannelMonitorSnapshots() {
-    await this.refreshSourceGroupCatalog();
-    const channelMonitors = await this.readChannelMonitors();
-    if (!Array.isArray(channelMonitors)) return 0;
-    return this.captureChannelMonitorGroupObservations(channelMonitors);
   }
 
   async refreshRuntimeSnapshots({ minIntervalMs = 0 } = {}) {
@@ -558,6 +533,7 @@ export class SyncService {
     const started = Date.now();
     try {
       await this.syncDimensions();
+      await this.refreshSourceGroupCatalog();
       const historicalCostSnapshotRows = this.config.syncUsageEnabled
         ? await inTransaction(
           this.finopsPool,
@@ -582,7 +558,6 @@ export class SyncService {
         ? await this.drain('usage_logs', () => this.syncUsage())
         : 0;
       if (this.config.syncUsageEnabled) await this.refreshRecentUsage();
-      const monitorObservationRows = await this.refreshChannelMonitorSnapshots();
       const runtimeSnapshotRows = await this.refreshRuntimeSnapshots();
       const liveUsageSnapshotResult = this.config.syncUsageEnabled
         ? await inTransaction(
@@ -614,7 +589,6 @@ export class SyncService {
       }
       const result = {
         skipped: false, usageRows, paymentRows, recentPaymentRows, redeemRows, affiliateRows, auditRows, subscriptionRows,
-        monitorObservationRows,
         runtimeSnapshotRows,
         historicalCostSnapshotRows, historicalFixedCostSnapshotRows,
         liveCostSnapshotRows: liveUsageSnapshotResult.rows,
@@ -719,50 +693,6 @@ export class SyncService {
       [sourceName],
     );
     return result.rows[0];
-  }
-
-  async captureMonitorGroupObservations(channelMonitors = null) {
-    if (!Array.isArray(channelMonitors)) return 0;
-    return this.captureChannelMonitorGroupObservations(channelMonitors);
-  }
-
-  async captureChannelMonitorGroupObservations(channelMonitors) {
-    const configured = await this.finopsPool.query(`
-      SELECT g.id,g.name AS monitor_group_name,COALESCE(c.name,'') AS source_group_name
-      FROM ${this.schema}.monitor_groups g
-      LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
-      WHERE g.enabled
-      ORDER BY g.id`);
-    if (!configured.rowCount) return 0;
-    return inTransaction(this.finopsPool, async (client) => {
-      for (const group of configured.rows) {
-        const groupNames = new Set([
-          normalizedGroupName(group.monitor_group_name),
-          normalizedGroupName(group.source_group_name),
-        ].filter(Boolean));
-        const monitors = channelMonitors.filter((monitor) => (
-          monitor?.enabled !== false
-          && groupNames.has(normalizedGroupName(monitor.groupName || monitor.name))
-        ));
-        const summary = summarizeChannelMonitorGroup(monitors);
-        await client.query(`
-          INSERT INTO ${this.schema}.monitor_group_observations(
-            monitor_group_id,status,available_account_count,total_account_count,
-            group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
-            average_ping_latency_ms,source_availability_percent,observation_source)
-          VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,$7,'sub2api_channel_monitor')`,
-        [
-          group.id,
-          summary.status,
-          summary.availableCount,
-          summary.totalCount,
-          summary.averageLatencyMs,
-          summary.averagePingLatencyMs,
-          summary.availabilityPercent,
-        ]);
-      }
-      return configured.rowCount;
-    });
   }
 
   async upsertUpstreamBillingSnapshot(client, accountId, rawSnapshot) {

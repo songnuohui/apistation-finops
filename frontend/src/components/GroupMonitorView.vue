@@ -16,8 +16,6 @@ const saving = ref(false);
 const savingSettings = ref(false);
 const editor = ref<AnyRecord | null>(null);
 
-const configuredSourceIds = computed(() => new Set(groups.value.map((group) => Number(group.sourceGroupId))));
-const availableCandidates = computed(() => candidates.value.filter((candidate) => !configuredSourceIds.value.has(Number(candidate.sourceGroupId))));
 const enabledCount = computed(() => groups.value.filter((group) => group.enabled).length);
 const refreshInterval = ref(30);
 
@@ -138,8 +136,7 @@ onMounted(load);
         <p class="section-subtitle">维护公开监控分组，并为用户显示当前计费倍率</p>
       </div>
       <div class="group-monitor-actions">
-        <span class="monitor-sync-state">候选自动同步 · {{ candidates.length }} 个</span>
-        <button class="icon-button" type="button" title="刷新分组与候选" aria-label="刷新分组与候选" :disabled="loading" @click="load">
+        <button class="icon-button" type="button" title="刷新监控配置" aria-label="刷新监控配置" :disabled="loading" @click="load">
           <RefreshCw :size="17" :class="{ spin: loading }" />
         </button>
         <a class="secondary-button monitor-preview-link" href="/monitor" target="_blank" rel="noreferrer"><ExternalLink :size="16" />打开公开监控页</a>
@@ -147,10 +144,17 @@ onMounted(load);
       </div>
     </div>
 
+    <section class="panel monitor-settings-panel">
+      <div class="panel-head"><div><h2>公开页刷新</h2><p>公开页由 FinOps 服务端只读查询 Sub2API，并使用短时缓存控制访问频率。</p></div><Settings2 :size="20" class="head-icon" /></div>
+      <div class="monitor-settings-row">
+        <label>自动刷新间隔（秒）<input v-model.number="refreshInterval" type="number" min="5" max="3600" step="1" /></label>
+        <button class="secondary-button" type="button" :disabled="savingSettings" @click="saveMonitorSettings"><Save :size="15" />保存刷新设置</button>
+      </div>
+    </section>
+
     <div class="metric-grid group-monitor-metrics">
       <div class="metric-card"><span>已配置分组</span><strong>{{ groups.length }}</strong><small>FinOps 手动维护的监控清单</small></div>
       <div class="metric-card good"><span>当前启用</span><strong>{{ enabledCount }}</strong><small>会出现在公开监控页</small></div>
-      <div class="metric-card"><span>可添加候选</span><strong>{{ availableCandidates.length }}</strong><small>来自 Sub2API 分组目录</small></div>
     </div>
 
     <section class="panel table-panel">
@@ -171,44 +175,10 @@ onMounted(load);
               <td><span class="status-pill" :class="group.enabled ? 'success' : 'warning'">{{ group.enabled ? '已启用' : '已停用' }}</span></td>
               <td><button class="icon-button mini" type="button" title="编辑分组监控" aria-label="编辑分组监控" @click="openEditor(group)"><Edit3 :size="15" /></button></td>
             </tr>
-            <tr v-if="!loading && !groups.length"><td colspan="7" class="table-empty">暂无已配置监控分组，请从下方候选中添加。</td></tr>
+            <tr v-if="!loading && !groups.length"><td colspan="7" class="table-empty">暂无已配置监控分组，请点击右上角新增监控分组。</td></tr>
             <tr v-if="loading"><td colspan="7" class="table-empty">正在读取分组监控配置</td></tr>
           </tbody>
         </table>
-      </div>
-    </section>
-
-    <section class="panel table-panel">
-      <div class="panel-head">
-        <div><h2>Sub2API 分组候选</h2><p>候选来自 FinOps 后台只读同步，不会修改 Sub2API 分组或数据。</p></div>
-        <span class="monitor-catalog-time">最新同步 {{ dateTime(candidates[0]?.catalogSyncedAt) }}</span>
-      </div>
-      <div class="table-wrap">
-        <table class="group-monitor-table candidate-table">
-          <thead><tr><th>分组</th><th>平台</th><th>Sub2API 倍率</th><th>状态</th><th>最近使用</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="candidate in candidates" :key="candidate.sourceGroupId">
-              <td><strong>{{ candidate.name || `分组 #${candidate.sourceGroupId}` }}</strong><small>ID {{ candidate.sourceGroupId }}<template v-if="candidate.defaultModel"> · {{ candidate.defaultModel }}</template></small></td>
-              <td>{{ candidate.platform || '--' }}</td>
-              <td><strong>{{ multiplier(candidate.groupMultiplier) }}</strong></td>
-              <td><span class="status-pill" :class="candidate.status === 'active' ? 'success' : 'warning'">{{ candidate.status === 'active' ? '启用' : (candidate.status || '未知') }}</span></td>
-              <td>{{ dateTime(candidate.lastUsedAt) }}</td>
-              <td>
-                <button v-if="!configuredSourceIds.has(Number(candidate.sourceGroupId))" class="small-button" type="button" @click="openEditor(null, candidate)"><Plus :size="14" />添加监控</button>
-                <span v-else class="muted-text">已配置</span>
-              </td>
-            </tr>
-            <tr v-if="!loading && !candidates.length"><td colspan="6" class="table-empty">暂无 Sub2API 分组候选，等待后台同步。</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel monitor-settings-panel">
-      <div class="panel-head"><div><h2>公开页刷新</h2><p>公开页只读取 FinOps 已保存的监控快照，不会由浏览器直接高频请求 Sub2API。</p></div><Settings2 :size="20" class="head-icon" /></div>
-      <div class="monitor-settings-row">
-        <label>自动刷新间隔（秒）<input v-model.number="refreshInterval" type="number" min="5" max="3600" step="1" /></label>
-        <button class="secondary-button" type="button" :disabled="savingSettings" @click="saveMonitorSettings"><Save :size="15" />保存刷新设置</button>
       </div>
     </section>
 
@@ -247,8 +217,7 @@ onMounted(load);
 .section-subtitle{margin:4px 0 0;color:var(--muted);font-size:12px}
 .group-monitor-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .monitor-preview-link{display:inline-flex;align-items:center;text-decoration:none}
-.monitor-sync-state,.monitor-catalog-time{color:var(--muted);font-size:11px}
-.group-monitor-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+.group-monitor-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
 .group-monitor-table{min-width:980px!important}
 .group-monitor-table td small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
 .group-current-multiplier{color:var(--primary-dark)}

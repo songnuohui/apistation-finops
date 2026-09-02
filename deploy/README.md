@@ -76,7 +76,7 @@ MONITOR_EMBED_ORIGINS=https://sub2api.example.com
 <iframe src="https://finops.example.com/monitor" title="分组可用性监控"></iframe>
 ```
 
-监控配置和观测只写入独立 FinOps 数据库；分组 ID 只是源系统引用，FinOps 不会修改源服务或源数据库。
+监控配置、展示倍率和刷新设置写入独立 FinOps 数据库；监控状态、最近 60 次记录和 7/15/30 天统计由 FinOps 使用列级只读连接实时查询 Sub2API，并使用短时内存缓存。FinOps 不复制或留存 Sub2API 明细、日聚合，也不会修改源服务、源数据库或源 Redis。
 
 ## 安全要求
 

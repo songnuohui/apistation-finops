@@ -42,6 +42,26 @@ GRANT SELECT (id,user_id,action,amount,source_user_id,source_order_id,created_at
 GRANT SELECT (id,order_id,action,detail,operator,created_at)
   ON TABLE public.payment_audit_logs TO finops_source_reader;
 
+-- Channel monitoring is read through a separate read-only connection. Grant
+-- only the columns needed for status, recent history, and daily statistics;
+-- never expose channel_monitors.api_key_encrypted.
+DO $$
+BEGIN
+  IF to_regclass('public.channel_monitors') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.channel_monitors FROM finops_source_reader';
+    EXECUTE 'GRANT SELECT (id,name,provider,group_name,primary_model,enabled,last_checked_at) ON TABLE public.channel_monitors TO finops_source_reader';
+  END IF;
+  IF to_regclass('public.channel_monitor_histories') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.channel_monitor_histories FROM finops_source_reader';
+    EXECUTE 'GRANT SELECT (id,monitor_id,model,status,latency_ms,ping_latency_ms,checked_at) ON TABLE public.channel_monitor_histories TO finops_source_reader';
+  END IF;
+  IF to_regclass('public.channel_monitor_daily_rollups') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.channel_monitor_daily_rollups FROM finops_source_reader';
+    EXECUTE 'GRANT SELECT (id,monitor_id,model,bucket_date,total_checks,ok_count,sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency) ON TABLE public.channel_monitor_daily_rollups TO finops_source_reader';
+  END IF;
+END
+$$;
+
 -- Optional compatibility grants. They are applied only when the source
 -- instance actually exposes the subscription-related columns and table.
 DO $$

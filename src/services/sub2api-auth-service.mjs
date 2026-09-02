@@ -194,6 +194,7 @@ export async function listSub2ApiChannelMonitors({ accessToken, clientIp = '', a
       id,
       name: String(monitor.name || '').trim().slice(0, 120),
       groupName: String(monitor.group_name || '').trim().slice(0, 120),
+      sourceGroupId: optionalInteger(monitor.group_id ?? monitor.source_group_id ?? monitor.groupId),
       primaryModel: String(monitor.primary_model || '').trim().slice(0, 160),
       enabled: monitor.enabled !== false,
       primaryStatus: String(monitor.primary_status || '').trim().slice(0, 24),

@@ -22,6 +22,7 @@ export function createSourcePool(config) {
     'apistation-finops-source-reader',
     config.sourceDatabasePoolMax ?? 3,
     config.sourceStatementTimeoutMs ?? 10_000,
+    { readOnly: true },
   );
 }
 

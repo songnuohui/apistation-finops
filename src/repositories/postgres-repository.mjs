@@ -2267,129 +2267,42 @@ export class PostgresRepository {
 
   async listMonitorGroups() {
     const result = await this.pool.query(`
-      WITH window_stats AS (
-        SELECT monitor_group_id,
-               ROUND((AVG(source_availability_percent) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '7 days'
-               ))::numeric, 2) AS source_availability_7d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '7 days'
-                   AND status <> 'unknown'
-               )::int AS samples_7d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '7 days'
-                   AND status IN ('healthy','degraded')
-               )::int AS available_samples_7d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '15 days'
-                   AND status <> 'unknown'
-               )::int AS samples_15d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '15 days'
-                   AND status IN ('healthy','degraded')
-               )::int AS available_samples_15d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '30 days'
-                   AND status <> 'unknown'
-               )::int AS samples_30d,
-               COUNT(*) FILTER (
-                 WHERE observed_at >= NOW() - INTERVAL '30 days'
-                   AND status IN ('healthy','degraded')
-               )::int AS available_samples_30d
-        FROM ${this.schema}.monitor_group_observations
-        WHERE observation_source='sub2api_channel_monitor'
-          AND observed_at >= NOW() - INTERVAL '30 days'
-        GROUP BY monitor_group_id
-      ), latest AS (
-        SELECT DISTINCT ON (monitor_group_id)
-               monitor_group_id,status,available_account_count,total_account_count,
-               group_multiplier,user_multiplier,effective_multiplier,average_latency_ms,
-               average_ping_latency_ms,source_availability_percent,observed_at
-        FROM ${this.schema}.monitor_group_observations
-        WHERE observation_source='sub2api_channel_monitor'
-        ORDER BY monitor_group_id,observed_at DESC,id DESC
-      ), history_rows AS (
-        SELECT id,monitor_group_id,status,average_latency_ms,average_ping_latency_ms,observed_at,
-               ROW_NUMBER() OVER (
-                 PARTITION BY monitor_group_id
-                 ORDER BY observed_at DESC,id DESC
-               ) AS history_rank
-        FROM ${this.schema}.monitor_group_observations
-        WHERE observation_source='sub2api_channel_monitor'
-      ), history AS (
-        SELECT monitor_group_id,
-               JSON_AGG(
-                 JSON_BUILD_OBJECT(
-                   'status',status,
-                   'latencyMs',average_latency_ms,
-                   'pingLatencyMs',average_ping_latency_ms,
-                   'observedAt',observed_at
-                 )
-                 ORDER BY observed_at,id
-               ) AS history
-        FROM history_rows
-        WHERE history_rank <= 60
-        GROUP BY monitor_group_id
-      )
       SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
-             g.display_multiplier,
-             l.status,l.available_account_count,l.total_account_count,
-             c.platform,c.rate_multiplier AS source_group_multiplier,
-             COALESCE(g.display_multiplier,c.rate_multiplier) AS current_multiplier,
-             l.group_multiplier,l.user_multiplier,l.effective_multiplier,l.average_latency_ms,
-             l.average_ping_latency_ms,l.source_availability_percent,l.observed_at,
-             w.source_availability_7d,w.samples_7d,w.available_samples_7d,
-             w.samples_15d,w.available_samples_15d,w.samples_30d,w.available_samples_30d,
-             h.history
+             g.display_multiplier,c.name AS source_group_name,c.platform,
+             c.rate_multiplier AS source_group_multiplier
       FROM ${this.schema}.monitor_groups g
       LEFT JOIN ${this.schema}.source_group_catalog c ON c.source_group_id=g.source_group_id
-      LEFT JOIN latest l ON l.monitor_group_id=g.id
-      LEFT JOIN window_stats w ON w.monitor_group_id=g.id
-      LEFT JOIN history h ON h.monitor_group_id=g.id
       ORDER BY g.display_order,g.id`);
     return result.rows.map((row) => ({
       id: number(row.id),
       name: row.name,
       sourceGroupId: number(row.source_group_id),
       modelLabel: row.model_label || '',
+      sourceGroupName: row.source_group_name || '',
       provider: row.platform || '',
       displayOrder: number(row.display_order),
       enabled: Boolean(row.enabled),
-      status: row.status || 'unknown',
-      availableAccountCount: number(row.available_account_count),
-      totalAccountCount: number(row.total_account_count),
+      status: 'unknown',
+      availableAccountCount: 0,
+      totalAccountCount: 0,
       displayMultiplier: nullableNumber(row.display_multiplier),
       sourceGroupMultiplier: nullableNumber(row.source_group_multiplier),
-      currentMultiplier: nullableNumber(row.current_multiplier),
-      configuredGroupMultiplier: nullableNumber(row.current_multiplier),
-      groupMultiplier: nullableNumber(row.group_multiplier),
-      userMultiplier: nullableNumber(row.user_multiplier),
-      effectiveMultiplier: nullableNumber(row.effective_multiplier),
-      averageLatencyMs: nullableNumber(row.average_latency_ms),
-      averagePingLatencyMs: nullableNumber(row.average_ping_latency_ms),
-      lastObservedAt: row.observed_at || null,
+      currentMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
+      configuredGroupMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
+      groupMultiplier: null,
+      userMultiplier: null,
+      effectiveMultiplier: null,
+      averageLatencyMs: null,
+      averagePingLatencyMs: null,
+      lastObservedAt: null,
       availabilityByWindow: {
-        '7d': nullableNumber(row.source_availability_7d)
-          ?? (number(row.samples_7d)
-            ? Number((number(row.available_samples_7d) * 100 / number(row.samples_7d)).toFixed(2))
-            : null),
-        '15d': number(row.samples_15d)
-          ? Number((number(row.available_samples_15d) * 100 / number(row.samples_15d)).toFixed(2))
-          : null,
-        '30d': number(row.samples_30d)
-          ? Number((number(row.available_samples_30d) * 100 / number(row.samples_30d)).toFixed(2))
-          : null,
+        '7d': null,
+        '15d': null,
+        '30d': null,
       },
-      availabilitySampleCount: {
-        '7d': number(row.samples_7d),
-        '15d': number(row.samples_15d),
-        '30d': number(row.samples_30d),
-      },
-      availabilityPercent: nullableNumber(row.source_availability_7d)
-        ?? (number(row.samples_7d)
-          ? Number((number(row.available_samples_7d) * 100 / number(row.samples_7d)).toFixed(2))
-          : null),
-      history: Array.isArray(row.history) ? row.history : [],
+      availabilitySampleCount: { '7d': 0, '15d': 0, '30d': 0 },
+      availabilityPercent: null,
+      history: [],
     }));
   }
 
@@ -2621,9 +2534,6 @@ export class PostgresRepository {
         RETURNING *`,
       [id,input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.displayOrder,input.enabled]);
       const updated = result.rows[0];
-      if (Number(before.source_group_id) !== Number(updated.source_group_id)) {
-        await client.query(`DELETE FROM ${this.schema}.monitor_group_observations WHERE monitor_group_id=$1`, [id]);
-      }
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value,after_value)
         VALUES($1,'update','monitor_group',$2,$3::jsonb,$4::jsonb)`,
       [actor,String(id),JSON.stringify(before),JSON.stringify(updated)]);
@@ -2637,68 +2547,6 @@ export class PostgresRepository {
         enabled: Boolean(updated.enabled),
       };
     });
-  }
-
-  async getPublicMonitorDashboard() {
-    const [allGroups, settings] = await Promise.all([
-      this.listMonitorGroups(),
-      this.getMonitorSettings(),
-    ]);
-    const groups = allGroups.filter((group) => group.enabled);
-    const publicGroups = groups.map((group) => ({
-      id: group.id,
-      name: group.name,
-      provider: group.provider,
-      modelLabel: group.modelLabel,
-      status: group.status,
-      currentMultiplier: group.currentMultiplier,
-      availabilityPercent: group.availabilityPercent,
-      availabilityByWindow: group.availabilityByWindow,
-      availabilitySampleCount: group.availabilitySampleCount,
-      availableAccountCount: group.availableAccountCount,
-      totalAccountCount: group.totalAccountCount,
-      averageLatencyMs: group.averageLatencyMs,
-      averagePingLatencyMs: group.averagePingLatencyMs,
-      lastObservedAt: group.lastObservedAt,
-      history: group.history,
-    }));
-    const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
-    const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
-    const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
-    const knownGroups = healthyGroups + degradedGroups + unavailableGroups;
-    const overallStatus = !groups.length || knownGroups === 0
-      ? 'unknown'
-      : unavailableGroups > 0
-        ? 'unavailable'
-        : degradedGroups > 0 || healthyGroups < groups.length
-          ? 'degraded'
-          : 'healthy';
-    if (!groups.length) {
-      return {
-        generatedAt: new Date().toISOString(),
-        refreshIntervalSeconds: settings.refreshIntervalSeconds,
-        summary: {
-          overallStatus,
-          totalGroups: 0,
-          healthyGroups: 0,
-          degradedGroups: 0,
-          unavailableGroups: 0,
-        },
-        groups: [],
-      };
-    }
-    return {
-      generatedAt: new Date().toISOString(),
-      refreshIntervalSeconds: settings.refreshIntervalSeconds,
-      summary: {
-        overallStatus,
-        totalGroups: groups.length,
-        healthyGroups,
-        degradedGroups,
-        unavailableGroups,
-      },
-      groups: publicGroups,
-    };
   }
 
   async ensureSupplierInTransaction(client, name, actor='admin') {
