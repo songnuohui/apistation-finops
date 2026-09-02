@@ -8,6 +8,7 @@ REPO_DIR="$APP_ROOT/repo"
 CURRENT_LINK="$APP_ROOT/current"
 ENV_FILE="${ENV_FILE:-/etc/apistation-finops/finops.env}"
 SERVICE_NAME="${SERVICE_NAME:-apistation-finops}"
+COMPOSE_FILE="${COMPOSE_FILE:-$REPO_DIR/deploy/docker-compose.host.yml}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "run this script as root" >&2
@@ -29,20 +30,26 @@ else
   git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
 fi
 
-git -C "$REPO_DIR" clean -fd
-corepack pnpm --dir "$REPO_DIR" install --frozen-lockfile
-
 set -a
 . "$ENV_FILE"
 set +a
-corepack pnpm --dir "$REPO_DIR" migrate
+export FINOPS_ENV_FILE="$ENV_FILE"
+
+if [ ! -f "$COMPOSE_FILE" ]; then
+  echo "missing FinOps Docker Compose file: $COMPOSE_FILE" >&2
+  exit 1
+fi
+
+compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+"${compose[@]}" build "$SERVICE_NAME"
+"${compose[@]}" run --rm --no-deps "$SERVICE_NAME" pnpm migrate
 
 ln -sfn "$REPO_DIR" "$CURRENT_LINK"
-systemctl restart "$SERVICE_NAME"
+"${compose[@]}" up -d --no-deps --force-recreate "$SERVICE_NAME"
 
 for attempt in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8090/health >/dev/null 2>&1 \
-    && curl -fsS http://127.0.0.1:8090/ready >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${FINOPS_PORT:-8092}/health" >/dev/null 2>&1 \
+    && curl -fsS "http://127.0.0.1:${FINOPS_PORT:-8092}/ready" >/dev/null 2>&1; then
     echo "deployed $(git -C "$REPO_DIR" rev-parse --short HEAD)"
     echo "current $(readlink -f "$CURRENT_LINK")"
     exit 0
@@ -51,5 +58,6 @@ for attempt in $(seq 1 30); do
 done
 
 echo "service did not become ready" >&2
-systemctl --no-pager --full status "$SERVICE_NAME" || true
+"${compose[@]}" ps "$SERVICE_NAME" || true
+"${compose[@]}" logs --tail=200 "$SERVICE_NAME" || true
 exit 1
