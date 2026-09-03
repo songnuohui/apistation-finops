@@ -12,6 +12,71 @@ function nullableNumber(value) {
   return value === null || value === undefined ? null : Number(value);
 }
 
+function jsonObject(value, fallback = {}) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
+}
+
+function jsonArray(value) {
+  return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
+}
+
+function monitorStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'operational') return 'healthy';
+  if (normalized === 'degraded') return 'degraded';
+  if (normalized === 'failed' || normalized === 'error') return 'unavailable';
+  return 'unknown';
+}
+
+function monitorConfigFromRow(row, { includeSecret = false } = {}) {
+  const probeConfigured = Boolean(row.endpoint && row.api_key_ciphertext && row.primary_model);
+  const result = {
+    id: number(row.id),
+    name: row.name || '',
+    sourceGroupId: number(row.source_group_id),
+    modelLabel: row.model_label || '',
+    sourceGroupName: row.source_group_name || '',
+    provider: row.provider || row.platform || 'openai',
+    platform: row.platform || row.provider || 'openai',
+    apiMode: row.api_mode || 'chat_completions',
+    endpoint: row.endpoint || '',
+    apiKeyConfigured: Boolean(row.api_key_ciphertext),
+    probeConfigured,
+    apiKeyMasked: row.api_key_masked || '',
+    primaryModel: row.primary_model || '',
+    extraModels: jsonArray(row.extra_models),
+    groupName: row.group_name || row.source_group_name || '',
+    extraHeaders: jsonObject(row.extra_headers),
+    bodyOverrideMode: row.body_override_mode || 'off',
+    bodyOverride: jsonObject(row.body_override),
+    displayOrder: number(row.display_order),
+    enabled: Boolean(row.enabled),
+    refreshIntervalSeconds: number(row.refresh_interval_seconds || 30),
+    jitterSeconds: number(row.jitter_seconds || 0),
+    historyStartedAt: row.history_started_at || null,
+    status: monitorStatus(row.last_status),
+    lastStatus: row.last_status || 'unknown',
+    lastMessage: row.last_message || '',
+    lastObservedAt: row.last_checked_at || null,
+    lastCheckedAt: row.last_checked_at || null,
+    sourceGroupMultiplier: nullableNumber(row.source_group_multiplier),
+    displayMultiplier: nullableNumber(row.display_multiplier),
+    currentMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
+    configuredGroupMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
+    availableAccountCount: 0,
+    totalAccountCount: 1,
+    averageLatencyMs: nullableNumber(row.last_latency_ms),
+    averagePingLatencyMs: nullableNumber(row.last_ping_latency_ms),
+    availabilityByWindow: { '7d': null, '15d': null, '30d': null },
+    availabilitySampleCount: { '7d': 0, '15d': 0, '30d': 0 },
+    availabilityPercent: null,
+    models: [],
+    history: [],
+  };
+  if (includeSecret) result.apiKeyCiphertext = row.api_key_ciphertext || '';
+  return result;
+}
+
 function supplierKeyPurchaseBatch(row) {
   const externalId = String(row?.external_key_id ?? row?.externalId ?? '').trim();
   const identity = String(row?.name || '').trim()
@@ -2265,50 +2330,172 @@ export class PostgresRepository {
     });
   }
 
-  async listMonitorGroups() {
-    const result = await this.pool.query(`
-      SELECT g.id,g.name,g.source_group_id,g.model_label,g.display_order,g.enabled,
-             g.display_multiplier,g.refresh_interval_seconds,g.history_started_at,
-             c.name AS source_group_name,c.platform,
+  async listMonitorGroups({ includeSecrets = false } = {}) {
+    const base = await this.pool.query(`
+      SELECT g.*,c.name AS source_group_name,c.platform,
              c.rate_multiplier AS source_group_multiplier
       FROM ${this.schema}.monitor_groups g
       JOIN ${this.schema}.source_group_catalog c
         ON c.source_group_id=g.source_group_id
        AND c.status='active'
       ORDER BY g.display_order,g.id`);
-    return result.rows.map((row) => ({
-      id: number(row.id),
-      name: row.name,
-      sourceGroupId: number(row.source_group_id),
-      modelLabel: row.model_label || '',
-      sourceGroupName: row.source_group_name || '',
-      provider: row.platform || '',
-      displayOrder: number(row.display_order),
-      enabled: Boolean(row.enabled),
-      refreshIntervalSeconds: number(row.refresh_interval_seconds),
-      historyStartedAt: row.history_started_at || null,
-      status: 'unknown',
-      availableAccountCount: 0,
-      totalAccountCount: 0,
-      displayMultiplier: nullableNumber(row.display_multiplier),
-      sourceGroupMultiplier: nullableNumber(row.source_group_multiplier),
-      currentMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
-      configuredGroupMultiplier: nullableNumber(row.display_multiplier ?? row.source_group_multiplier),
-      groupMultiplier: null,
-      userMultiplier: null,
-      effectiveMultiplier: null,
-      averageLatencyMs: null,
-      averagePingLatencyMs: null,
-      lastObservedAt: null,
-      availabilityByWindow: {
-        '7d': null,
-        '15d': null,
-        '30d': null,
-      },
-      availabilitySampleCount: { '7d': 0, '15d': 0, '30d': 0 },
-      availabilityPercent: null,
-      history: [],
-    }));
+    if (!base.rowCount) return [];
+
+    const ids = base.rows.map((row) => Number(row.id));
+    const params = [ids];
+    const latest = await this.pool.query(`
+      SELECT DISTINCT ON (h.monitor_group_id,h.model)
+             h.monitor_group_id,h.model,h.status,h.latency_ms,h.ping_latency_ms,
+             h.message,h.checked_at
+      FROM ${this.schema}.monitor_group_check_history h
+      JOIN ${this.schema}.monitor_groups g ON g.id=h.monitor_group_id
+      WHERE h.monitor_group_id=ANY($1::bigint[])
+        AND h.checked_at >= g.history_started_at
+      ORDER BY h.monitor_group_id,h.model,h.checked_at DESC,h.id DESC`, params);
+    const history = await this.pool.query(`
+      WITH ranked AS (
+        SELECT h.id,h.monitor_group_id,h.model,h.status,h.latency_ms,h.ping_latency_ms,
+               h.message,h.checked_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY h.monitor_group_id,h.model
+                 ORDER BY h.checked_at DESC,h.id DESC
+               ) AS history_rank
+        FROM ${this.schema}.monitor_group_check_history h
+        JOIN ${this.schema}.monitor_groups g ON g.id=h.monitor_group_id
+        WHERE h.monitor_group_id=ANY($1::bigint[])
+          AND h.checked_at >= g.history_started_at
+          AND h.model=g.primary_model
+      )
+      SELECT id,monitor_group_id,model,status,latency_ms,ping_latency_ms,message,checked_at
+      FROM ranked
+      WHERE history_rank<=60
+      ORDER BY monitor_group_id,checked_at,id`, params);
+    const rollups = await this.pool.query(`
+      SELECT monitor_group_id,model,bucket_date,total_checks,ok_count,
+             sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency
+      FROM ${this.schema}.monitor_group_daily_rollups
+      WHERE monitor_group_id=ANY($1::bigint[])
+        AND bucket_date >= (($2::timestamptz AT TIME ZONE $3)::date - 29)
+      ORDER BY monitor_group_id,model,bucket_date`, [
+      ids, new Date().toISOString(), this.config.timezone || 'UTC',
+    ]);
+
+    const latestByGroup = new Map();
+    for (const row of latest.rows) {
+      const groupId = Number(row.monitor_group_id);
+      if (!latestByGroup.has(groupId)) latestByGroup.set(groupId, new Map());
+      latestByGroup.get(groupId).set(row.model, row);
+    }
+    const historyByGroup = new Map();
+    for (const row of history.rows) {
+      const groupId = Number(row.monitor_group_id);
+      if (!historyByGroup.has(groupId)) historyByGroup.set(groupId, []);
+      historyByGroup.get(groupId).push({
+        id: number(row.id),
+        model: row.model || '',
+        status: monitorStatus(row.status),
+        rawStatus: row.status || 'error',
+        latencyMs: nullableNumber(row.latency_ms),
+        pingLatencyMs: nullableNumber(row.ping_latency_ms),
+        message: row.message || '',
+        observedAt: row.checked_at || null,
+      });
+    }
+    const rollupByGroup = new Map();
+    for (const row of rollups.rows) {
+      const groupId = Number(row.monitor_group_id);
+      if (!rollupByGroup.has(groupId)) rollupByGroup.set(groupId, []);
+      rollupByGroup.get(groupId).push(row);
+    }
+    const today = new Date().toLocaleDateString('en-CA', {
+      timeZone: this.config.timezone || 'UTC',
+    });
+
+    return base.rows.map((row) => {
+      const group = monitorConfigFromRow(row, { includeSecret: includeSecrets });
+      const latestModels = latestByGroup.get(group.id) || new Map();
+      const models = [...new Set([group.primaryModel, ...group.extraModels].filter(Boolean))];
+      group.models = models.map((model) => {
+        const item = latestModels.get(model);
+        return {
+          model,
+          status: monitorStatus(item?.status),
+          rawStatus: item?.status || 'unknown',
+          latencyMs: nullableNumber(item?.latency_ms),
+          pingLatencyMs: nullableNumber(item?.ping_latency_ms),
+          message: item?.message || '',
+          lastObservedAt: item?.checked_at || null,
+        };
+      });
+      const primary = latestModels.get(group.primaryModel);
+      if (primary) {
+        group.lastMessage = primary.message || '';
+        group.lastObservedAt = primary.checked_at || group.lastObservedAt;
+        group.lastCheckedAt = primary.checked_at || group.lastCheckedAt;
+        group.averageLatencyMs = nullableNumber(primary.latency_ms);
+        group.averagePingLatencyMs = nullableNumber(primary.ping_latency_ms);
+      }
+      group.history = (historyByGroup.get(group.id) || []).sort((left, right) => (
+        new Date(left.observedAt || 0).getTime() - new Date(right.observedAt || 0).getTime()
+      ));
+      const groupRollups = rollupByGroup.get(group.id) || [];
+      for (const days of [7, 15, 30]) {
+        const cutoff = new Date(`${today}T00:00:00Z`);
+        cutoff.setUTCDate(cutoff.getUTCDate() - (days - 1));
+        const stats = groupRollups
+          .filter((item) => item.model === group.primaryModel)
+          .filter((item) => String(item.bucket_date).slice(0, 10) >= cutoff.toISOString().slice(0, 10))
+          .reduce((total, item) => ({
+            total: total.total + number(item.total_checks),
+            ok: total.ok + number(item.ok_count),
+            sumLatency: total.sumLatency + number(item.sum_latency_ms),
+            countLatency: total.countLatency + number(item.count_latency),
+            sumPing: total.sumPing + number(item.sum_ping_latency_ms),
+            countPing: total.countPing + number(item.count_ping_latency),
+          }), { total: 0, ok: 0, sumLatency: 0, countLatency: 0, sumPing: 0, countPing: 0 });
+        group.availabilitySampleCount[`${days}d`] = stats.total;
+        group.availabilityByWindow[`${days}d`] = stats.total
+          ? Number((stats.ok * 100 / stats.total).toFixed(2))
+          : null;
+        if (days === 7) {
+          group.averageLatencyMs = stats.countLatency
+            ? Math.round(stats.sumLatency / stats.countLatency)
+            : group.averageLatencyMs;
+          group.averagePingLatencyMs = stats.countPing
+            ? Math.round(stats.sumPing / stats.countPing)
+            : group.averagePingLatencyMs;
+        }
+      }
+      group.availabilityPercent = group.availabilityByWindow['7d'];
+      return group;
+    });
+  }
+
+  async listEnabledMonitorGroupsForRun() {
+    const result = await this.pool.query(`
+      SELECT g.*,c.name AS source_group_name,c.platform,
+             c.rate_multiplier AS source_group_multiplier
+      FROM ${this.schema}.monitor_groups g
+      JOIN ${this.schema}.source_group_catalog c
+        ON c.source_group_id=g.source_group_id
+       AND c.status='active'
+      WHERE g.enabled AND g.api_key_ciphertext<>'' AND g.endpoint<>'' AND g.primary_model<>''
+      ORDER BY g.id`);
+    return result.rows.map((row) => monitorConfigFromRow(row, { includeSecret: true }));
+  }
+
+  async getMonitorGroupForRun(id) {
+    const result = await this.pool.query(`
+      SELECT g.*,c.name AS source_group_name,c.platform,
+             c.rate_multiplier AS source_group_multiplier
+      FROM ${this.schema}.monitor_groups g
+      JOIN ${this.schema}.source_group_catalog c
+        ON c.source_group_id=g.source_group_id
+       AND c.status='active'
+      WHERE g.id=$1 AND g.enabled
+        AND g.endpoint<>'' AND g.api_key_ciphertext<>'' AND g.primary_model<>''
+      LIMIT 1`, [id]);
+    return result.rowCount ? monitorConfigFromRow(result.rows[0], { includeSecret: true }) : null;
   }
 
   async getMonitorSettings() {
@@ -2387,9 +2574,24 @@ export class PostgresRepository {
   }
 
   async upsertSourceGroupCatalog(groups) {
-    const catalog = groups.filter((group) => Number.isSafeInteger(Number(group.sourceGroupId)) && Number(group.sourceGroupId) > 0);
+    const catalog = Array.isArray(groups)
+      ? groups.filter((group) => Number.isSafeInteger(Number(group.sourceGroupId)) && Number(group.sourceGroupId) > 0)
+      : [];
+    // An empty result can be a transient upstream/auth failure. Do not treat
+    // it as proof that every configured FinOps monitor was deleted.
     if (!catalog.length) return 0;
     return inTransaction(this.pool, async (client) => {
+      const sourceIds = catalog.map((group) => Number(group.sourceGroupId));
+      const inactiveIds = catalog
+        .filter((group) => String(group.status || '').toLowerCase() !== 'active')
+        .map((group) => Number(group.sourceGroupId));
+      await client.query(`
+        DELETE FROM ${this.schema}.monitor_groups
+        WHERE NOT (source_group_id=ANY($1::bigint[]))
+           OR source_group_id=ANY($2::bigint[])`, [sourceIds, inactiveIds]);
+      await client.query(`
+        DELETE FROM ${this.schema}.source_group_catalog
+        WHERE NOT (source_group_id=ANY($1::bigint[]))`, [sourceIds]);
       for (const group of catalog) {
         await this.upsertGroupSellingRateRule(client, group);
         await client.query(`
@@ -2508,15 +2710,24 @@ export class PostgresRepository {
         WHERE source_group_id=$1 AND status='active'
         FOR SHARE`, [input.sourceGroupId]);
       if (!source.rowCount) throw httpError('source group is unavailable or deleted', 409);
+      if (!input.apiKey) throw httpError('apiKey is required when creating a monitor', 400);
+      const apiKeyCiphertext = input.apiKeyCiphertext || '';
+      if (!apiKeyCiphertext) throw httpError('monitor API key encryption is unavailable', 503);
       const result = await client.query(`
         INSERT INTO ${this.schema}.monitor_groups(
           name,source_group_id,model_label,display_multiplier,refresh_interval_seconds,
-          display_order,enabled,history_started_at,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8)
+          display_order,enabled,history_started_at,created_by,
+          provider,api_mode,endpoint,api_key_ciphertext,api_key_masked,primary_model,
+          extra_models,group_name,jitter_seconds,extra_headers,body_override_mode,body_override)
+        VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8,
+          $9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18::jsonb,$19,$20::jsonb)
         RETURNING *`,
       [
         input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.refreshIntervalSeconds,
-        input.displayOrder,input.enabled,actor,
+        input.displayOrder,input.enabled,actor,input.provider,input.apiMode,input.endpoint,
+        apiKeyCiphertext,input.apiKeyMasked,input.primaryModel,JSON.stringify(input.extraModels || []),
+        input.groupName || '',input.jitterSeconds || 0,JSON.stringify(input.extraHeaders || {}),
+        input.bodyOverrideMode || 'off',JSON.stringify(input.bodyOverride || {}),
       ]);
       const created = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
@@ -2532,6 +2743,15 @@ export class PostgresRepository {
         historyStartedAt: created.history_started_at || null,
         displayOrder: number(created.display_order),
         enabled: Boolean(created.enabled),
+        provider: created.provider,
+        apiMode: created.api_mode,
+        endpoint: created.endpoint,
+        primaryModel: created.primary_model,
+        extraModels: jsonArray(created.extra_models),
+        groupName: created.group_name || '',
+        jitterSeconds: number(created.jitter_seconds),
+        apiKeyConfigured: Boolean(created.api_key_ciphertext),
+        apiKeyMasked: created.api_key_masked || '',
       };
     });
   }
@@ -2544,24 +2764,57 @@ export class PostgresRepository {
       );
       if (!beforeResult.rowCount) throw httpError('monitor group not found', 404);
       const before = beforeResult.rows[0];
+      const apiKeyCiphertext = input.apiKeyCiphertext || before.api_key_ciphertext || '';
+      if (!apiKeyCiphertext) throw httpError('apiKey is required when configuring a monitor', 400);
       const source = await client.query(`
         SELECT source_group_id
         FROM ${this.schema}.source_group_catalog
         WHERE source_group_id=$1 AND status='active'
         FOR SHARE`, [input.sourceGroupId]);
       if (!source.rowCount) throw httpError('source group is unavailable or deleted', 409);
+      const probeChanged = before.source_group_id !== input.sourceGroupId
+        || before.provider !== input.provider
+        || before.api_mode !== input.apiMode
+        || before.endpoint !== input.endpoint
+        || before.api_key_ciphertext !== (input.apiKey ? apiKeyCiphertext : before.api_key_ciphertext)
+        || before.primary_model !== input.primaryModel
+        || JSON.stringify(jsonArray(before.extra_models)) !== JSON.stringify(input.extraModels || [])
+        || before.group_name !== (input.groupName || '')
+        || JSON.stringify(jsonObject(before.extra_headers)) !== JSON.stringify(input.extraHeaders || {})
+        || before.body_override_mode !== (input.bodyOverrideMode || 'off')
+        || JSON.stringify(jsonObject(before.body_override)) !== JSON.stringify(input.bodyOverride || {});
+      const apiKeyMasked = input.apiKey ? input.apiKeyMasked : (before.api_key_masked || '');
       const result = await client.query(`
         UPDATE ${this.schema}.monitor_groups
         SET name=$2,source_group_id=$3,model_label=$4,display_multiplier=$5,
             refresh_interval_seconds=$6,display_order=$7,enabled=$8,
-            history_started_at=CASE WHEN source_group_id IS DISTINCT FROM $3 THEN NOW() ELSE history_started_at END,
+            provider=$9,api_mode=$10,endpoint=$11,api_key_ciphertext=$12,api_key_masked=$13,
+            primary_model=$14,extra_models=$15::jsonb,group_name=$16,jitter_seconds=$17,
+            extra_headers=$18::jsonb,body_override_mode=$19,body_override=$20::jsonb,
+            history_started_at=CASE WHEN $21 THEN NOW() ELSE history_started_at END,
             updated_at=NOW()
         WHERE id=$1
         RETURNING *`,
       [
         id,input.name,input.sourceGroupId,input.modelLabel,input.displayMultiplier,input.refreshIntervalSeconds,
-        input.displayOrder,input.enabled,
+        input.displayOrder,input.enabled,input.provider,input.apiMode,input.endpoint,apiKeyCiphertext,apiKeyMasked,
+        input.primaryModel,JSON.stringify(input.extraModels || []),input.groupName || '',input.jitterSeconds || 0,
+        JSON.stringify(input.extraHeaders || {}),input.bodyOverrideMode || 'off',JSON.stringify(input.bodyOverride || {}),
+        probeChanged,
       ]);
+      if (probeChanged) {
+        await client.query(`
+          DELETE FROM ${this.schema}.monitor_group_check_history
+          WHERE monitor_group_id=$1`, [id]);
+        await client.query(`
+          DELETE FROM ${this.schema}.monitor_group_daily_rollups
+          WHERE monitor_group_id=$1`, [id]);
+        await client.query(`
+          UPDATE ${this.schema}.monitor_groups
+          SET last_status='unknown',last_latency_ms=NULL,last_ping_latency_ms=NULL,
+              last_message='',last_checked_at=NULL
+          WHERE id=$1`, [id]);
+      }
       const updated = result.rows[0];
       await client.query(`INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value,after_value)
         VALUES($1,'update','monitor_group',$2,$3::jsonb,$4::jsonb)`,
@@ -2576,6 +2829,15 @@ export class PostgresRepository {
         historyStartedAt: updated.history_started_at || null,
         displayOrder: number(updated.display_order),
         enabled: Boolean(updated.enabled),
+        provider: updated.provider,
+        apiMode: updated.api_mode,
+        endpoint: updated.endpoint,
+        primaryModel: updated.primary_model,
+        extraModels: jsonArray(updated.extra_models),
+        groupName: updated.group_name || '',
+        jitterSeconds: number(updated.jitter_seconds),
+        apiKeyConfigured: Boolean(updated.api_key_ciphertext),
+        apiKeyMasked: updated.api_key_masked || '',
       };
     });
   }
@@ -2594,6 +2856,94 @@ export class PostgresRepository {
         VALUES($1,'delete','monitor_group',$2,$3::jsonb)`,
       [actor,String(id),JSON.stringify(deleted)]);
       return { id: number(deleted.id), deleted: true };
+    });
+  }
+
+  async recordMonitorResults(id, results = [], historyStartedAt = null) {
+    if (!results.length) return { inserted: 0 };
+    return inTransaction(this.pool, async (client) => {
+      const monitor = await client.query(`
+        SELECT id,primary_model,history_started_at
+        FROM ${this.schema}.monitor_groups
+        WHERE id=$1
+          AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',history_started_at)=date_trunc('milliseconds',$2::timestamptz))
+        FOR UPDATE`, [id, historyStartedAt]);
+      if (!monitor.rowCount) throw httpError('monitor group not found', 404);
+      for (const result of results) {
+        const checkedAt = result.checkedAt || new Date().toISOString();
+        const status = ['operational', 'degraded', 'failed', 'error'].includes(result.status)
+          ? result.status : 'error';
+        const latency = result.latencyMs === null || result.latencyMs === undefined ? null : Number(result.latencyMs);
+        const pingLatency = result.pingLatencyMs === null || result.pingLatencyMs === undefined ? null : Number(result.pingLatencyMs);
+        await client.query(`
+          INSERT INTO ${this.schema}.monitor_group_check_history(
+            monitor_group_id,model,status,latency_ms,ping_latency_ms,message,checked_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7)`, [
+          id,String(result.model || '').slice(0, 200),status,
+          Number.isFinite(latency) && latency >= 0 ? Math.round(latency) : null,
+          Number.isFinite(pingLatency) && pingLatency >= 0 ? Math.round(pingLatency) : null,
+          String(result.message || '').slice(0, 500),checkedAt,
+        ]);
+        await client.query(`
+          INSERT INTO ${this.schema}.monitor_group_daily_rollups(
+            monitor_group_id,model,bucket_date,total_checks,ok_count,
+            sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency)
+          VALUES(
+            $1,$2,($3::timestamptz AT TIME ZONE $4)::date,1,$5,
+            COALESCE($6,0),CASE WHEN $6 IS NULL THEN 0 ELSE 1 END,
+            COALESCE($7,0),CASE WHEN $7 IS NULL THEN 0 ELSE 1 END)
+          ON CONFLICT(monitor_group_id,model,bucket_date) DO UPDATE SET
+            total_checks=${this.schema}.monitor_group_daily_rollups.total_checks+1,
+            ok_count=${this.schema}.monitor_group_daily_rollups.ok_count+EXCLUDED.ok_count,
+            sum_latency_ms=${this.schema}.monitor_group_daily_rollups.sum_latency_ms+EXCLUDED.sum_latency_ms,
+            count_latency=${this.schema}.monitor_group_daily_rollups.count_latency+EXCLUDED.count_latency,
+            sum_ping_latency_ms=${this.schema}.monitor_group_daily_rollups.sum_ping_latency_ms+EXCLUDED.sum_ping_latency_ms,
+            count_ping_latency=${this.schema}.monitor_group_daily_rollups.count_ping_latency+EXCLUDED.count_ping_latency,
+            updated_at=NOW()`, [
+          id,String(result.model || '').slice(0, 200),checkedAt,this.config.timezone || 'UTC',
+          ['operational', 'degraded'].includes(status) ? 1 : 0,
+          Number.isFinite(latency) && latency >= 0 ? Math.round(latency) : null,
+          Number.isFinite(pingLatency) && pingLatency >= 0 ? Math.round(pingLatency) : null,
+        ]);
+      }
+      const primary = results.find((result) => String(result.model || '') === String(monitor.rows[0].primary_model || ''))
+        || results[0];
+      const statuses = results.map((result) => String(result.status || 'error'));
+      const groupStatus = statuses.some((value) => value === 'error')
+        ? 'error'
+        : statuses.some((value) => value === 'failed')
+          ? 'failed'
+          : statuses.some((value) => value === 'degraded')
+            ? 'degraded'
+            : 'operational';
+      await client.query(`
+        UPDATE ${this.schema}.monitor_groups
+        SET last_status=$2,last_latency_ms=$3,last_ping_latency_ms=$4,
+            last_message=$5,last_checked_at=$6,updated_at=NOW()
+        WHERE id=$1`, [
+        id,groupStatus,
+        Number.isFinite(Number(primary.latencyMs)) ? Math.round(Number(primary.latencyMs)) : null,
+        Number.isFinite(Number(primary.pingLatencyMs)) ? Math.round(Number(primary.pingLatencyMs)) : null,
+        String(primary.message || '').slice(0, 500),primary.checkedAt || new Date().toISOString(),
+      ]);
+      await client.query(`
+        DELETE FROM ${this.schema}.monitor_group_check_history h
+        USING (
+          SELECT id,ROW_NUMBER() OVER (
+            PARTITION BY monitor_group_id,model
+            ORDER BY checked_at DESC,id DESC
+          ) AS history_rank
+          FROM ${this.schema}.monitor_group_check_history
+          WHERE monitor_group_id=$1
+        ) old
+        WHERE h.id=old.id AND old.history_rank>60`, [id]);
+      await client.query(`
+        DELETE FROM ${this.schema}.monitor_group_daily_rollups
+        WHERE monitor_group_id=$1
+          AND bucket_date < (($2::timestamptz AT TIME ZONE $3)::date - 29)`, [
+        id,new Date().toISOString(),this.config.timezone || 'UTC',
+      ]);
+      return { inserted: results.length };
     });
   }
 

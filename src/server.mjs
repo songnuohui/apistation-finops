@@ -57,8 +57,7 @@ import {
   Sub2ApiAuthError,
 } from './services/sub2api-auth-service.mjs';
 import { SyncService } from './services/sync-service.mjs';
-import { Sub2ApiChannelMonitorHistoryReader } from './services/sub2api-channel-monitor-history-reader.mjs';
-import { Sub2ApiGroupMonitorService } from './services/sub2api-group-monitor-service.mjs';
+import { FinopsGroupMonitorService } from './services/finops-group-monitor-service.mjs';
 import { SupplierMonitorService } from './services/supplier-monitor-service.mjs';
 import { normalizeSupplierBaseUrl } from './services/supplier-adapters.mjs';
 import { EmailService } from './services/email-service.mjs';
@@ -72,15 +71,17 @@ const sub2ApiUsagePool=createSub2ApiUsagePool(config);
 const repository=config.demoMode?new DemoRepository(config):new PostgresRepository(finopsPool,config);
 const emailService=new EmailService(repository,config);
 const syncService=config.demoMode?null:new SyncService(sourcePool,finopsPool,config);
-const sub2ApiChannelMonitorHistoryReader=config.demoMode
+const groupMonitorService=config.demoMode
   ? null
-  : new Sub2ApiChannelMonitorHistoryReader(sub2ApiUsagePool);
-const sub2ApiGroupMonitorService=config.demoMode
-  ? null
-  : new Sub2ApiGroupMonitorService(repository,sub2ApiChannelMonitorHistoryReader,config);
+  : new FinopsGroupMonitorService(repository,config);
 const supplierMonitorService=config.demoMode?null:new SupplierMonitorService(repository,config);
 const responseCache=new ResponseCacheService(config);
 const sub2ApiRedisRuntimeReader=new Sub2ApiRedisRuntimeReader(config);
+
+function encryptMonitorApiKey(apiKey) {
+  if (config.demoMode) return 'demo-encrypted';
+  return groupMonitorService.encryptApiKey(apiKey);
+}
 const sub2ApiReadonlyGateway=new Sub2ApiReadonlyGateway(config);
 const sourceUsageRepository=config.demoMode?null:new SourceUsageRepository(sub2ApiUsagePool,config);
 const sourceUsageService=config.demoMode?repository:new SourceUsageService(
@@ -346,7 +347,7 @@ async function api(request,res,url){
   const range=()=>resolveRange(url.searchParams,new Date(),config.timezone),page=()=>pagination(url.searchParams);
   if(request.method!=='GET'){
     await responseCache.invalidate();
-    sub2ApiGroupMonitorService?.clearCache();
+    groupMonitorService?.clearCache();
   }
   const cached=(scope,ttl,loader)=>responseCache.remember(scope,`${request.method}:${url.pathname}?${url.searchParams.toString()}`,ttl,loader);
   if(request.method==='GET'&&url.pathname==='/api/email/settings'){
@@ -1026,7 +1027,7 @@ async function api(request,res,url){
       normalizeSub2ApiServiceAuthSettings(await body(request)),
       auth.actor,
     );
-    sub2ApiGroupMonitorService?.clearCache();
+    groupMonitorService?.clearCache();
     await syncService?.refreshRuntimeSnapshots();
     return json(res,200,settings);
   }
@@ -1056,7 +1057,7 @@ async function api(request,res,url){
   if(request.method==='GET'&&url.pathname==='/api/monitor-groups'){
     return json(res,200,config.demoMode
       ? await repository.listMonitorGroups()
-      : await sub2ApiGroupMonitorService.listAdminGroups());
+      : await groupMonitorService.listAdminGroups());
   }
   if(request.method==='GET'&&url.pathname==='/api/monitor-group-candidates')return json(res,200,await repository.listMonitorGroupCandidates());
   if(request.method==='GET'&&url.pathname==='/api/monitor-settings')return json(res,200,await repository.getMonitorSettings());
@@ -1064,14 +1065,50 @@ async function api(request,res,url){
     return json(res,200,await repository.updateMonitorSettings(normalizeMonitorSettings(await body(request)),auth.actor));
   }
   if(request.method==='POST'&&url.pathname==='/api/monitor-groups'){
-    return json(res,201,await repository.createMonitorGroup(normalizeMonitorGroup(await body(request)),auth.actor));
+    const input=normalizeMonitorGroup(await body(request));
+    const saved=await repository.createMonitorGroup({
+      ...input,
+      apiKeyCiphertext: encryptMonitorApiKey(input.apiKey),
+      apiKeyMasked: input.apiKey ? `${input.apiKey.slice(0,4)}***` : '',
+    },auth.actor);
+    await groupMonitorService?.reschedule(saved.id);
+    return json(res,201,saved);
+  }
+  const monitorRunMatch=/^\/api\/monitor-groups\/(\d+)\/run$/.exec(url.pathname);
+  if(request.method==='POST'&&monitorRunMatch){
+    const id=Number(monitorRunMatch[1]);
+    if(config.demoMode)return json(res,200,{results:[]});
+    return json(res,200,{results:await groupMonitorService.runNow(id)});
+  }
+  const monitorHistoryMatch=/^\/api\/monitor-groups\/(\d+)\/history$/.exec(url.pathname);
+  if(request.method==='GET'&&monitorHistoryMatch){
+    const id=Number(monitorHistoryMatch[1]);
+    if(config.demoMode)return json(res,200,{items:[]});
+    const item=(await repository.listMonitorGroups()).find((entry)=>Number(entry.id)===id);
+    if(!item)return json(res,404,{error:'monitor group not found'});
+    return json(res,200,{items:item.history || []});
   }
   const monitorGroupId=routeId(url.pathname,'/api/monitor-groups/');
   if(request.method==='PATCH'&&monitorGroupId){
-    return json(res,200,await repository.updateMonitorGroup(monitorGroupId,normalizeMonitorGroup(await body(request)),auth.actor));
+    const input=normalizeMonitorGroup(await body(request));
+    const saved=await repository.updateMonitorGroup(monitorGroupId,{
+      ...input,
+      apiKeyCiphertext: input.apiKey
+        ? encryptMonitorApiKey(input.apiKey)
+        : '',
+      apiKeyMasked: input.apiKey ? `${input.apiKey.slice(0,4)}***` : '',
+    },auth.actor);
+    await groupMonitorService?.reschedule(monitorGroupId);
+    return json(res,200,saved);
   }
   if(request.method==='DELETE'&&monitorGroupId){
-    return json(res,200,await repository.deleteMonitorGroup(monitorGroupId,auth.actor));
+    const result=await repository.deleteMonitorGroup(monitorGroupId,auth.actor);
+    groupMonitorService?.unschedule(monitorGroupId);
+    return json(res,200,result);
+  }
+  if(request.method==='GET'&&monitorGroupId){
+    const item=(await repository.listMonitorGroups()).find((entry)=>Number(entry.id)===Number(monitorGroupId));
+    return item ? json(res,200,item) : json(res,404,{error:'monitor group not found'});
   }
   if(request.method==='POST'&&url.pathname==='/api/cost-profiles'){
     return json(res,201,await repository.createCostProfile(normalizeCostProfile(await body(request)),auth.actor));
@@ -1123,7 +1160,7 @@ async function api(request,res,url){
 async function publicMonitorApi(res){
   return json(res,200,config.demoMode
     ? await repository.getPublicMonitorDashboard()
-    : await sub2ApiGroupMonitorService.getPublicDashboard());
+    : await groupMonitorService.getPublicDashboard());
 }
 
 async function staticFile(res,url,{embeddable=false}={}){
@@ -1222,11 +1259,16 @@ async function readiness(){
     ['067_monitor_group_refresh_config'],
   );
   if(!monitorGroupRefreshConfigMigration.rowCount)throw new Error('required FinOps migration 067_monitor_group_refresh_config is not applied');
+  const monitorRuntimeMigration=await finopsPool.query(
+    `SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version=$1`,
+    ['068_finops_group_monitor_runtime'],
+  );
+  if(!monitorRuntimeMigration.rowCount)throw new Error('required FinOps migration 068_finops_group_monitor_runtime is not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-     migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view','061_finops_email_center','062_finops_email_preference_copy','063_finops_email_interruption_recovery','064_finops_email_background_delivery','065_monitor_display_multiplier','066_remove_monitor_observations','067_monitor_group_refresh_config'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_replenishment_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view','061_finops_email_center','062_finops_email_preference_copy','063_finops_email_interruption_recovery','064_finops_email_background_delivery','065_monitor_display_multiplier','066_remove_monitor_observations','067_monitor_group_refresh_config','068_finops_group_monitor_runtime'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),
@@ -1298,10 +1340,11 @@ async function start(){
   if(!config.demoMode)await assertDistinctDatabases(sourcePool,finopsPool);
   await emailService.recoverInterruptedCampaigns();
   sub2ApiServiceAuthService.start();
+  groupMonitorService?.start();
   if(syncService&&config.syncEnabled){await syncService.validateSourceSchema();syncService.start();}
   supplierMonitorService?.start();
   server.listen(config.port,config.host,()=>console.log(`ApiStation FinOps listening on http://${config.host}:${config.port} (${config.demoMode?'demo':'database'} mode)`));
 }
-async function shutdown(signal){console.log(`${signal}: shutting down`);sub2ApiServiceAuthService.stop();syncService?.stop();supplierMonitorService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),sub2ApiUsagePool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
+async function shutdown(signal){console.log(`${signal}: shutting down`);sub2ApiServiceAuthService.stop();groupMonitorService?.stop();syncService?.stop();supplierMonitorService?.stop();server.close(async()=>{await Promise.all([sourcePool?.end(),finopsPool?.end(),sub2ApiUsagePool?.end(),responseCache.close(),sub2ApiRedisRuntimeReader.close()]);process.exit(0);});setTimeout(()=>process.exit(1),10_000).unref();}
 process.on('SIGINT',()=>shutdown('SIGINT'));process.on('SIGTERM',()=>shutdown('SIGTERM'));
 await start();

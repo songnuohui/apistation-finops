@@ -14,6 +14,14 @@ const DIRECTIONS = new Set(['in', 'out']);
 const SUPPLIER_ADAPTER_TYPES = new Set(['auto', 'sub2api', 'newapi', 'openai_compatible', 'custom']);
 const SUPPLIER_AUTH_MODES = new Set(['password', 'access_token', 'token_refresh', 'api_key']);
 const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
+const MONITOR_PROVIDERS = new Set(['openai', 'anthropic', 'gemini', 'grok']);
+const MONITOR_API_MODES = new Set(['chat_completions', 'responses']);
+const MONITOR_BODY_MODES = new Set(['off', 'merge', 'replace']);
+const MONITOR_FORBIDDEN_HEADERS = new Set([
+  'connection', 'content-length', 'content-encoding', 'host',
+  'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate',
+]);
+const MONITOR_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 const PROFIT_GUARD_THRESHOLD_MODES = new Set(['margin', 'minimum_sale_multiplier']);
 const SUB2API_SERVICE_AUTH_MODES = new Set(['password', 'api_key']);
 const EMAIL_CATEGORIES = new Set(['announcement', 'promotion']);
@@ -123,6 +131,64 @@ function booleanValue(value, field) {
   if (value === 'true' || value === '1') return true;
   if (value === 'false' || value === '0') return false;
   throw badRequest(`invalid ${field}`);
+}
+
+function monitorEndpoint(value) {
+  const normalized = textValue(value, 'endpoint', { max: 500 });
+  let parsed;
+  try { parsed = new URL(normalized); } catch { throw badRequest('invalid endpoint'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') {
+    throw badRequest('endpoint must be an HTTPS origin without credentials, path, query, or fragment');
+  }
+  return parsed.origin;
+}
+
+function monitorModels(value) {
+  const source = Array.isArray(value) ? value : String(value ?? '').split(',');
+  const models = [...new Set(source.map((item) => String(item || '').trim()).filter(Boolean))];
+  if (models.length > 20 || models.some((model) => model.length > 200)) throw badRequest('invalid extraModels');
+  return models;
+}
+
+function monitorHeaders(value) {
+  if (value === undefined || value === null || value === '') return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw badRequest('invalid extraHeaders');
+  const entries = Object.entries(value)
+    .map(([key, item]) => [String(key).trim(), String(item ?? '').trim()])
+    .filter(([key, item]) => key && item);
+  if (entries.some(([key]) => !MONITOR_HEADER_NAME.test(key)
+    || MONITOR_FORBIDDEN_HEADERS.has(key.toLowerCase()))) {
+    throw badRequest('invalid or forbidden extraHeaders');
+  }
+  if (entries.length > 40 || entries.some(([key, item]) => key.length > 100 || item.length > 2000)) {
+    throw badRequest('invalid extraHeaders');
+  }
+  return Object.fromEntries(entries);
+}
+
+function monitorBody(value) {
+  if (value === undefined || value === null || value === '') return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw badRequest('invalid bodyOverride');
+  try {
+    if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 32_768) throw badRequest('bodyOverride is too large');
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw badRequest('invalid bodyOverride');
+  }
+  return value;
+}
+
+function validateMonitorReplaceBody(provider, apiMode, body) {
+  if (!Object.keys(body).length) throw badRequest('replace bodyOverride cannot be empty');
+  if (provider === 'openai' && apiMode === 'responses'
+    && (!String(body.instructions || '').trim()
+      || body.input === undefined || body.input === null || String(body.input).trim() === '')) {
+    throw badRequest('responses replace bodyOverride requires instructions and input');
+  }
+  if ((provider === 'openai' || provider === 'grok') && apiMode === 'chat_completions'
+    && (!Array.isArray(body.messages) || !body.messages.length)) {
+    throw badRequest('chat completions replace bodyOverride requires messages');
+  }
 }
 
 function idList(value, field, { max = 100 } = {}) {
@@ -502,19 +568,47 @@ export function normalizeAccountCostReprice(input) {
 }
 
 export function normalizeMonitorGroup(input) {
-  return {
+  const refreshIntervalSeconds = input.refreshIntervalSeconds === undefined || input.refreshIntervalSeconds === ''
+    ? 30
+    : integerValue(input.refreshIntervalSeconds, 'refreshIntervalSeconds', { min: 15, max: 3600 });
+  const jitterSeconds = input.jitterSeconds === undefined || input.jitterSeconds === ''
+    ? 0
+    : integerValue(input.jitterSeconds, 'jitterSeconds', { min: 0, max: Math.max(0, refreshIntervalSeconds - 15) });
+  const normalized = {
     name: textValue(input.name, 'name', { max: 120 }),
     sourceGroupId: integerValue(input.sourceGroupId, 'sourceGroupId', { min: 1, max: Number.MAX_SAFE_INTEGER }),
     modelLabel: textValue(input.modelLabel, 'modelLabel', { required: false, max: 120 }),
     displayMultiplier: optionalDecimal(input.displayMultiplier, 'displayMultiplier', { min: 0, allowZero: false }),
-    refreshIntervalSeconds: input.refreshIntervalSeconds === undefined || input.refreshIntervalSeconds === ''
-      ? 30
-      : integerValue(input.refreshIntervalSeconds, 'refreshIntervalSeconds', { min: 15, max: 3600 }),
+    refreshIntervalSeconds,
     displayOrder: input.displayOrder === undefined || input.displayOrder === ''
       ? 0
       : integerValue(input.displayOrder, 'displayOrder', { min: 0, max: 100000 }),
     enabled: input.enabled === undefined ? true : booleanValue(input.enabled, 'enabled'),
   };
+  if (Object.hasOwn(input, 'provider') || Object.hasOwn(input, 'endpoint') || Object.hasOwn(input, 'apiKey')
+    || Object.hasOwn(input, 'primaryModel') || Object.hasOwn(input, 'extraModels')) {
+    const provider = enumValue(input.provider || 'openai', 'provider', MONITOR_PROVIDERS);
+    const apiMode = optionalEnum(input.apiMode, 'apiMode', MONITOR_API_MODES) || 'chat_completions';
+    if (apiMode === 'responses' && provider !== 'openai') throw badRequest('responses api mode is only supported for openai');
+    normalized.provider = provider;
+    normalized.apiMode = provider === 'openai' ? apiMode : 'chat_completions';
+    normalized.endpoint = monitorEndpoint(input.endpoint);
+    normalized.apiKey = textValue(input.apiKey, 'apiKey', { required: false, max: 2000 });
+    normalized.primaryModel = textValue(input.primaryModel, 'primaryModel', { max: 200 });
+    normalized.extraModels = monitorModels(input.extraModels);
+    normalized.groupName = textValue(input.groupName, 'groupName', { required: false, max: 120 });
+    normalized.jitterSeconds = jitterSeconds;
+    normalized.extraHeaders = monitorHeaders(input.extraHeaders);
+    normalized.bodyOverrideMode = optionalEnum(input.bodyOverrideMode, 'bodyOverrideMode', MONITOR_BODY_MODES) || 'off';
+    normalized.bodyOverride = monitorBody(input.bodyOverride);
+    if (normalized.bodyOverrideMode !== 'off' && !Object.keys(normalized.bodyOverride).length) {
+      throw badRequest(`${normalized.bodyOverrideMode} bodyOverride cannot be empty`);
+    }
+    if (normalized.bodyOverrideMode === 'replace') {
+      validateMonitorReplaceBody(normalized.provider, normalized.apiMode, normalized.bodyOverride);
+    }
+  }
+  return normalized;
 }
 
 export function normalizeMonitorSettings(input) {

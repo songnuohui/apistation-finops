@@ -76,7 +76,7 @@ MONITOR_EMBED_ORIGINS=https://sub2api.example.com
 <iframe src="https://finops.example.com/monitor" title="分组可用性监控"></iframe>
 ```
 
-监控配置、展示倍率和刷新设置写入独立 FinOps 数据库；监控状态、最近 60 次记录和 7/15/30 天统计由 FinOps 使用列级只读连接实时查询 Sub2API，并使用短时内存缓存。FinOps 不复制或留存 Sub2API 明细、日聚合，也不会修改源服务、源数据库或源 Redis。
+监控配置、展示倍率、刷新设置和 FinOps 自己的探测结果写入独立 FinOps 数据库；Sub2API 仅通过只读连接提供分组目录及当前倍率。FinOps 为每个监控/模型保留最近 60 次明细和最近 30 天日聚合，并支持 7/15/30 天统计。删除监控会级联删除对应历史，重新配置探测参数会清空该监控历史并从新的配置时间重新开始；不会修改源服务、源数据库或源 Redis。
 
 ## 安全要求
 
