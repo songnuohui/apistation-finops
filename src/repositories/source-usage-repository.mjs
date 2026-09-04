@@ -130,6 +130,7 @@ function dailyUnionQuery({ schema, windows, accountIds = null, select, groupBy }
 export class SourceUsageRepository {
   constructor(pool, config) {
     this.pool = pool;
+    this.sourceSchema = config.sourceSchema;
     this.schema = `"${config.sourceSchema}"`;
     this.timezone = config.timezone || 'Asia/Shanghai';
     this.queryConcurrency = Math.max(
@@ -174,6 +175,83 @@ export class SourceUsageRepository {
     } finally {
       client.release();
     }
+  }
+
+  async listModelAuditUsage({
+    cursorCreatedAt,
+    cursorId = 0,
+    until = new Date(),
+    userEmails = [],
+    limit = 5000,
+  } = {}) {
+    const normalizedEmails = [...new Set((userEmails || [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean))];
+    const result = await this.readOnlyQuery(`
+      SELECT
+        ul.id,
+        ul.user_id,
+        COALESCE(u.email,'') AS email,
+        COALESCE(ul.model,'') AS model,
+        COALESCE(ul.requested_model,'') AS requested_model,
+        COALESCE(ul.upstream_model,'') AS upstream_model,
+        COALESCE(ul.upstream_response_model,'') AS upstream_response_model,
+        ul.upstream_model_mismatch,
+        ul.created_at
+      FROM ${this.schema}.usage_logs ul
+      LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id
+      WHERE (ul.created_at,ul.id) > ($1::timestamptz,$2::bigint)
+        AND ul.created_at < $3::timestamptz
+        AND ($4::text[] IS NULL OR LOWER(COALESCE(u.email,''))=ANY($4::text[]))
+      ORDER BY ul.created_at ASC,ul.id ASC
+      LIMIT $5`, [
+      cursorCreatedAt,
+      Number(cursorId),
+      until,
+      normalizedEmails.length ? normalizedEmails : null,
+      Math.min(50_000, Math.max(1, Number(limit) || 5_000)),
+    ]);
+    return result.rows;
+  }
+
+  async validateModelAuditSchema() {
+    const requiredColumns = {
+      usage_logs: [
+        'id',
+        'user_id',
+        'model',
+        'requested_model',
+        'upstream_model',
+        'upstream_response_model',
+        'upstream_model_mismatch',
+        'created_at',
+      ],
+      users: ['id', 'email'],
+    };
+    const result = await this.readOnlyQuery(`
+      SELECT table_name,column_name
+      FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name=ANY($2::text[])`, [
+      this.sourceSchema,
+      Object.keys(requiredColumns),
+    ]);
+    const found = new Map();
+    for (const row of result.rows) {
+      if (!found.has(row.table_name)) found.set(row.table_name, new Set());
+      found.get(row.table_name).add(row.column_name);
+    }
+    const missing = [];
+    for (const [table, columns] of Object.entries(requiredColumns)) {
+      for (const column of columns) {
+        if (!found.get(table)?.has(column)) missing.push(`${table}.${column}`);
+      }
+    }
+    if (missing.length) {
+      throw new Error(
+        `Sub2API model audit schema is incompatible; missing: ${missing.join(', ')}`,
+      );
+    }
+    return { sourceSchema: this.sourceSchema, tables: Object.keys(requiredColumns) };
   }
 
   async queryDailyUnionRows(windows, buildQuery) {

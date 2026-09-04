@@ -17,6 +17,7 @@ const routes = [
   { path: '/oauth-supply', component: App },
   { path: '/replenishment', component: App },
   { path: '/email', component: App },
+  { path: '/model-audit', component: App },
 ];
 
 const router = createRouter({

@@ -392,3 +392,18 @@ test('FinOps background email delivery state remains isolated', () => {
   assert.match(migration, /'sending'/);
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
 });
+
+test('model audit migration and grants remain FinOps-owned and source-read-only', () => {
+  const migration = read('migrations/069_model_audit.sql');
+  const grants = read('deploy/postgres-grants.sql');
+  assert.match(migration, /model_audit_settings/);
+  assert.match(migration, /model_audit_mappings/);
+  assert.match(migration, /model_audit_scan_runs/);
+  assert.match(migration, /model_audit_events/);
+  assert.match(migration, /model_audit_notifications/);
+  assert.match(migration, /UNIQUE \(scan_run_id, kind, recipient_email\)/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.match(grants, /upstream_response_model,upstream_model_mismatch/);
+  assert.match(grants, /GRANT SELECT \(\s*id,user_id,model,requested_model,upstream_model,upstream_response_model,\s*upstream_model_mismatch,created_at\s*\)/s);
+  assert.doesNotMatch(migration, /\bredis\b/i);
+});

@@ -21,7 +21,8 @@ REVOKE ALL ON TABLE public.users, public.accounts, public.usage_logs, public.pay
   public.redeem_codes, public.user_affiliate_ledger, public.payment_audit_logs,
   public.settings FROM finops_source_reader;
 REVOKE SELECT (
-  id,user_id,api_key_id,account_id,request_id,model,requested_model,upstream_model,channel_id,group_id,
+  id,user_id,api_key_id,account_id,request_id,model,requested_model,upstream_model,
+  upstream_response_model,upstream_model_mismatch,channel_id,group_id,
   billing_mode,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,
   total_cost,actual_cost,rate_multiplier,account_rate_multiplier,duration_ms,first_token_ms,created_at
 ) ON TABLE public.usage_logs FROM finops_source_reader;
@@ -29,6 +30,10 @@ REVOKE SELECT (key,value) ON TABLE public.settings FROM finops_source_reader;
 
 GRANT SELECT (id,email,username,status,balance,total_recharged,updated_at,deleted_at)
   ON TABLE public.users TO finops_source_reader;
+GRANT SELECT (
+  id,user_id,model,requested_model,upstream_model,upstream_response_model,
+  upstream_model_mismatch,created_at
+) ON TABLE public.usage_logs TO finops_source_reader;
 GRANT SELECT (id,name,platform,type,status,expires_at,updated_at,deleted_at,extra)
   ON TABLE public.accounts TO finops_source_reader;
 GRANT SELECT (

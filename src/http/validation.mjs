@@ -689,3 +689,34 @@ export function normalizeEmailCampaign(input) {
     userIds,
   };
 }
+
+export function normalizeModelAuditSettings(input = {}) {
+  const enabled = booleanValue(input.enabled ?? false, 'enabled');
+  const scanIntervalMinutes = integerValue(input.scanIntervalMinutes ?? 5, 'scanIntervalMinutes', { min: 5, max: 1440 });
+  const testMode = booleanValue(input.testMode ?? false, 'testMode');
+  const normalizeEmails = (value, field) => {
+    const source = Array.isArray(value) ? value : String(value || '').split(/[,\n]/);
+    const values = [...new Set(source.map((item) => emailValue(item, field, { required: false })).filter(Boolean))];
+    if (values.length > 100) throw badRequest(`${field} contains too many email addresses`);
+    return values;
+  };
+  const testUserEmails = normalizeEmails(input.testUserEmails, 'testUserEmails');
+  const testRecipientEmail = emailValue(input.testRecipientEmail, 'testRecipientEmail', { required: testMode });
+  const adminEmail = emailValue(input.adminEmail, 'adminEmail', { required: enabled && !testMode });
+  if (testMode && !testUserEmails.length) throw badRequest('testUserEmails is required in test mode');
+  return {
+    enabled,
+    scanIntervalMinutes,
+    testMode,
+    testUserEmails,
+    testRecipientEmail,
+    adminEmail,
+  };
+}
+
+export function normalizeModelAuditMapping(input = {}) {
+  return {
+    sourceModel: textValue(input.sourceModel, 'sourceModel', { max: 200 }),
+    allowedResponseModel: textValue(input.allowedResponseModel, 'allowedResponseModel', { max: 200 }),
+  };
+}

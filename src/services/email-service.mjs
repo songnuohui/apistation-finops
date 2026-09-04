@@ -176,6 +176,26 @@ export class EmailService {
     transport.close();
   }
 
+  async sendRaw(to, subject, html, text) {
+    const { settings, password } = await this.emailTransportSettings();
+    const transport = nodemailer.createTransport({
+      host: settings.smtpHost, port: Number(settings.smtpPort), secure: Boolean(settings.smtpSecure),
+      auth: { user: settings.smtpUsername, pass: password },
+      connectionTimeout: this.config.sub2apiAuthTimeoutMs,
+    });
+    try {
+      return await transport.sendMail({
+        from: { address: settings.fromEmail, name: settings.fromName || undefined },
+        to,
+        subject,
+        html,
+        text,
+      });
+    } finally {
+      transport.close();
+    }
+  }
+
   async emailTransportSettings() {
     const settings = await this.repository.getEmailSettings({ includeCredentials: true });
     if (!settings.enabled || !settings.smtpHost || !settings.fromEmail || !settings.credentialsCiphertext) {
