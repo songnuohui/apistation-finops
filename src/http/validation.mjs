@@ -694,6 +694,7 @@ export function normalizeModelAuditSettings(input = {}) {
   const enabled = booleanValue(input.enabled ?? false, 'enabled');
   const scanIntervalMinutes = integerValue(input.scanIntervalMinutes ?? 5, 'scanIntervalMinutes', { min: 5, max: 1440 });
   const testMode = booleanValue(input.testMode ?? false, 'testMode');
+  const notifyUserEmails = booleanValue(input.notifyUserEmails ?? true, 'notifyUserEmails');
   const normalizeEmails = (value, field) => {
     const source = Array.isArray(value) ? value : String(value || '').split(/[,\n]/);
     const values = [...new Set(source.map((item) => emailValue(item, field, { required: false })).filter(Boolean))];
@@ -708,6 +709,7 @@ export function normalizeModelAuditSettings(input = {}) {
     enabled,
     scanIntervalMinutes,
     testMode,
+    notifyUserEmails,
     testUserEmails,
     testRecipientEmail,
     adminEmail,

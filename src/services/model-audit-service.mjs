@@ -160,22 +160,24 @@ export function buildModelAuditNotifications(settings, run, events) {
   }
 
   const notices = [];
-  for (const group of groupByEmail(mismatches)) {
-    if (!group.targetEmail) continue;
-    const report = renderReport(
-      'FinOps 模型一致性告警',
-      run.periodStart,
-      run.periodEnd,
-      group.events,
-    );
-    notices.push({
-      kind: 'user',
-      targetEmail: group.targetEmail,
-      recipientEmail: group.targetEmail,
-      subject: `模型一致性告警：发现 ${group.events.length} 条记录`,
-      eventCount: group.events.length,
-      ...report,
-    });
+  if (settings.notifyUserEmails !== false) {
+    for (const group of groupByEmail(mismatches)) {
+      if (!group.targetEmail) continue;
+      const report = renderReport(
+        'FinOps 模型一致性告警',
+        run.periodStart,
+        run.periodEnd,
+        group.events,
+      );
+      notices.push({
+        kind: 'user',
+        targetEmail: group.targetEmail,
+        recipientEmail: group.targetEmail,
+        subject: `模型一致性告警：发现 ${group.events.length} 条记录`,
+        eventCount: group.events.length,
+        ...report,
+      });
+    }
   }
 
   if (EMAIL_RE.test(normalized(settings.adminEmail))) {

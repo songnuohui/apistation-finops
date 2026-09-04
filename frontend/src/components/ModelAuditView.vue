@@ -38,6 +38,7 @@ const form = ref({
   enabled: false,
   scanIntervalMinutes: 5,
   testMode: false,
+  notifyUserEmails: true,
   testUserEmails: '',
   testRecipientEmail: '',
   adminEmail: '',
@@ -67,6 +68,7 @@ function copySettings() {
     enabled: Boolean(settings.value.enabled),
     scanIntervalMinutes: Number(settings.value.scanIntervalMinutes || 5),
     testMode: Boolean(settings.value.testMode),
+    notifyUserEmails: settings.value.notifyUserEmails !== false,
     testUserEmails: (settings.value.testUserEmails || []).join('\n'),
     testRecipientEmail: settings.value.testRecipientEmail || '',
     adminEmail: settings.value.adminEmail || '',
@@ -154,6 +156,7 @@ async function saveSettings() {
       enabled: form.value.enabled,
       scanIntervalMinutes: Number(form.value.scanIntervalMinutes),
       testMode: form.value.testMode,
+      notifyUserEmails: form.value.notifyUserEmails,
       testUserEmails: parseEmails(form.value.testUserEmails),
       testRecipientEmail: form.value.testRecipientEmail,
       adminEmail: form.value.adminEmail,
@@ -330,6 +333,7 @@ const currentMismatchCount = computed(() => events.value.total || 0);
       <div class="form-grid model-audit-settings-grid">
         <label class="toggle-field"><input v-model="form.enabled" type="checkbox" /><span><strong>启用模型一致性审计</strong><small>后台按配置间隔自动执行扫描。</small></span></label>
         <label class="toggle-field"><input v-model="form.testMode" type="checkbox" /><span><strong>测试模式</strong><small>正式扫描只对指定用户生成测试告警，并发送到测试收件邮箱。</small></span></label>
+        <label class="toggle-field"><input v-model="form.notifyUserEmails" type="checkbox" /><span><strong>通知对应用户邮箱</strong><small>开启后向发生模型不一致的用户发送邮件；关闭后只通知管理员。</small></span></label>
         <label>扫描间隔（分钟）<input v-model.number="form.scanIntervalMinutes" type="number" min="5" max="1440" step="1" /></label>
         <label>管理员汇总邮箱<input v-model="form.adminEmail" type="email" placeholder="admin@example.com" /></label>
         <label v-if="form.testMode" class="wide-field">测试用户邮箱（每行一个）<textarea v-model="form.testUserEmails" rows="3" placeholder="只扫描这些用户的记录"></textarea></label>

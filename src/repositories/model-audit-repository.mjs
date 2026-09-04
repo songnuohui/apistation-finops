@@ -21,6 +21,7 @@ function setting(row = {}) {
     enabled: Boolean(row.enabled),
     scanIntervalMinutes: number(row.scan_interval_minutes || 5),
     testMode: Boolean(row.test_mode),
+    notifyUserEmails: row.notify_user_emails !== false,
     testUserEmails: Array.isArray(row.test_user_emails) ? row.test_user_emails.map(email).filter(Boolean) : [],
     testRecipientEmail: email(row.test_recipient_email),
     adminEmail: email(row.admin_email),
@@ -139,17 +140,17 @@ export class ModelAuditRepository {
       const resetCursor = Boolean(input.enabled && !current.enabled);
       const result = await client.query(`UPDATE ${this.schema}.model_audit_settings SET
         enabled=$1,scan_interval_minutes=$2,test_mode=$3,test_user_emails=$4::text[],
-        test_recipient_email=$5,admin_email=$6,
-        cursor_created_at=CASE WHEN $7 THEN NOW()-INTERVAL '5 minutes' ELSE cursor_created_at END,
-        cursor_id=CASE WHEN $7 THEN 0 ELSE cursor_id END,
-        last_record_created_at=CASE WHEN $7 THEN NULL ELSE last_record_created_at END,
-        last_record_id=CASE WHEN $7 THEN NULL ELSE last_record_id END,
-        last_scan_until=CASE WHEN $7 THEN NULL ELSE last_scan_until END,
-        last_scan_started_at=CASE WHEN $7 THEN NULL ELSE last_scan_started_at END,
-        last_scan_completed_at=CASE WHEN $7 THEN NULL ELSE last_scan_completed_at END,
-        last_scan_status=CASE WHEN $7 THEN 'never' ELSE last_scan_status END,
-        last_error=CASE WHEN $7 THEN '' ELSE last_error END,
-        updated_by=$8,updated_at=NOW()
+        test_recipient_email=$5,admin_email=$6,notify_user_emails=$7,
+        cursor_created_at=CASE WHEN $8 THEN NOW()-INTERVAL '5 minutes' ELSE cursor_created_at END,
+        cursor_id=CASE WHEN $8 THEN 0 ELSE cursor_id END,
+        last_record_created_at=CASE WHEN $8 THEN NULL ELSE last_record_created_at END,
+        last_record_id=CASE WHEN $8 THEN NULL ELSE last_record_id END,
+        last_scan_until=CASE WHEN $8 THEN NULL ELSE last_scan_until END,
+        last_scan_started_at=CASE WHEN $8 THEN NULL ELSE last_scan_started_at END,
+        last_scan_completed_at=CASE WHEN $8 THEN NULL ELSE last_scan_completed_at END,
+        last_scan_status=CASE WHEN $8 THEN 'never' ELSE last_scan_status END,
+        last_error=CASE WHEN $8 THEN '' ELSE last_error END,
+        updated_by=$9,updated_at=NOW()
         WHERE id=1
         RETURNING *`, [
         Boolean(input.enabled),
@@ -158,6 +159,7 @@ export class ModelAuditRepository {
         input.testUserEmails || [],
         input.testRecipientEmail || '',
         input.adminEmail || '',
+        input.notifyUserEmails !== false,
         resetCursor,
         actor,
       ]);
@@ -550,6 +552,7 @@ export class DemoModelAuditRepository {
       enabled: false,
       scanIntervalMinutes: 5,
       testMode: true,
+      notifyUserEmails: true,
       testUserEmails: ['nuohuisong@gmail.com'],
       testRecipientEmail: 'test@example.com',
       adminEmail: 'admin@example.com',
@@ -606,6 +609,7 @@ export class DemoModelAuditRepository {
       enabled: Boolean(input.enabled),
       scanIntervalMinutes: Number(input.scanIntervalMinutes),
       testMode: Boolean(input.testMode),
+      notifyUserEmails: input.notifyUserEmails !== false,
       testUserEmails: [...(input.testUserEmails || [])],
       testRecipientEmail: input.testRecipientEmail || '',
       adminEmail: input.adminEmail || '',

@@ -396,6 +396,7 @@ test('FinOps background email delivery state remains isolated', () => {
 test('model audit migration and grants remain FinOps-owned and source-read-only', () => {
   const migration = read('migrations/069_model_audit.sql');
   const testRunsMigration = read('migrations/070_model_audit_test_runs.sql');
+  const userNotificationsMigration = read('migrations/071_model_audit_user_notifications.sql');
   const grants = read('deploy/postgres-grants.sql');
   assert.match(migration, /model_audit_settings/);
   assert.match(migration, /model_audit_mappings/);
@@ -411,4 +412,7 @@ test('model audit migration and grants remain FinOps-owned and source-read-only'
   assert.match(testRunsMigration, /DROP CONSTRAINT IF EXISTS model_audit_events_source_usage_id_key/);
   assert.doesNotMatch(testRunsMigration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(testRunsMigration, /\bredis\b/i);
+  assert.match(userNotificationsMigration, /notify_user_emails/);
+  assert.doesNotMatch(userNotificationsMigration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(userNotificationsMigration, /\bredis\b/i);
 });

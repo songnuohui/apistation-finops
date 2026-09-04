@@ -74,6 +74,33 @@ test('model audit notifications aggregate mismatches by user and add one admin s
   assert.match(notifications[2].htmlContent, /other@example\.com/);
 });
 
+test('model audit can notify only the administrator when user emails are disabled', () => {
+  const run = {
+    periodStart: '2026-09-04T00:00:00.000Z',
+    periodEnd: '2026-09-04T00:05:00.000Z',
+  };
+  const events = [{
+    status: 'mismatch',
+    userEmail: 'user@example.com',
+    sourceUserId: 7,
+    requestedModel: 'gpt-4o',
+    upstreamModel: 'gpt-4o',
+    upstreamResponseModel: 'gpt-4o-mini',
+    createdAt: '2026-09-04T00:01:00.000Z',
+  }];
+  const notifications = buildModelAuditNotifications({
+    testMode: false,
+    notifyUserEmails: false,
+    adminEmail: 'admin@example.com',
+  }, run, events);
+
+  assert.deepEqual(
+    notifications.map((item) => [item.kind, item.recipientEmail, item.eventCount]),
+    [['admin', 'admin@example.com', 1]],
+  );
+  assert.match(notifications[0].htmlContent, /user@example\.com/);
+});
+
 test('model audit test mode routes one email only to the configured recipient and users', async () => {
   const repository = new DemoModelAuditRepository({
     users: [{ id: 1, email: 'configured@example.com' }],
