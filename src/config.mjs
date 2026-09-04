@@ -171,6 +171,7 @@ export function loadConfig(env = process.env) {
     throw new Error('SYNC_USAGE_ENABLED=true is no longer supported; usage must be queried from the read-only Sub2API administrator API');
   }
   const configuredSupplierBlockedHosts = hostList(env.SUPPLIER_BLOCKED_HOSTS, 'SUPPLIER_BLOCKED_HOSTS');
+  const monitorAllowedHosts = hostList(env.MONITOR_ALLOWED_HOSTS, 'MONITOR_ALLOWED_HOSTS');
   if (nodeEnv === 'production' && supplierCredentialsKey && !configuredSupplierBlockedHosts.length) {
     throw new Error('SUPPLIER_BLOCKED_HOSTS is required in production when supplier monitoring is enabled');
   }
@@ -234,6 +235,7 @@ export function loadConfig(env = process.env) {
     emailCredentialsKey,
     finopsPublicUrl: optionalHttpUrl(env.FINOPS_PUBLIC_URL, 'FINOPS_PUBLIC_URL') || (nodeEnv === 'production' ? '' : `http://${env.HOST || '127.0.0.1'}:${env.PORT || 8090}`),
     supplierBlockedHosts: Object.freeze(supplierBlockedHosts),
+    monitorAllowedHosts: Object.freeze(monitorAllowedHosts),
     supplierMonitorIntervalSeconds: intValue(env.SUPPLIER_MONITOR_INTERVAL_SECONDS, 3, { min: 3, max: 3600 }),
     supplierRequestTimeoutMs: intValue(env.SUPPLIER_REQUEST_TIMEOUT_MS, 30_000, { min: 2_000, max: 30_000 }),
     supplierMaxResponseBytes: intValue(env.SUPPLIER_MAX_RESPONSE_BYTES, 1_048_576, { min: 65_536, max: 5_242_880 }),

@@ -57,8 +57,8 @@ function blockedSupplierHost(host, blockedHosts = []) {
   });
 }
 
-function assertSupplierHostAllowed(host, blockedHosts) {
-  if (blockedSupplierHost(host, blockedHosts)) {
+function assertSupplierHostAllowed(host, blockedHosts, allowedHosts = []) {
+  if (blockedSupplierHost(host, blockedHosts) && !blockedSupplierHost(host, allowedHosts)) {
     throw new SupplierAdapterError(
       'protected_sub2api_blocked',
       'supplier monitoring is blocked from connecting to the production Sub2API host',
@@ -88,15 +88,16 @@ export function normalizeSupplierBaseUrl(value, { blockedHosts = [] } = {}) {
   return parsed.toString().replace(/\/$/, '');
 }
 
-async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts) {
+async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts, allowedHosts = []) {
   const parsed = new URL(baseUrl);
   if (parsed.protocol !== 'https:') {
     throw new SupplierAdapterError('insecure_protocol_blocked', 'supplier monitoring requires HTTPS', { statusCode: 400 });
   }
   const host = hostname(parsed);
-  assertSupplierHostAllowed(host, blockedHosts);
+  assertSupplierHostAllowed(host, blockedHosts, allowedHosts);
+  const hostAllowed = blockedSupplierHost(host, allowedHosts);
   if (net.isIP(host)) {
-    if (privateAddress(host) || blockedSupplierHost(host, blockedHosts)) {
+    if (privateAddress(host) || (blockedSupplierHost(host, blockedHosts) && !hostAllowed)) {
       throw new SupplierAdapterError('private_address_blocked', 'supplier URL resolves to a private or reserved address', { statusCode: 400 });
     }
     return [{ address: host, family: net.isIP(host) }];
@@ -110,7 +111,7 @@ async function assertPublicSupplierUrl(baseUrl, dnsLookup, blockedHosts) {
   const addresses = Array.isArray(records) ? records : [records];
   if (!addresses.length || addresses.some((record) => {
     const address = record?.address || record;
-    return privateAddress(address) || blockedSupplierHost(address, blockedHosts);
+    return privateAddress(address) || (blockedSupplierHost(address, blockedHosts) && !hostAllowed);
   })) {
     throw new SupplierAdapterError('private_address_blocked', 'supplier URL resolves to a private or reserved address', { statusCode: 400 });
   }
@@ -425,19 +426,27 @@ function pinnedHttpsStreamProbe(urlValue, init, target, { timeoutMs, maxResponse
 }
 
 export class SupplierHttpClient {
-  constructor(config = {}, { fetchImpl, dnsLookup = dns.lookup } = {}) {
+  constructor(config = {}, { fetchImpl, dnsLookup = dns.lookup, allowedHosts = [] } = {}) {
     if (fetchImpl !== undefined && typeof fetchImpl !== 'function') throw new TypeError('fetch implementation must be a function');
     if (typeof dnsLookup !== 'function') throw new TypeError('DNS lookup implementation is required');
     this.config = config;
     this.fetchImpl = fetchImpl || null;
     this.dnsLookup = dnsLookup;
+    this.allowedHosts = allowedHosts;
   }
 
-  async request(baseUrl, pathname, { method = 'GET', token = '', cookie = '', body, headers = {}, allowError = false } = {}) {
+  async request(baseUrl, pathname, {
+    method = 'GET', token = '', cookie = '', body, headers = {}, allowError = false, timeoutMs,
+  } = {}) {
     const requestPath = new URL(endpoint(baseUrl, pathname)).pathname;
     const stage = `${method} ${requestPath}`;
-    const targets = await assertPublicSupplierUrl(baseUrl, this.dnsLookup, this.config.supplierBlockedHosts || []);
-    const timeoutMs = Number(this.config.supplierRequestTimeoutMs) || 10_000;
+    const targets = await assertPublicSupplierUrl(
+      baseUrl,
+      this.dnsLookup,
+      this.config.supplierBlockedHosts || [],
+      this.allowedHosts,
+    );
+    const requestTimeoutMs = Number(timeoutMs) || Number(this.config.supplierRequestTimeoutMs) || 10_000;
     const maxResponseBytes = Number(this.config.supplierMaxResponseBytes) || 1_048_576;
     const startedAt = Date.now();
     const serializedBody = body === undefined ? undefined : JSON.stringify(body);
@@ -457,7 +466,7 @@ export class SupplierHttpClient {
       let raw;
       if (this.fetchImpl) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
         try {
           response = await this.fetchImpl(endpoint(baseUrl, pathname), {
             method, redirect: 'error', signal: controller.signal,
@@ -470,7 +479,7 @@ export class SupplierHttpClient {
       } else {
         let lastError;
         for (let index = 0; index < targets.length; index += 1) {
-          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          const remainingMs = requestTimeoutMs - (Date.now() - startedAt);
           if (remainingMs <= 0) break;
           const attemptTimeoutMs = index === targets.length - 1
             ? remainingMs
@@ -533,6 +542,7 @@ export class SupplierHttpClient {
       return {
         response,
         payload,
+        rawBody: raw.toString('utf8'),
         setCookies: responseSetCookies(response.headers),
         latencyMs: Date.now() - startedAt,
       };

@@ -569,7 +569,7 @@ export function normalizeAccountCostReprice(input) {
 
 export function normalizeMonitorGroup(input) {
   const refreshIntervalSeconds = input.refreshIntervalSeconds === undefined || input.refreshIntervalSeconds === ''
-    ? 30
+    ? 60
     : integerValue(input.refreshIntervalSeconds, 'refreshIntervalSeconds', { min: 15, max: 3600 });
   const jitterSeconds = input.jitterSeconds === undefined || input.jitterSeconds === ''
     ? 0

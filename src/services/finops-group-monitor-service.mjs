@@ -2,6 +2,9 @@ import { SupplierHttpClient } from './supplier-adapters.mjs';
 import { SupplierCredentialVault } from './supplier-credentials.mjs';
 
 const MIN_INTERVAL_SECONDS = 15;
+const DEFAULT_INTERVAL_SECONDS = 60;
+const MODEL_REQUEST_TIMEOUT_MS = 45_000;
+const PING_TIMEOUT_MS = 8_000;
 const MAX_WORKERS = 4;
 const HISTORY_LIMIT = 60;
 const DEGRADED_THRESHOLD_MS = 6_000;
@@ -47,6 +50,7 @@ function responseText(payload) {
     return payload.output
       .filter((item) => !item?.type || item.type === 'message')
       .flatMap((item) => Array.isArray(item.content) ? item.content : [item.content])
+      .filter((item) => !item?.type || item.type === 'output_text')
       .map((item) => text(item?.text ?? item?.content))
       .filter(Boolean)
       .join('');
@@ -68,8 +72,8 @@ function challenge() {
 }
 
 function challengeMatches(value, expected) {
-  const compact = String(value || '').trim();
-  return compact === expected || new RegExp(`(?:^|\\D)${expected}(?:\\D|$)`).test(compact);
+  if (!String(value || '').trim() || !String(expected || '').trim()) return false;
+  return String(value).match(/-?\d+/g)?.some((item) => item === String(expected)) || false;
 }
 
 function safeHeaders(value) {
@@ -170,7 +174,9 @@ export class FinopsGroupMonitorService {
     this.config = config;
     this.logger = logger;
     this.vault = new SupplierCredentialVault(config.supplierCredentialsKey);
-    this.client = new SupplierHttpClient(config);
+    this.client = new SupplierHttpClient(config, {
+      allowedHosts: config.monitorAllowedHosts || [],
+    });
     this.tasks = new Map();
     this.running = new Map();
     this.waiters = [];
@@ -207,7 +213,7 @@ export class FinopsGroupMonitorService {
   }
 
   nextDelay(intervalSeconds, jitterSeconds) {
-    const interval = Math.max(MIN_INTERVAL_SECONDS, Number(intervalSeconds) || 30);
+    const interval = Math.max(MIN_INTERVAL_SECONDS, Number(intervalSeconds) || DEFAULT_INTERVAL_SECONDS);
     const jitter = Math.max(0, Math.min(Number(jitterSeconds) || 0, interval - MIN_INTERVAL_SECONDS));
     if (!jitter) return interval * 1000;
     return (interval - jitter + Math.floor(Math.random() * (2 * jitter + 1))) * 1000;
@@ -303,8 +309,8 @@ export class FinopsGroupMonitorService {
     return {
       generatedAt: new Date().toISOString(),
       refreshIntervalSeconds: groups.length
-        ? Math.min(...groups.map((group) => Math.max(MIN_INTERVAL_SECONDS, Number(group.refreshIntervalSeconds) || 30)))
-        : 30,
+        ? Math.min(...groups.map((group) => Math.max(MIN_INTERVAL_SECONDS, Number(group.refreshIntervalSeconds) || DEFAULT_INTERVAL_SECONDS)))
+        : DEFAULT_INTERVAL_SECONDS,
       summary: {
         overallStatus: !groups.length || !knownGroups
           ? 'unknown'
@@ -347,6 +353,7 @@ export class FinopsGroupMonitorService {
         pingLatencyMs = (await this.client.request(monitor.endpoint, '/', {
           method: 'HEAD',
           allowError: true,
+          timeoutMs: PING_TIMEOUT_MS,
         })).latencyMs;
       } catch {
         pingLatencyMs = null;
@@ -379,6 +386,7 @@ export class FinopsGroupMonitorService {
         body: requestBody(monitor, model, probe.prompt),
         headers: requestHeaders(monitor),
         allowError: true,
+        timeoutMs: MODEL_REQUEST_TIMEOUT_MS,
       });
       result.latencyMs = number(response.latencyMs) ?? (Date.now() - startedAt);
       const statusCode = Number(response.response?.status || 0);
@@ -386,9 +394,8 @@ export class FinopsGroupMonitorService {
       const extracted = responseText(payload);
       if (statusCode < 200 || statusCode >= 300) {
         result.status = 'error';
-        result.message = sanitizeMessage(
-          payload?.error?.message || payload?.message || `upstream HTTP ${statusCode || 0}`,
-        );
+        const responseBody = String(response.rawBody || '').trim();
+        result.message = sanitizeMessage(`upstream HTTP ${statusCode || 0}${responseBody ? `: ${responseBody}` : ''}`);
       } else if (monitor.bodyOverrideMode === 'replace' && !String(extracted).trim()) {
         result.status = 'failed';
         result.message = 'replace-mode: upstream returned 2xx with empty text';

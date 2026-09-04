@@ -51,7 +51,7 @@ function monitorConfigFromRow(row, { includeSecret = false } = {}) {
     bodyOverride: jsonObject(row.body_override),
     displayOrder: number(row.display_order),
     enabled: Boolean(row.enabled),
-    refreshIntervalSeconds: number(row.refresh_interval_seconds || 30),
+    refreshIntervalSeconds: number(row.refresh_interval_seconds || 60),
     jitterSeconds: number(row.jitter_seconds || 0),
     historyStartedAt: row.history_started_at || null,
     status: monitorStatus(row.last_status),
@@ -2507,7 +2507,7 @@ export class PostgresRepository {
     return {
       refreshIntervalSeconds: result.rowCount
         ? number(result.rows[0].refresh_interval_seconds)
-        : 30,
+        : 60,
     };
   }
 

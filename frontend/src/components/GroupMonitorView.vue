@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Edit3, ExternalLink, Play, Plus, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-vue-next';
+import { Activity, CircleDot, Cloud, Edit3, ExternalLink, Play, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, X } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -17,6 +17,16 @@ const running = ref<number | null>(null);
 const editor = ref<AnyRecord | null>(null);
 const candidatePlatform = ref('');
 const candidateSearch = ref('');
+const providerOptions = [
+  { value: 'anthropic', label: 'Anthropic', icon: Activity },
+  { value: 'openai', label: 'OpenAI', icon: Sparkles },
+  { value: 'gemini', label: 'Gemini', icon: Cloud },
+  { value: 'grok', label: 'Grok', icon: CircleDot },
+];
+const apiModeOptions = [
+  { value: 'chat_completions', label: 'OpenAI Compatible', hint: '使用 /v1/chat/completions，发送 messages，适合大多数兼容接口。' },
+  { value: 'responses', label: 'Responses API', hint: '使用 /v1/responses，发送 instructions + input，适合支持 Responses 的接口。' },
+];
 
 const enabledCount = computed(() => groups.value.filter((group) => group.enabled).length);
 const platforms = computed(() => [...new Set(candidates.value
@@ -89,7 +99,7 @@ function openEditor(group: AnyRecord | null = null, candidate: AnyRecord | null 
     sourceGroupId: String(group?.sourceGroupId || candidate?.sourceGroupId || ''),
     modelLabel: group?.modelLabel || candidate?.defaultModel || candidate?.latestModel || '',
     displayMultiplier: group?.displayMultiplier ?? '',
-    refreshIntervalSeconds: group?.refreshIntervalSeconds ?? 30,
+    refreshIntervalSeconds: group?.refreshIntervalSeconds ?? 60,
     displayOrder: group?.displayOrder ?? candidate?.sortOrder ?? 0,
     enabled: group?.enabled ?? true,
     sourceGroupMultiplier: group?.sourceGroupMultiplier ?? candidate?.groupMultiplier ?? null,
@@ -118,7 +128,26 @@ function syncCandidate() {
   currentEditor.displayOrder = candidate.sortOrder ?? currentEditor.displayOrder;
   currentEditor.sourceGroupMultiplier = candidate.groupMultiplier ?? null;
   currentEditor.groupName = candidate.name || currentEditor.groupName;
+  const provider = String(candidate.platform || '').trim().toLowerCase();
+  if (providerOptions.some((item) => item.value === provider)) {
+    currentEditor.provider = provider;
+    if (provider !== 'openai') currentEditor.apiMode = 'chat_completions';
+  }
   if (!currentEditor.primaryModel) currentEditor.primaryModel = candidate.defaultModel || candidate.latestModel || '';
+}
+
+function selectProvider(provider: string) {
+  if (!editor.value || editor.value.provider === provider) return;
+  editor.value.provider = provider;
+  if (provider !== 'openai') editor.value.apiMode = 'chat_completions';
+}
+
+function providerButtonClass(provider: string) {
+  return editor.value?.provider === provider ? 'active' : '';
+}
+
+function apiModeButtonClass(mode: string) {
+  return editor.value?.apiMode === mode ? 'active' : '';
 }
 
 async function load() {
@@ -157,7 +186,7 @@ async function saveGroup() {
       bodyOverrideMode: editor.value.bodyOverrideMode || 'off',
       bodyOverride: parseJson(editor.value.bodyOverrideText, {}),
       displayMultiplier: editor.value.displayMultiplier === '' ? null : editor.value.displayMultiplier,
-      refreshIntervalSeconds: Number(editor.value.refreshIntervalSeconds || 30),
+      refreshIntervalSeconds: Number(editor.value.refreshIntervalSeconds || 60),
       displayOrder: Number(editor.value.displayOrder || 0),
       enabled: Boolean(editor.value.enabled),
     };
@@ -277,15 +306,43 @@ onMounted(load);
             <small v-if="!availableCandidates.length" class="candidate-empty">没有可配置的启用分组，请调整筛选或同步 Sub2API 分组目录。</small>
           </label>
           <label>公开显示名称<input v-model="editor.name" maxlength="120" placeholder="例如 GPT Plus 稳定池" /></label>
-          <label>监控平台<select v-model="editor.provider"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="grok">Grok</option></select></label>
+          <label class="full-field">监控平台
+            <div class="provider-picker">
+              <button
+                v-for="provider in providerOptions"
+                :key="provider.value"
+                type="button"
+                :class="['provider-option', providerButtonClass(provider.value)]"
+                :aria-pressed="editor.provider === provider.value"
+                @click="selectProvider(provider.value)"
+              >
+                <component :is="provider.icon" :size="17" />
+                <span>{{ provider.label }}</span>
+              </button>
+            </div>
+          </label>
+          <label v-if="editor.provider === 'openai'" class="full-field api-mode-field">OpenAI 协议
+            <div class="api-mode-picker">
+              <button
+                v-for="mode in apiModeOptions"
+                :key="mode.value"
+                type="button"
+                :class="['api-mode-option', apiModeButtonClass(mode.value)]"
+                :aria-pressed="editor.apiMode === mode.value"
+                @click="editor.apiMode = mode.value"
+              >
+                <strong>{{ mode.label }}</strong>
+                <small>{{ mode.hint }}</small>
+              </button>
+            </div>
+          </label>
           <label>探测 Endpoint<input v-model="editor.endpoint" maxlength="500" placeholder="https://api.example.com" /><small>必须是 HTTPS 根地址，不包含路径、查询参数或密钥。</small></label>
           <label>API Key<input v-model="editor.apiKey" type="password" maxlength="2000" autocomplete="new-password" :placeholder="editor.id && editor.apiKeyMasked ? `留空继续使用 ${editor.apiKeyMasked}` : '创建时必填'" /><small>仅加密保存在 FinOps，不会写入 Sub2API。</small></label>
           <label>主模型<input v-model="editor.primaryModel" maxlength="200" placeholder="例如 gpt-5.4" /></label>
           <label>附加模型<input v-model="editor.extraModelsText" maxlength="2000" placeholder="用逗号分隔，可选" /></label>
-          <label v-if="editor.provider === 'openai'">API 模式<select v-model="editor.apiMode"><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
           <label>分组标识<input v-model="editor.groupName" maxlength="120" placeholder="用于记录和识别，可选" /></label>
-          <label>刷新间隔（秒）<input v-model.number="editor.refreshIntervalSeconds" type="number" min="15" max="3600" step="1" /><small>FinOps 独立探测间隔：15 - 3600 秒。</small></label>
-          <label>抖动（秒）<input v-model.number="editor.jitterSeconds" type="number" min="0" :max="Math.max(0, Number(editor.refreshIntervalSeconds || 30) - 15)" step="1" /><small>避免多个分组同时发起探测。</small></label>
+          <label>刷新间隔（秒）<input v-model.number="editor.refreshIntervalSeconds" type="number" min="15" max="3600" step="1" /><small>FinOps 独立探测间隔：15 - 3600 秒，默认与 Sub2API 一致为 60 秒。</small></label>
+          <label>抖动（秒）<input v-model.number="editor.jitterSeconds" type="number" min="0" :max="Math.max(0, Number(editor.refreshIntervalSeconds || 60) - 15)" step="1" /><small>避免多个分组同时发起探测。</small></label>
           <label>展示顺序<input v-model.number="editor.displayOrder" type="number" min="0" max="100000" step="1" /></label>
           <label>自定义展示倍率
             <input v-model="editor.displayMultiplier" type="number" min="0.0001" step="0.0001" placeholder="留空则跟随 Sub2API" />
@@ -316,6 +373,17 @@ onMounted(load);
 .monitor-source-label{display:inline-flex;padding:4px 8px;border-radius:999px;color:#63758b;background:#eef3f8;font-size:11px}
 .monitor-source-label.custom{color:#1658ae;background:#eaf2ff}
 .group-monitor-editor-modal{width:min(920px,100%)}
+.provider-picker{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
+.provider-option{min-width:0;min-height:42px;display:flex;align-items:center;justify-content:center;gap:7px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#52657c;font-size:12px;transition:border-color .16s ease,background-color .16s ease,color .16s ease,box-shadow .16s ease}
+.provider-option:hover{border-color:#8db3e7;background:#f7faff}
+.provider-option.active{border-color:#11a78e;background:#effcf8;color:#087d68;box-shadow:0 0 0 1px #11a78e}
+.api-mode-field{padding:12px;border:1px solid #cfe0fa;border-radius:7px;background:#f5f9ff}
+.api-mode-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.api-mode-option{display:grid;gap:4px;padding:11px 12px;border:1px solid #cfe0fa;border-radius:7px;background:#fff;color:#53657a;text-align:left}
+.api-mode-option:hover{border-color:#8db3e8}
+.api-mode-option.active{border-color:#11a78e;background:#effcf8;color:#087d68;box-shadow:0 0 0 1px #11a78e}
+.api-mode-option strong{font-size:12px}
+.api-mode-option small{color:inherit;font-size:10px;line-height:15px}
 .candidate-filterbar{display:grid;grid-template-columns:160px minmax(0,1fr);gap:9px}
 .candidate-search{height:39px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#fbfdff;color:var(--muted)}
 .candidate-search input{width:100%;height:auto;padding:0;border:0;background:transparent;outline:0}
@@ -328,5 +396,6 @@ onMounted(load);
   .group-monitor-actions .primary-button{flex:1}
   .group-monitor-metrics{grid-template-columns:1fr}
   .candidate-filterbar{grid-template-columns:1fr}
+  .provider-picker,.api-mode-picker{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 </style>

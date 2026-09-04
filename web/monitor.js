@@ -11,8 +11,8 @@ const rangeButtons = [...document.querySelectorAll('[data-window]')];
 
 let refreshTimer = null;
 let countdownTimer = null;
-let refreshIntervalSeconds = 30;
-let countdownSeconds = 30;
+let refreshIntervalSeconds = 60;
+let countdownSeconds = 60;
 let selectedWindow = '7d';
 let currentData = null;
 
@@ -74,6 +74,7 @@ function percent(value) {
 }
 
 function milliseconds(value) {
+  if (value === null || value === undefined || value === '') return '--';
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? `${Math.round(parsed)} ms` : '--';
 }
@@ -175,7 +176,7 @@ function card(group) {
       <div class="history-axis"><span>过去</span><span>${escapeHtml(relativeTime(group.lastObservedAt))}</span><span>现在</span></div>
     </section>
     <footer class="group-card-footer">
-      <span><img src="/icons/refresh-cw.svg" alt="">读取间隔 ${escapeHtml(`${Math.max(15, Number(group.refreshIntervalSeconds) || 30)} 秒`)}</span>
+      <span><img src="/icons/refresh-cw.svg" alt="">读取间隔 ${escapeHtml(`${Math.max(15, Number(group.refreshIntervalSeconds) || 60)} 秒`)}</span>
       <time datetime="${escapeHtml(group.lastObservedAt || '')}">${escapeHtml(formatDateTime(group.lastObservedAt))}</time>
     </footer>
   </article>`;
