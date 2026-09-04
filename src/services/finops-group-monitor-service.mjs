@@ -242,24 +242,25 @@ export class FinopsGroupMonitorService {
     this.unschedule(id);
     const task = { id, timer: null, cancelled: false };
     this.tasks.set(id, task);
-    const trigger = (delay) => {
+    const trigger = () => {
       if (task.cancelled) return;
-      task.timer = setTimeout(async () => {
-        if (task.cancelled) return;
-        try {
-          await this.runNow(id);
-        } catch (error) {
+
+      // Keep the schedule anchored to each trigger time. A slow upstream
+      // request must not add another full interval before the next probe.
+      if (!this.running.has(id)) {
+        this.runNow(id).catch((error) => {
           if (error?.statusCode === 404 || error?.statusCode === 409) {
             this.unschedule(id);
             return;
           }
           this.logger.warn(`[group-monitor] probe ${id} failed`, error?.message || error);
-        }
-        trigger(this.nextDelay(group.refreshIntervalSeconds, group.jitterSeconds));
-      }, Math.max(0, delay));
+        });
+      }
+
+      task.timer = setTimeout(trigger, this.nextDelay(group.refreshIntervalSeconds, group.jitterSeconds));
       task.timer.unref?.();
     };
-    trigger(0);
+    trigger();
   }
 
   unschedule(id) {
