@@ -30,7 +30,7 @@ import {
   normalizeUserBalanceStatsWhitelist, normalizeSupplierQualityTarget,
   normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
   normalizeOAuthSupplyAuthSettings, normalizeEmailSettings, normalizeEmailCampaign,
-  normalizeModelAuditSettings, normalizeModelAuditMapping,
+  normalizeModelAuditSettings, normalizeModelAuditTestRun, normalizeModelAuditMapping,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { routeId } from './http/route.mjs';
@@ -375,7 +375,7 @@ async function api(request,res,url){
     ));
   }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/mappings'){
-    return json(res,200,await modelAuditRepository.listMappings());
+    return json(res,200,await modelAuditRepository.listMappings(page()));
   }
   if(request.method==='POST'&&url.pathname==='/api/model-audit/mappings'){
     return json(res,201,await modelAuditRepository.createMapping(
@@ -397,17 +397,21 @@ async function api(request,res,url){
   if(request.method==='POST'&&url.pathname==='/api/model-audit/run'){
     return json(res,202,await modelAuditService.runNow());
   }
+  if(request.method==='POST'&&url.pathname==='/api/model-audit/test-run'){
+    return json(res,202,await modelAuditService.runTest(
+      normalizeModelAuditTestRun(await body(request)),
+    ));
+  }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/scan-runs'){
     return json(res,200,await modelAuditRepository.listScanRuns(page()));
   }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/events'){
     const status=url.searchParams.get('status')||'';
-    if(status && !['matched','allowed_mapping','mismatch','unknown'].includes(status)){
+    if(status && status !== 'mismatch'){
       return json(res,400,{error:'invalid model audit event status'});
     }
     return json(res,200,await modelAuditRepository.listEvents({
       ...page(),
-      status,
       search:searchTerm(url.searchParams),
     }));
   }
@@ -1334,11 +1338,16 @@ async function readiness(){
     ['069_model_audit'],
   );
   if(!modelAuditMigration.rowCount)throw new Error('required FinOps migration 069_model_audit is not applied');
+  const modelAuditTestRunsMigration=await finopsPool.query(
+    `SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version=$1`,
+    ['070_model_audit_test_runs'],
+  );
+  if(!modelAuditTestRunsMigration.rowCount)throw new Error('required FinOps migration 070_model_audit_test_runs is not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',
     mode:'database',
-    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_supplier_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_recovery_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view','061_finops_email_center','062_finops_email_preference_copy','063_finops_email_interruption_recovery','064_finops_email_background_delivery','065_monitor_display_multiplier','066_remove_monitor_observations','067_monitor_group_refresh_config','068_finops_group_monitor_runtime','069_model_audit'],
+    migrations:['002_cny_accounting','003_reconciliation_snapshots','004_cost_accounting_v2','005_cost_snapshot_ledger','006_group_monitoring','007_source_group_catalog','008_monitor_settings','009_monitor_ping_latency','010_multiplier_effective_history','011_backfill_current_day_multiplier_rules','012_cost_rule_archiving','013_audited_cost_repricing','014_operational_visibility','015_canonical_usage_models','016_supplier_monitoring','017_supplier_key_cost_rules','018_backfill_supplier_key_cost_links','019_supplier_interval_seconds','020_supplier_quality_monitoring','021_qq_alert_notifications','022_usage_cost_snapshot_performance','023_incremental_cost_repricing','024_account_profit_guard','025_profit_guard_empty_group_default','026_profit_guard_threshold_modes','027_sub2api_service_auth','028_sub2api_service_auth_api_key','029_supplier_profit_guard_defaults','030_supplier_profit_guard_auto_assignment','031_oauth_supply_auth','032_oauth_supply_replenishment','033_replenishment_inventory_recovery','034_replenishment_lifecycle','035_replenishment_execution_logs','036_supplier_refresh_token_auth','037_replenishment_scheduling_recovery_policies','038_replenishment_model_whitelist','039_replenishment_recovery_completion','040_replenishment_semantics','041_replenishment_expiry_metadata_cleanup','042_replenishment_expiry_metadata_guard','043_replenishment_manual_compensation','044_replenishment_remove_order_cooldown','045_manual_completion_guard','046_replenishment_list_performance','047_account_acquisition_accounting','048_account_filter_dimensions','049_replenishment_thresholds_and_schedule_interval','050_replenishment_account_configuration','051_replenishment_proxy_selection','052_custom_account_cost_rule_time','053_replenishment_trigger_strategy','060_void_cost_period_view','061_finops_email_center','062_finops_email_preference_copy','063_finops_email_interruption_recovery','064_finops_email_background_delivery','065_monitor_display_multiplier','066_remove_monitor_observations','067_monitor_group_refresh_config','068_finops_group_monitor_runtime','069_model_audit','070_model_audit_test_runs'],
     syncStatus:sync.status,
     lastSuccessAt:sync.lastSuccessAt,
     sub2apiServiceAuth:sub2ApiServiceAuthService.status(),

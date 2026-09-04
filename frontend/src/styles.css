@@ -219,16 +219,47 @@ button:disabled{cursor:not-allowed!important}
 .notification-preview{display:grid;gap:8px}
 .notification-preview strong{color:#52657d;font-size:12px}
 .notification-preview pre{max-height:260px;margin:0;padding:12px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#f7f9fc;color:#334860;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.model-audit-top-tabs{display:flex;gap:2px;align-items:stretch;border-bottom:1px solid var(--line);overflow-x:auto}
+.model-audit-top-tabs button{display:inline-flex;align-items:center;gap:7px;min-height:44px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:#66768b;font-size:13px;white-space:nowrap}
+.model-audit-top-tabs button:hover{color:#1b59c6;background:#f7faff}
+.model-audit-top-tabs button.active{color:#1852c2;border-bottom-color:#2563eb;background:#fff;font-weight:700}
+.model-audit-top-tabs small,.model-audit-tabs small{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;color:#607087;background:#edf2f8;font-size:10px}
+.model-audit-top-tabs button.active small,.model-audit-tabs button.active small{color:#1852c2;background:#e4edff}
+.model-audit-record-head{align-items:center}
+.model-audit-record-head .search-box{flex:0 1 290px}
+.test-scan-panel{display:grid;gap:13px;margin-top:20px;padding:16px;border:1px solid #dbe7f5;border-radius:7px;background:#f8fbff}
+.test-scan-panel h3{margin:0;color:#304863;font-size:14px}
+.test-scan-panel p{margin:4px 0 0;color:var(--muted);font-size:11px}
+.test-scan-fields{display:flex;align-items:flex-end;gap:10px}
+.test-scan-fields label{display:grid;flex:1;gap:6px;color:#54657a;font-size:11px}
+.test-scan-fields input{height:38px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:#fff;color:#26374e;font-size:12px}
+.test-scan-arrow{padding-bottom:11px;color:#8a97a8;font-size:12px}
+.pagination-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 20px 8px;color:var(--muted);font-size:12px}
+.pagination-summary{display:flex;align-items:center;gap:14px;min-width:0}
+.pagination-summary span{white-space:nowrap}
+.pagination-summary label{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.pagination-summary select{height:31px;padding:0 23px 0 8px;border:1px solid #cfdbe8;border-radius:6px;background:#fff;color:#35445a;font-size:12px}
+.pagination-controls{display:flex;align-items:center;gap:4px;flex-wrap:nowrap}
+.pagination-button{width:31px;height:31px;display:grid;place-items:center;padding:0;border:1px solid #d4dfeb;border-radius:5px;background:#fff;color:#56708e;font-size:12px}
+.pagination-button:hover:not(:disabled){border-color:#9dbbe2;color:#185ec1;background:#f3f7ff}
+.pagination-button.active{border-color:#38b9b7;color:#008a86;background:#f1fffe;font-weight:700}
+.pagination-button:disabled{cursor:not-allowed;color:#b5bfca;background:#fafbfd}
+.pagination-ellipsis{width:20px;text-align:center;color:#8492a3}
 @media(max-width:1100px){
   .model-audit-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:760px){
   .model-audit-header,.model-audit-form-footer{align-items:stretch;flex-direction:column}
   .model-audit-actions{justify-content:flex-end}
-  .model-audit-filterbar{align-items:stretch;flex-direction:column}
-  .model-audit-filterbar .search-box{width:100%;max-width:none}
-  .model-audit-filterbar select{width:100%}
+  .model-audit-record-head{align-items:stretch}
+  .model-audit-record-head .search-box{width:100%;max-width:none}
   .model-audit-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .test-scan-fields{align-items:stretch;flex-direction:column}
+  .test-scan-arrow{display:none}
+  .test-scan-fields .secondary-button{width:100%}
+  .pagination-bar{align-items:stretch;flex-direction:column;padding-left:12px;padding-right:12px}
+  .pagination-summary{justify-content:space-between}
+  .pagination-controls{justify-content:flex-end;overflow-x:auto}
 }
 .column-sort:hover{color:var(--primary)}
 .search-box{

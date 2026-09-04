@@ -1,0 +1,1 @@
+import{g as e}from"./index-Cv0De-Cm.js";var t=e(`ChevronRightIcon`,[[`path`,{d:`m9 18 6-6-6-6`,key:`mthhwq`}]]);export{t};

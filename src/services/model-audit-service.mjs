@@ -124,7 +124,8 @@ function renderReport(title, periodStart, periodEnd, events, testMode = false) {
 function counts(events) {
   return events.reduce((result, event) => {
     result.scanned += 1;
-    result[event.status] += 1;
+    const key = event.status === 'allowed_mapping' ? 'allowedMapping' : event.status;
+    result[key] += 1;
     return result;
   }, {
     scanned: 0,
@@ -255,23 +256,51 @@ export class ModelAuditService {
     }
   }
 
+  async runTest({ periodStart, periodEnd }) {
+    if (this.running) throw Object.assign(new Error('模型审计扫描正在执行'), { statusCode: 409 });
+    this.running = true;
+    try {
+      const claim = await this.repository.claimTestScan(periodStart, periodEnd);
+      if (!claim) throw Object.assign(new Error('当前已有模型审计扫描正在执行'), { statusCode: 409 });
+      return await this.execute(claim);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  async listMappings() {
+    const first = await this.repository.listMappings({ page: 1, pageSize: 100 });
+    if (Array.isArray(first)) return first;
+    const mappings = [...(first?.items || [])];
+    const total = Number(first?.total || mappings.length);
+    for (let page = 2; mappings.length < total; page += 1) {
+      const result = await this.repository.listMappings({ page, pageSize: 100 });
+      mappings.push(...(result?.items || []));
+      if (!(result?.items || []).length) break;
+    }
+    return mappings;
+  }
+
   async execute({ settings, run }) {
     try {
-      const mappings = await this.repository.listMappings();
+      const mappings = await this.listMappings();
       const sourceRows = [];
       let cursorCreatedAt = run.cursorBeforeCreatedAt;
       let cursorId = run.cursorBeforeId;
+      let includeStart = run.runType === 'test';
       const pageSize = 5_000;
       while (true) {
         const batch = await this.sourceUsageRepository.listModelAuditUsage({
           cursorCreatedAt,
           cursorId,
           until: run.periodEnd,
-          userEmails: settings.testMode ? settings.testUserEmails : [],
+          userEmails: run.runType === 'test' && settings.testMode ? settings.testUserEmails : [],
+          inclusiveCursor: includeStart,
           limit: pageSize,
         });
         sourceRows.push(...batch);
         if (batch.length < pageSize) break;
+        includeStart = false;
         const last = batch[batch.length - 1];
         cursorCreatedAt = new Date(last.created_at ?? last.createdAt).toISOString();
         cursorId = Number(last.id ?? last.sourceUsageId);
@@ -304,14 +333,15 @@ export class ModelAuditService {
       const actualMax = last
         ? { createdAt: cursorAfterCreatedAt, id: cursorAfterId }
         : { createdAt: null, id: null };
-      const notifications = buildModelAuditNotifications(settings, run, events);
+      const mismatches = events.filter((item) => item.status === 'mismatch');
+      const notifications = buildModelAuditNotifications(settings, run, mismatches);
       const completed = await this.repository.completeScan(run.id, {
         cursorAfterCreatedAt,
         cursorAfterId,
         lastRecordCreatedAt: actualMax.createdAt,
         lastRecordId: actualMax.id,
         counts: summary,
-        events,
+        events: mismatches,
         notifications,
       });
       await this.deliverNotifications(run.id);

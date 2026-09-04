@@ -2,8 +2,10 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { Edit3, Play, Plus, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
+import PaginationBar from './PaginationBar.vue';
 
 type AnyRecord = Record<string, any>;
+type PageData = { items: AnyRecord[]; total: number; page: number; pageSize: number };
 
 const props = defineProps<{ refreshToken?: number }>();
 const emit = defineEmits<{ toast: [message: string] }>();
@@ -11,13 +13,23 @@ const emit = defineEmits<{ toast: [message: string] }>();
 const loading = ref(false);
 const saving = ref(false);
 const running = ref(false);
+const testRunning = ref(false);
 const settings = ref<AnyRecord>({});
-const mappings = ref<AnyRecord[]>([]);
-const runs = ref<AnyRecord>({ items: [] });
-const events = ref<AnyRecord>({ items: [] });
-const notifications = ref<AnyRecord>({ items: [] });
-const activeTab = ref<'events' | 'runs' | 'notifications'>('events');
-const eventStatus = ref('');
+const mappings = ref<PageData>({ items: [], total: 0, page: 1, pageSize: 20 });
+const runs = ref<PageData>({ items: [], total: 0, page: 1, pageSize: 20 });
+const events = ref<PageData>({ items: [], total: 0, page: 1, pageSize: 20 });
+const notifications = ref<PageData>({ items: [], total: 0, page: 1, pageSize: 20 });
+
+const activeTopTab = ref<'settings' | 'mappings' | 'audit'>('settings');
+const activeAuditTab = ref<'events' | 'runs' | 'notifications'>('events');
+const mappingPage = ref(1);
+const mappingPageSize = ref(20);
+const eventPage = ref(1);
+const eventPageSize = ref(20);
+const runPage = ref(1);
+const runPageSize = ref(20);
+const notificationPage = ref(1);
+const notificationPageSize = ref(20);
 const eventSearch = ref('');
 const selectedNotification = ref<AnyRecord | null>(null);
 const mappingEditor = ref<AnyRecord | null>(null);
@@ -25,18 +37,21 @@ const mappingEditor = ref<AnyRecord | null>(null);
 const form = ref({
   enabled: false,
   scanIntervalMinutes: 5,
-  testMode: true,
+  testMode: false,
   testUserEmails: '',
   testRecipientEmail: '',
   adminEmail: '',
 });
 
-const mismatchRows = computed(() => (events.value.items || []).filter((item: AnyRecord) => item.status === 'mismatch'));
+function toDateInput(value: Date) {
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+const testPeriodStart = ref(toDateInput(new Date(Date.now() - 5 * 60_000)));
+const testPeriodEnd = ref(toDateInput(new Date()));
+
 const statusLabels: Record<string, string> = {
-  matched: '一致',
-  allowed_mapping: '合法映射',
-  mismatch: '不一致',
-  unknown: '字段缺失',
   never: '未扫描',
   running: '扫描中',
   completed: '已完成',
@@ -65,31 +80,66 @@ function dateTime(value: any) {
 }
 
 function statusClass(value: any) {
-  return ['matched', 'allowed_mapping', 'completed', 'sent'].includes(String(value))
+  return ['completed', 'sent'].includes(String(value))
     ? 'success'
-    : ['mismatch', 'failed'].includes(String(value)) ? 'danger' : 'warning';
+    : ['failed'].includes(String(value)) ? 'danger' : 'warning';
 }
 
 function parseEmails(value: string) {
   return [...new Set(value.split(/[,\n]/).map((item) => item.trim().toLowerCase()).filter(Boolean))];
 }
 
+function safePageData(value: any): PageData {
+  return {
+    items: Array.isArray(value?.items) ? value.items : [],
+    total: Number(value?.total || 0),
+    page: Number(value?.page || 1),
+    pageSize: Number(value?.pageSize || 20),
+  };
+}
+
+async function loadSettings() {
+  settings.value = await get('/model-audit/settings');
+  copySettings();
+}
+
+async function loadMappings() {
+  mappings.value = safePageData(await get(`/model-audit/mappings?${query({
+    page: mappingPage.value,
+    page_size: mappingPageSize.value,
+  })}`));
+  if (mappings.value.page !== mappingPage.value) mappingPage.value = mappings.value.page;
+}
+
+async function loadEvents() {
+  events.value = safePageData(await get(`/model-audit/events?${query({
+    page: eventPage.value,
+    page_size: eventPageSize.value,
+    search: eventSearch.value,
+  })}`));
+  if (events.value.page !== eventPage.value) eventPage.value = events.value.page;
+}
+
+async function loadRuns() {
+  runs.value = safePageData(await get(`/model-audit/scan-runs?${query({
+    page: runPage.value,
+    page_size: runPageSize.value,
+  })}`));
+  if (runs.value.page !== runPage.value) runPage.value = runs.value.page;
+}
+
+async function loadNotifications() {
+  notifications.value = safePageData(await get(`/model-audit/notifications?${query({
+    page: notificationPage.value,
+    page_size: notificationPageSize.value,
+  })}`));
+  if (notifications.value.page !== notificationPage.value) notificationPage.value = notifications.value.page;
+}
+
 async function load() {
   loading.value = true;
   try {
-    const [nextSettings, nextMappings, nextRuns, nextEvents, nextNotifications] = await Promise.all([
-      get('/model-audit/settings'),
-      get('/model-audit/mappings'),
-      get('/model-audit/scan-runs?page=1&page_size=20'),
-      get(`/model-audit/events?${query({ page: 1, page_size: 50, status: eventStatus.value, search: eventSearch.value })}`),
-      get('/model-audit/notifications?page=1&page_size=50'),
-    ]);
-    settings.value = nextSettings;
-    mappings.value = Array.isArray(nextMappings) ? nextMappings : [];
-    runs.value = nextRuns || { items: [] };
-    events.value = nextEvents || { items: [] };
-    notifications.value = nextNotifications || { items: [] };
-    copySettings();
+    await Promise.all([loadSettings(), loadMappings(), loadEvents(), loadRuns(), loadNotifications()]);
   } catch (error: any) {
     emit('toast', error.message);
   } finally {
@@ -137,7 +187,8 @@ async function saveMapping() {
       allowedResponseModel: mappingEditor.value.allowedResponseModel,
     });
     mappingEditor.value = null;
-    await load();
+    mappingPage.value = 1;
+    await loadMappings();
     emit('toast', '合法模型映射已保存');
   } catch (error: any) {
     emit('toast', error.message);
@@ -150,7 +201,7 @@ async function deleteMapping(item: AnyRecord) {
   if (!window.confirm(`确定删除“${item.sourceModel}”的合法映射吗？删除后只有完全相同的模型名才会被视为合法。`)) return;
   try {
     await send(`/model-audit/mappings/${item.id}`, 'DELETE', {});
-    await load();
+    await loadMappings();
     emit('toast', '合法模型映射已删除');
   } catch (error: any) {
     emit('toast', error.message);
@@ -170,13 +221,78 @@ async function runScan() {
   }
 }
 
+async function runTestScan() {
+  testRunning.value = true;
+  try {
+    await send('/model-audit/test-run', 'POST', {
+      periodStart: new Date(testPeriodStart.value).toISOString(),
+      periodEnd: new Date(testPeriodEnd.value).toISOString(),
+    });
+    await load();
+    activeTopTab.value = 'audit';
+    activeAuditTab.value = 'events';
+    emit('toast', '测试扫描已完成，结果已写入审计记录');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    testRunning.value = false;
+  }
+}
+
+async function changeMappingsPage(page: number) {
+  mappingPage.value = page;
+  await loadMappings();
+}
+
+async function changeMappingsPageSize(pageSize: number) {
+  mappingPageSize.value = pageSize;
+  mappingPage.value = 1;
+  await loadMappings();
+}
+
+async function changeEventsPage(page: number) {
+  eventPage.value = page;
+  await loadEvents();
+}
+
+async function changeEventsPageSize(pageSize: number) {
+  eventPageSize.value = pageSize;
+  eventPage.value = 1;
+  await loadEvents();
+}
+
+async function changeRunsPage(page: number) {
+  runPage.value = page;
+  await loadRuns();
+}
+
+async function changeRunsPageSize(pageSize: number) {
+  runPageSize.value = pageSize;
+  runPage.value = 1;
+  await loadRuns();
+}
+
+async function changeNotificationsPage(page: number) {
+  notificationPage.value = page;
+  await loadNotifications();
+}
+
+async function changeNotificationsPageSize(pageSize: number) {
+  notificationPageSize.value = pageSize;
+  notificationPage.value = 1;
+  await loadNotifications();
+}
+
 watch(() => props.refreshToken, load);
-watch([eventStatus, eventSearch], () => {
-  window.setTimeout(() => {
-    if (!loading.value) load();
-  }, 200);
+let searchTimer: number | undefined;
+watch(eventSearch, () => {
+  window.clearTimeout(searchTimer);
+  eventPage.value = 1;
+  searchTimer = window.setTimeout(() => { void loadEvents(); }, 250);
 });
 onMounted(load);
+
+const currentMismatchCount = computed(() => events.value.total || 0);
 </script>
 
 <template>
@@ -197,44 +313,67 @@ onMounted(load);
     </div>
 
     <div class="metric-grid model-audit-metrics">
-      <div class="metric-card" :class="{ good: settings.enabled }"><span>审计开关</span><strong>{{ settings.enabled ? '已启用' : '已停用' }}</strong><small>停用期间不追扫，重新启用从当前时间前 5 分钟开始</small></div>
+      <div class="metric-card" :class="{ good: settings.enabled }"><span>审计开关</span><strong>{{ settings.enabled ? '已启用' : '已停用' }}</strong><small>重新启用从当前时间前 5 分钟开始</small></div>
       <div class="metric-card"><span>扫描间隔</span><strong>{{ settings.scanIntervalMinutes || 5 }} 分钟</strong><small>最低 5 分钟，窗口严格连续不重叠</small></div>
-      <div class="metric-card bad"><span>当前异常记录</span><strong>{{ mismatchRows.length }}</strong><small>当前页面显示的最新异常记录</small></div>
-      <div class="metric-card"><span>上次扫描</span><strong>{{ dateTime(settings.lastScanCompletedAt) }}</strong><small>{{ statusLabels[settings.lastScanStatus] || settings.lastScanStatus || '未扫描' }}</small></div>
+      <div class="metric-card bad"><span>当前不一致记录</span><strong>{{ currentMismatchCount }}</strong><small>仅保存模型不一致项</small></div>
+      <div class="metric-card"><span>上次正式扫描</span><strong>{{ dateTime(settings.lastScanCompletedAt) }}</strong><small>{{ statusLabels[settings.lastScanStatus] || settings.lastScanStatus || '未扫描' }}</small></div>
     </div>
 
-    <section class="panel">
-      <div class="panel-head"><div><h2>扫描与邮件设置</h2><p>邮件投递复用邮件中心的 SMTP 配置；本功能只保存模型审计自己的扫描和投递记录。</p></div><ShieldCheck :size="20" class="head-icon" /></div>
+    <nav class="model-audit-top-tabs" aria-label="模型审计功能">
+      <button type="button" :class="{ active: activeTopTab === 'settings' }" @click="activeTopTab = 'settings'"><ShieldCheck :size="16" />扫描设置</button>
+      <button type="button" :class="{ active: activeTopTab === 'mappings' }" @click="activeTopTab = 'mappings'"><Edit3 :size="16" />全局合法映射 <small>{{ mappings.total }}</small></button>
+      <button type="button" :class="{ active: activeTopTab === 'audit' }" @click="activeTopTab = 'audit'"><Search :size="16" />审计记录 <small>{{ events.total }}</small></button>
+    </nav>
+
+    <section v-if="activeTopTab === 'settings'" class="panel">
+      <div class="panel-head"><div><h2>扫描与邮件设置</h2><p>邮件投递复用邮件中心的 SMTP 配置。</p></div><ShieldCheck :size="20" class="head-icon" /></div>
       <div class="form-grid model-audit-settings-grid">
         <label class="toggle-field"><input v-model="form.enabled" type="checkbox" /><span><strong>启用模型一致性审计</strong><small>后台按配置间隔自动执行扫描。</small></span></label>
-        <label class="toggle-field"><input v-model="form.testMode" type="checkbox" /><span><strong>测试模式</strong><small>只对指定用户生成告警，所有邮件只发送到测试收件箱。</small></span></label>
+        <label class="toggle-field"><input v-model="form.testMode" type="checkbox" /><span><strong>测试模式</strong><small>正式扫描只对指定用户生成测试告警，并发送到测试收件邮箱。</small></span></label>
         <label>扫描间隔（分钟）<input v-model.number="form.scanIntervalMinutes" type="number" min="5" max="1440" step="1" /></label>
         <label>管理员汇总邮箱<input v-model="form.adminEmail" type="email" placeholder="admin@example.com" /></label>
         <label v-if="form.testMode" class="wide-field">测试用户邮箱（每行一个）<textarea v-model="form.testUserEmails" rows="3" placeholder="只扫描这些用户的记录"></textarea></label>
         <label v-if="form.testMode">测试收件邮箱<input v-model="form.testRecipientEmail" type="email" placeholder="test@example.com" /></label>
       </div>
-      <div class="model-audit-form-footer"><span class="field-hint">严格游标：上次窗口完成后保存的最大（created_at, id）到本次当前时间；没有记录也会推进高水位。</span><button class="primary-button" type="button" :disabled="saving" @click="saveSettings"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存设置</button></div>
+      <div class="model-audit-form-footer"><span class="field-hint">正式扫描游标保存最大（created_at, id），下一窗口从该位置严格向后扫描。</span><button class="primary-button" type="button" :disabled="saving" @click="saveSettings"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存设置</button></div>
       <div v-if="settings.lastError" class="model-audit-error">{{ settings.lastError }}</div>
-    </section>
 
-    <section class="panel table-panel">
-      <div class="panel-head"><div><h2>全局合法映射</h2><p>默认只有上游发送模型与上游响应模型完全一致才合法；这里可添加明确的精确映射，不支持正则。</p></div><button class="secondary-button" type="button" @click="openMapping()"><Plus :size="15" />新增映射</button></div>
-      <div class="table-wrap">
-        <table class="model-audit-table mapping-table"><thead><tr><th>上游发送模型</th><th>允许的响应模型</th><th>更新时间</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="item in mappings" :key="item.id"><td><strong>{{ item.sourceModel }}</strong><small>实际发送给上游</small></td><td><strong>{{ item.allowedResponseModel }}</strong><small>命中后记录为合法映射</small></td><td>{{ dateTime(item.updatedAt) }}</td><td><div class="row-actions"><button class="icon-button mini" type="button" title="编辑映射" aria-label="编辑映射" @click="openMapping(item)"><Edit3 :size="15" /></button><button class="icon-button mini danger-action" type="button" title="删除映射" aria-label="删除映射" @click="deleteMapping(item)"><Trash2 :size="15" /></button></div></td></tr>
-            <tr v-if="!loading && !mappings.length"><td colspan="4" class="table-empty">暂无自定义映射，完全相同的模型名默认自动合法。</td></tr>
-          </tbody>
-        </table>
+      <div v-if="form.testMode" class="test-scan-panel">
+        <div><h3>历史测试扫描</h3><p>自定义历史窗口，只读取测试用户，不推进正式扫描游标。</p></div>
+        <div class="test-scan-fields">
+          <label>开始时间<input v-model="testPeriodStart" type="datetime-local" /></label>
+          <span class="test-scan-arrow">至</span>
+          <label>结束时间<input v-model="testPeriodEnd" type="datetime-local" /></label>
+          <button class="secondary-button" type="button" :disabled="testRunning || !settings.testMode" @click="runTestScan"><RefreshCw v-if="testRunning" :size="15" class="spin" /><Play v-else :size="15" />测试扫描</button>
+        </div>
       </div>
     </section>
 
-    <section class="panel table-panel">
-      <div class="panel-head"><div><h2>审计记录</h2><p>异常按扫描窗口记录；用户邮件按邮箱聚合，每个窗口每个用户最多一封。</p></div><div class="model-audit-filterbar"><label class="search-box"><Search :size="16" /><input v-model="eventSearch" placeholder="搜索用户或模型" /></label><select v-model="eventStatus"><option value="">全部状态</option><option value="mismatch">不一致</option><option value="allowed_mapping">合法映射</option><option value="matched">一致</option><option value="unknown">字段缺失</option></select></div></div>
-      <div class="compact-tabs model-audit-tabs"><button :class="{ active: activeTab === 'events' }" type="button" @click="activeTab = 'events'">使用记录 <small>{{ events.total || 0 }}</small></button><button :class="{ active: activeTab === 'runs' }" type="button" @click="activeTab = 'runs'">扫描窗口 <small>{{ runs.total || 0 }}</small></button><button :class="{ active: activeTab === 'notifications' }" type="button" @click="activeTab = 'notifications'">邮件记录 <small>{{ notifications.total || 0 }}</small></button></div>
-      <div v-if="activeTab === 'events'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>记录时间</th><th>用户邮箱</th><th>请求模型</th><th>上游发送模型</th><th>上游响应模型</th><th>判定</th></tr></thead><tbody><tr v-for="item in events.items || []" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.userEmail || `用户 #${item.sourceUserId}` }}</td><td>{{ item.requestedModel || '--' }}</td><td>{{ item.upstreamModel || '--' }}</td><td>{{ item.upstreamResponseModel || '--' }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span></td></tr><tr v-if="!loading && !(events.items || []).length"><td colspan="6" class="table-empty">暂无审计记录</td></tr></tbody></table></div>
-      <div v-else-if="activeTab === 'runs'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>扫描窗口</th><th>状态</th><th>读取</th><th>一致</th><th>合法映射</th><th>异常</th><th>字段缺失</th><th>邮件</th></tr></thead><tbody><tr v-for="item in runs.items || []" :key="item.id"><td>{{ dateTime(item.periodStart) }}<small>至 {{ dateTime(item.periodEnd) }}</small></td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td>{{ item.scannedCount }}</td><td>{{ item.matchedCount }}</td><td>{{ item.allowedMappingCount }}</td><td>{{ item.mismatchCount }}</td><td>{{ item.unknownCount }}</td><td>{{ item.notificationCount }}</td></tr><tr v-if="!loading && !(runs.items || []).length"><td colspan="8" class="table-empty">暂无扫描窗口</td></tr></tbody></table></div>
-      <div v-else class="table-wrap"><table class="model-audit-table"><thead><tr><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>记录数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in notifications.items || []" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ kindLabels[item.kind] || item.kind }}</td><td>{{ item.recipientEmail || '--' }}</td><td>{{ item.subject }}</td><td>{{ item.eventCount }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td><button class="small-button" type="button" @click="selectedNotification = item">查看正文</button></td></tr><tr v-if="!loading && !(notifications.items || []).length"><td colspan="7" class="table-empty">暂无邮件记录</td></tr></tbody></table></div>
+    <section v-else-if="activeTopTab === 'mappings'" class="panel table-panel">
+      <div class="panel-head"><div><h2>全局合法映射</h2><p>默认只有上游发送模型与响应模型完全一致才合法；这里可添加精确映射。</p></div><button class="secondary-button" type="button" @click="openMapping()"><Plus :size="15" />新增映射</button></div>
+      <div class="table-wrap">
+        <table class="model-audit-table mapping-table"><thead><tr><th>上游发送模型</th><th>允许的响应模型</th><th>更新时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="item in mappings.items" :key="item.id"><td><strong>{{ item.sourceModel }}</strong><small>实际发送给上游</small></td><td><strong>{{ item.allowedResponseModel }}</strong><small>命中后记录为合法映射</small></td><td>{{ dateTime(item.updatedAt) }}</td><td><div class="row-actions"><button class="icon-button mini" type="button" title="编辑映射" aria-label="编辑映射" @click="openMapping(item)"><Edit3 :size="15" /></button><button class="icon-button mini danger-action" type="button" title="删除映射" aria-label="删除映射" @click="deleteMapping(item)"><Trash2 :size="15" /></button></div></td></tr>
+            <tr v-if="!loading && !mappings.items.length"><td colspan="4" class="table-empty">暂无自定义映射，完全相同的模型名默认自动合法。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar v-if="mappings.total" :page="mappingPage" :page-size="mappingPageSize" :total="mappings.total" @update:page="changeMappingsPage" @update:page-size="changeMappingsPageSize" />
+    </section>
+
+    <section v-else class="panel table-panel">
+      <div class="panel-head model-audit-record-head"><div><h2>审计记录</h2><p>只显示审计出来的模型不一致记录；用户邮件按邮箱聚合。</p></div><label class="search-box"><Search :size="16" /><input v-model="eventSearch" placeholder="搜索用户或模型" /></label></div>
+      <div class="compact-tabs model-audit-tabs"><button :class="{ active: activeAuditTab === 'events' }" type="button" @click="activeAuditTab = 'events'">不一致记录 <small>{{ events.total }}</small></button><button :class="{ active: activeAuditTab === 'runs' }" type="button" @click="activeAuditTab = 'runs'">扫描窗口 <small>{{ runs.total }}</small></button><button :class="{ active: activeAuditTab === 'notifications' }" type="button" @click="activeAuditTab = 'notifications'">邮件记录 <small>{{ notifications.total }}</small></button></div>
+
+      <div v-if="activeAuditTab === 'events'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>记录时间</th><th>用户邮箱</th><th>请求模型</th><th>上游发送模型</th><th>上游响应模型</th><th>判定</th></tr></thead><tbody><tr v-for="item in events.items" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.userEmail || `用户 #${item.sourceUserId}` }}</td><td>{{ item.requestedModel || '--' }}</td><td>{{ item.upstreamModel || '--' }}</td><td>{{ item.upstreamResponseModel || '--' }}</td><td><span class="status-pill danger">不一致</span></td></tr><tr v-if="!loading && !events.items.length"><td colspan="6" class="table-empty">暂无模型不一致记录</td></tr></tbody></table></div>
+      <PaginationBar v-if="events.total" v-show="activeAuditTab === 'events'" :page="eventPage" :page-size="eventPageSize" :total="events.total" @update:page="changeEventsPage" @update:page-size="changeEventsPageSize" />
+
+      <div v-if="activeAuditTab === 'runs'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>扫描类型</th><th>扫描窗口</th><th>状态</th><th>读取</th><th>一致</th><th>合法映射</th><th>异常</th><th>字段缺失</th><th>邮件</th></tr></thead><tbody><tr v-for="item in runs.items" :key="item.id"><td><span class="status-pill" :class="item.runType === 'test' ? 'warning' : 'success'">{{ item.runType === 'test' ? '测试' : '正式' }}</span></td><td>{{ dateTime(item.periodStart) }}<small>至 {{ dateTime(item.periodEnd) }}</small></td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td>{{ item.scannedCount }}</td><td>{{ item.matchedCount }}</td><td>{{ item.allowedMappingCount }}</td><td>{{ item.mismatchCount }}</td><td>{{ item.unknownCount }}</td><td>{{ item.notificationCount }}</td></tr><tr v-if="!loading && !runs.items.length"><td colspan="9" class="table-empty">暂无扫描窗口</td></tr></tbody></table></div>
+      <PaginationBar v-if="runs.total" v-show="activeAuditTab === 'runs'" :page="runPage" :page-size="runPageSize" :total="runs.total" @update:page="changeRunsPage" @update:page-size="changeRunsPageSize" />
+
+      <div v-if="activeAuditTab === 'notifications'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>记录数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in notifications.items" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ kindLabels[item.kind] || item.kind }}</td><td>{{ item.recipientEmail || '--' }}</td><td>{{ item.subject }}</td><td>{{ item.eventCount }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td><button class="small-button" type="button" @click="selectedNotification = item">查看正文</button></td></tr><tr v-if="!loading && !notifications.items.length"><td colspan="7" class="table-empty">暂无邮件记录</td></tr></tbody></table></div>
+      <PaginationBar v-if="notifications.total" v-show="activeAuditTab === 'notifications'" :page="notificationPage" :page-size="notificationPageSize" :total="notifications.total" @update:page="changeNotificationsPage" @update:page-size="changeNotificationsPageSize" />
     </section>
 
     <div v-if="mappingEditor" class="modal-layer" @click.self="mappingEditor = null"><section class="modal form-modal model-audit-modal"><header><div><h2>{{ mappingEditor.id ? '编辑合法映射' : '新增合法映射' }}</h2><p>精确匹配，比较时忽略首尾空格和大小写。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="mappingEditor = null"><X :size="19" /></button></header><div class="form-grid"><label>上游发送模型<input v-model="mappingEditor.sourceModel" maxlength="200" placeholder="例如 claude-3-7-sonnet" /></label><label>允许的响应模型<input v-model="mappingEditor.allowedResponseModel" maxlength="200" placeholder="例如 claude-3-7-sonnet-20250219" /></label></div><div class="form-note">只有该上游发送模型返回这里配置的响应模型时，才会记录为“合法映射”；完全一致的模型不需要配置。</div><footer><button class="secondary-button" type="button" @click="mappingEditor = null">取消</button><button class="primary-button" type="button" :disabled="saving" @click="saveMapping"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存映射</button></footer></section></div>

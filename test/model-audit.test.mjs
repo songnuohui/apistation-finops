@@ -7,6 +7,7 @@ import {
   classifyModelAuditEvent,
 } from '../src/services/model-audit-service.mjs';
 import { DemoModelAuditRepository } from '../src/repositories/model-audit-repository.mjs';
+import { normalizeModelAuditTestRun } from '../src/http/validation.mjs';
 
 test('model audit classifies exact matches, legal mappings, mismatches, and missing fields', () => {
   assert.equal(classifyModelAuditEvent({
@@ -105,13 +106,14 @@ test('model audit test mode routes one email only to the configured recipient an
 
   await service.runDue();
 
-  assert.equal(repository.events.length, 2);
-  assert.equal(repository.events.filter((item) => item.userEmail === 'configured@example.com').length, 2);
+  assert.equal(repository.events.length, 1);
+  assert.equal(repository.events.filter((item) => item.userEmail === 'configured@example.com').length, 1);
   assert.equal(repository.notifications.length, 1);
   assert.equal(repository.notifications[0].recipientEmail, 'test@example.com');
   assert.equal(repository.notifications[0].status, 'sent');
   assert.equal(sent.length, 1);
   assert.equal(sent[0][0], 'test@example.com');
+  assert.equal((await repository.getSettings()).cursorId, 700003);
 });
 
 test('model audit source SQL uses a strict created_at and id cursor in a read-only transaction', async () => {
@@ -151,6 +153,61 @@ test('model audit source SQL uses a strict created_at and id cursor in a read-on
     query.text,
     'COMMIT',
   ]);
+});
+
+test('model audit historical SQL includes the start row only for the first diagnostic batch', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN TRANSACTION READ ONLY' || text === 'COMMIT' || text === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const repository = new SourceUsageRepository(
+    { connect: async () => client },
+    { sourceSchema: 'sub2api', sub2apiUsageDatabasePoolMax: 1 },
+  );
+  await repository.listModelAuditUsage({
+    cursorCreatedAt: '2026-09-04T00:00:00.000Z',
+    cursorId: -1,
+    until: '2026-09-04T00:05:00.000Z',
+    inclusiveCursor: true,
+    limit: 5000,
+  });
+
+  const query = queries.find((item) => item.text.includes('FROM "sub2api".usage_logs'));
+  assert.ok(query);
+  assert.match(query.text, /\(ul\.created_at,ul\.id\) >= \(\$1::timestamptz,\$2::bigint\)/);
+});
+
+test('switching test mode preserves the formal cursor to avoid overlapping scheduled windows', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  await repository.updateSettings({
+    enabled: true,
+    scanIntervalMinutes: 5,
+    testMode: false,
+    testUserEmails: [],
+    testRecipientEmail: '',
+    adminEmail: 'admin@example.com',
+  });
+  const before = await repository.getSettings();
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  const after = await repository.updateSettings({
+    enabled: true,
+    scanIntervalMinutes: 5,
+    testMode: true,
+    testUserEmails: ['configured@example.com'],
+    testRecipientEmail: 'test@example.com',
+    adminEmail: 'admin@example.com',
+  });
+
+  assert.equal(after.cursorCreatedAt, before.cursorCreatedAt);
+  assert.equal(after.cursorId, before.cursorId);
+  assert.equal(after.lastScanStatus, before.lastScanStatus);
 });
 
 test('model audit validates only the required source columns through the read-only usage connection', async () => {
@@ -300,4 +357,78 @@ test('model audit empty windows advance to the scan end without creating notific
   assert.equal(completed.lastRecordCreatedAt, null);
   assert.equal(completed.lastRecordId, null);
   assert.deepEqual(completed.notifications, []);
+});
+
+test('model audit historical test scans only configured users and do not advance the formal cursor', async () => {
+  const repository = new DemoModelAuditRepository({
+    users: [{ id: 1, email: 'configured@example.com' }],
+  });
+  await repository.updateSettings({
+    enabled: true,
+    scanIntervalMinutes: 5,
+    testMode: true,
+    testUserEmails: ['configured@example.com'],
+    testRecipientEmail: 'test@example.com',
+    adminEmail: 'admin@example.com',
+  });
+  const before = await repository.getSettings();
+  const sent = [];
+  const service = new ModelAuditService(
+    repository,
+    repository,
+    { async sendRaw(...args) { sent.push(args); } },
+    {},
+  );
+
+  const start = new Date(Date.now() - 10 * 60_000);
+  const end = new Date();
+  await service.runTest({ periodStart: start.toISOString(), periodEnd: end.toISOString() });
+
+  const after = await repository.getSettings();
+  assert.equal(after.cursorCreatedAt, before.cursorCreatedAt);
+  assert.equal(after.cursorId, before.cursorId);
+  assert.equal(after.lastScanStatus, before.lastScanStatus);
+  assert.equal(repository.runs[0].runType, 'test');
+  assert.equal(repository.runs[0].mismatchCount, 1);
+  assert.equal(repository.events.length, 1);
+  assert.equal(repository.events[0].userEmail, 'configured@example.com');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], 'test@example.com');
+});
+
+test('model audit test scan validation rejects reversed, future, and oversized ranges', () => {
+  const now = Date.now();
+  const iso = (offset) => new Date(now + offset).toISOString();
+  assert.throws(
+    () => normalizeModelAuditTestRun({ periodStart: iso(1_000), periodEnd: iso(2_000) }),
+    /periodEnd cannot be in the future/,
+  );
+  assert.throws(
+    () => normalizeModelAuditTestRun({ periodStart: iso(-1_000), periodEnd: iso(-2_000) }),
+    /periodStart must be before periodEnd/,
+  );
+  assert.throws(
+    () => normalizeModelAuditTestRun({
+      periodStart: iso(-32 * 86_400_000),
+      periodEnd: iso(-1_000),
+    }),
+    /cannot exceed 31 days/,
+  );
+});
+
+test('model audit mappings return independent paginated results', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  for (let index = 0; index < 25; index += 1) {
+    await repository.createMapping({
+      sourceModel: `source-${String(index).padStart(2, '0')}`,
+      allowedResponseModel: `response-${index}`,
+    });
+  }
+  const first = await repository.listMappings({ page: 1, pageSize: 10 });
+  const third = await repository.listMappings({ page: 3, pageSize: 10 });
+  assert.equal(first.total, 25);
+  assert.equal(first.items.length, 10);
+  assert.equal(first.items[0].sourceModel, 'source-00');
+  assert.equal(third.items.length, 5);
+  assert.equal(third.page, 3);
 });

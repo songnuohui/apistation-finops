@@ -182,6 +182,7 @@ export class SourceUsageRepository {
     cursorId = 0,
     until = new Date(),
     userEmails = [],
+    inclusiveCursor = false,
     limit = 5000,
   } = {}) {
     const normalizedEmails = [...new Set((userEmails || [])
@@ -200,7 +201,7 @@ export class SourceUsageRepository {
         ul.created_at
       FROM ${this.schema}.usage_logs ul
       LEFT JOIN ${this.schema}.users u ON u.id=ul.user_id
-      WHERE (ul.created_at,ul.id) > ($1::timestamptz,$2::bigint)
+      WHERE (ul.created_at,ul.id) ${inclusiveCursor ? '>=' : '>'} ($1::timestamptz,$2::bigint)
         AND ul.created_at < $3::timestamptz
         AND ($4::text[] IS NULL OR LOWER(COALESCE(u.email,''))=ANY($4::text[]))
       ORDER BY ul.created_at ASC,ul.id ASC

@@ -52,6 +52,7 @@ function mapping(row) {
 function scanRun(row) {
   return {
     id: number(row.id),
+    runType: row.run_type || 'scheduled',
     periodStart: row.period_start,
     periodEnd: row.period_end,
     cursorBeforeCreatedAt: row.cursor_before_created_at,
@@ -136,20 +137,19 @@ export class ModelAuditRepository {
     return inTransaction(this.pool, async (client) => {
       const current = await this.getSettings(client);
       const resetCursor = Boolean(input.enabled && !current.enabled);
-      const resetModeCursor = current.testMode !== Boolean(input.testMode);
       const result = await client.query(`UPDATE ${this.schema}.model_audit_settings SET
         enabled=$1,scan_interval_minutes=$2,test_mode=$3,test_user_emails=$4::text[],
         test_recipient_email=$5,admin_email=$6,
-        cursor_created_at=CASE WHEN $7 OR $8 THEN NOW()-INTERVAL '5 minutes' ELSE cursor_created_at END,
-        cursor_id=CASE WHEN $7 OR $8 THEN 0 ELSE cursor_id END,
-        last_record_created_at=CASE WHEN $7 OR $8 THEN NULL ELSE last_record_created_at END,
-        last_record_id=CASE WHEN $7 OR $8 THEN NULL ELSE last_record_id END,
-        last_scan_until=CASE WHEN $7 OR $8 THEN NULL ELSE last_scan_until END,
-        last_scan_started_at=CASE WHEN $7 OR $8 THEN NULL ELSE last_scan_started_at END,
-        last_scan_completed_at=CASE WHEN $7 OR $8 THEN NULL ELSE last_scan_completed_at END,
-        last_scan_status=CASE WHEN $7 OR $8 THEN 'never' ELSE last_scan_status END,
-        last_error=CASE WHEN $7 OR $8 THEN '' ELSE last_error END,
-        updated_by=$9,updated_at=NOW()
+        cursor_created_at=CASE WHEN $7 THEN NOW()-INTERVAL '5 minutes' ELSE cursor_created_at END,
+        cursor_id=CASE WHEN $7 THEN 0 ELSE cursor_id END,
+        last_record_created_at=CASE WHEN $7 THEN NULL ELSE last_record_created_at END,
+        last_record_id=CASE WHEN $7 THEN NULL ELSE last_record_id END,
+        last_scan_until=CASE WHEN $7 THEN NULL ELSE last_scan_until END,
+        last_scan_started_at=CASE WHEN $7 THEN NULL ELSE last_scan_started_at END,
+        last_scan_completed_at=CASE WHEN $7 THEN NULL ELSE last_scan_completed_at END,
+        last_scan_status=CASE WHEN $7 THEN 'never' ELSE last_scan_status END,
+        last_error=CASE WHEN $7 THEN '' ELSE last_error END,
+        updated_by=$8,updated_at=NOW()
         WHERE id=1
         RETURNING *`, [
         Boolean(input.enabled),
@@ -159,17 +159,24 @@ export class ModelAuditRepository {
         input.testRecipientEmail || '',
         input.adminEmail || '',
         resetCursor,
-        resetModeCursor,
         actor,
       ]);
       return setting(result.rows[0]);
     });
   }
 
-  async listMappings() {
+  async listMappings({ page = 1, pageSize = 20 } = {}) {
+    const paging = pageArgs({ page, pageSize });
     const result = await this.pool.query(`SELECT * FROM ${this.schema}.model_audit_mappings
-      ORDER BY LOWER(BTRIM(source_model)),id`);
-    return result.rows.map(mapping);
+      ORDER BY LOWER(BTRIM(source_model)),id LIMIT $1 OFFSET $2`, [paging.pageSize, paging.offset]);
+    const count = await this.pool.query(`SELECT COUNT(*)::int AS count
+      FROM ${this.schema}.model_audit_mappings`);
+    return {
+      items: result.rows.map(mapping),
+      total: number(count.rows[0]?.count),
+      page: paging.page,
+      pageSize: paging.pageSize,
+    };
   }
 
   async createMapping(input, actor = 'admin') {
@@ -236,6 +243,25 @@ export class ModelAuditRepository {
         current.lastScanStatus = 'failed';
       }
 
+      const activeRun = await client.query(`SELECT id,run_type,started_at
+        FROM ${this.schema}.model_audit_scan_runs
+        WHERE status='running' ORDER BY started_at LIMIT 1`);
+      if (activeRun.rowCount) {
+        const active = activeRun.rows[0];
+        const activeStartedAt = new Date(active.started_at);
+        if (now.getTime() - activeStartedAt.getTime() <= 30 * 60_000) return null;
+        await client.query(`UPDATE ${this.schema}.model_audit_scan_runs SET
+          status='failed',error_message='扫描超过 30 分钟，已由新的扫描任务回收',completed_at=NOW()
+          WHERE id=$1 AND status='running'`, [active.id]);
+        if (active.run_type === 'scheduled') {
+          await client.query(`UPDATE ${this.schema}.model_audit_settings SET
+            last_scan_status='failed',
+            last_error='扫描超过 30 分钟，已由新的扫描任务回收',
+            updated_at=NOW()
+            WHERE id=1 AND last_scan_status='running'`);
+        }
+      }
+
       const completedAt = current.lastScanCompletedAt ? new Date(current.lastScanCompletedAt) : null;
       const due = force || !completedAt
         || current.lastScanStatus === 'failed'
@@ -249,8 +275,8 @@ export class ModelAuditRepository {
       }
       const inserted = await client.query(`INSERT INTO ${this.schema}.model_audit_scan_runs(
         period_start,period_end,cursor_before_created_at,cursor_before_id,
-        cursor_after_created_at,cursor_after_id,status,started_at)
-        VALUES($1,$2,$1,$3,$1,$3,'running',NOW()) RETURNING *`, [
+        cursor_after_created_at,cursor_after_id,run_type,status,started_at)
+        VALUES($1,$2,$1,$3,$1,$3,'scheduled','running',NOW()) RETURNING *`, [
         periodStart,
         periodEnd,
         current.cursorId,
@@ -258,6 +284,50 @@ export class ModelAuditRepository {
       await client.query(`UPDATE ${this.schema}.model_audit_settings SET
         last_scan_started_at=$1,last_scan_status='running',last_error=''
         WHERE id=1`, [inserted.rows[0].started_at]);
+      return {
+        settings: current,
+        run: scanRun(inserted.rows[0]),
+      };
+    });
+  }
+
+  async claimTestScan(periodStart, periodEnd) {
+    return inTransaction(this.pool, async (client) => {
+      const lock = await client.query(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended('finops:model-audit',0)) AS acquired`,
+      );
+      if (!lock.rows[0]?.acquired) return null;
+
+      const current = await this.getSettings(client);
+      if (!current.testMode) {
+        throw httpError('请先启用测试模式', 409);
+      }
+      const activeRun = await client.query(`SELECT id,run_type,started_at
+        FROM ${this.schema}.model_audit_scan_runs
+        WHERE status='running' ORDER BY started_at LIMIT 1`);
+      if (activeRun.rowCount) {
+        const active = activeRun.rows[0];
+        if (Date.now() - new Date(active.started_at).getTime() <= 30 * 60_000) return null;
+        await client.query(`UPDATE ${this.schema}.model_audit_scan_runs SET
+          status='failed',error_message='扫描超过 30 分钟，已由新的扫描任务回收',completed_at=NOW()
+          WHERE id=$1 AND status='running'`, [active.id]);
+        if (active.run_type === 'scheduled') {
+          await client.query(`UPDATE ${this.schema}.model_audit_settings SET
+            last_scan_status='failed',
+            last_error='扫描超过 30 分钟，已由新的扫描任务回收',
+            updated_at=NOW()
+            WHERE id=1 AND last_scan_status='running'`);
+        }
+      }
+      const start = new Date(periodStart);
+      const end = new Date(periodEnd);
+      const inserted = await client.query(`INSERT INTO ${this.schema}.model_audit_scan_runs(
+        period_start,period_end,cursor_before_created_at,cursor_before_id,
+        cursor_after_created_at,cursor_after_id,run_type,status,started_at)
+        VALUES($1,$2,$1,-1,$1,-1,'test','running',NOW()) RETURNING *`, [
+        start,
+        end,
+      ]);
       return {
         settings: current,
         run: scanRun(inserted.rows[0]),
@@ -286,7 +356,7 @@ export class ModelAuditRepository {
           upstream_model,upstream_response_model,upstream_model_mismatch,
           allowed_response_model,status,created_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-          ON CONFLICT(source_usage_id) DO NOTHING`, [
+          ON CONFLICT(scan_run_id,source_usage_id) DO NOTHING`, [
           runId,
           event.sourceUsageId,
           event.sourceUserId,
@@ -334,17 +404,19 @@ export class ModelAuditRepository {
         counts.unknown,
         notifications?.length || 0,
       ]);
-      await client.query(`UPDATE ${this.schema}.model_audit_settings SET
-        cursor_created_at=$1,cursor_id=$2,last_record_created_at=$3,
-        last_record_id=$4,last_scan_until=$5,last_scan_completed_at=NOW(),
-        last_scan_status='completed',last_error='',updated_at=NOW()
-        WHERE id=1`, [
-        cursorAfterCreatedAt,
-        cursorAfterId,
-        lastRecordCreatedAt,
-        lastRecordId,
-        updated.rows[0].period_end,
-      ]);
+      if (updated.rows[0].run_type === 'scheduled') {
+        await client.query(`UPDATE ${this.schema}.model_audit_settings SET
+          cursor_created_at=$1,cursor_id=$2,last_record_created_at=$3,
+          last_record_id=$4,last_scan_until=$5,last_scan_completed_at=NOW(),
+          last_scan_status='completed',last_error='',updated_at=NOW()
+          WHERE id=1`, [
+          cursorAfterCreatedAt,
+          cursorAfterId,
+          lastRecordCreatedAt,
+          lastRecordId,
+          updated.rows[0].period_end,
+        ]);
+      }
       return scanRun(updated.rows[0]);
     });
   }
@@ -357,13 +429,15 @@ export class ModelAuditRepository {
         runId,
         String(errorMessage || '扫描失败').slice(0, 4000),
       ]);
-      await client.query(`UPDATE ${this.schema}.model_audit_settings SET
-        last_scan_status='failed',last_error=$1,updated_at=NOW()
-        WHERE id=1 AND last_scan_status='running'
-          AND last_scan_started_at=(SELECT started_at FROM ${this.schema}.model_audit_scan_runs WHERE id=$2)`, [
-        String(errorMessage || '扫描失败').slice(0, 4000),
-        runId,
-      ]);
+      if (result.rows[0]?.run_type === 'scheduled') {
+        await client.query(`UPDATE ${this.schema}.model_audit_settings SET
+          last_scan_status='failed',last_error=$1,updated_at=NOW()
+          WHERE id=1 AND last_scan_status='running'
+            AND last_scan_started_at=(SELECT started_at FROM ${this.schema}.model_audit_scan_runs WHERE id=$2)`, [
+          String(errorMessage || '扫描失败').slice(0, 4000),
+          runId,
+        ]);
+      }
       return result.rowCount ? scanRun(result.rows[0]) : null;
     });
   }
@@ -372,8 +446,8 @@ export class ModelAuditRepository {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`UPDATE ${this.schema}.model_audit_scan_runs
         SET status='failed',error_message='FinOps 服务重启，扫描未完成',completed_at=NOW()
-        WHERE status='running' RETURNING id`);
-      if (result.rowCount) {
+        WHERE status='running' RETURNING id,run_type`);
+      if (result.rows.some((row) => row.run_type === 'scheduled')) {
         await client.query(`UPDATE ${this.schema}.model_audit_settings SET
           last_scan_status='failed',last_error='FinOps 服务重启，扫描未完成',updated_at=NOW()
           WHERE id=1`);
@@ -396,14 +470,10 @@ export class ModelAuditRepository {
     };
   }
 
-  async listEvents({ page = 1, pageSize = 30, status = '', search = '' } = {}) {
+  async listEvents({ page = 1, pageSize = 30, search = '' } = {}) {
     const paging = pageArgs({ page, pageSize });
-    const conditions = [];
+    const conditions = ['status=\'mismatch\''];
     const params = [];
-    if (status) {
-      params.push(status);
-      conditions.push(`status=$${params.length}`);
-    }
     if (search) {
       params.push(`%${String(search).trim().toLowerCase()}%`);
       conditions.push(`LOWER(user_email||' '||upstream_model||' '||upstream_response_model||' '||requested_model) LIKE $${params.length}`);
@@ -530,8 +600,7 @@ export class DemoModelAuditRepository {
   async getSettings() { return { ...this.settings, testUserEmails: [...this.settings.testUserEmails] }; }
 
   async updateSettings(input, actor = 'demo') {
-    const reset = (input.enabled && !this.settings.enabled)
-      || this.settings.testMode !== Boolean(input.testMode);
+    const reset = input.enabled && !this.settings.enabled;
     this.settings = {
       ...this.settings,
       enabled: Boolean(input.enabled),
@@ -557,7 +626,15 @@ export class DemoModelAuditRepository {
     return this.getSettings();
   }
 
-  async listMappings() { return this.mappings.map((item) => ({ ...item })); }
+  async listMappings({ page = 1, pageSize = 20 } = {}) {
+    const paging = pageArgs({ page, pageSize });
+    return {
+      items: this.mappings.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })),
+      total: this.mappings.length,
+      page: paging.page,
+      pageSize: paging.pageSize,
+    };
+  }
   async createMapping(input, actor = 'demo') {
     const sourceKey = String(input.sourceModel || '').trim().toLowerCase();
     if (this.mappings.some((item) => item.sourceModel.trim().toLowerCase() === sourceKey)) {
@@ -585,14 +662,24 @@ export class DemoModelAuditRepository {
     return { ok: true };
   }
 
-  async listModelAuditUsage({ cursorCreatedAt, cursorId, until, userEmails = [], limit = 5000 }) {
+  async listModelAuditUsage({
+    cursorCreatedAt,
+    cursorId,
+    until,
+    userEmails = [],
+    inclusiveCursor = false,
+    limit = 5000,
+  }) {
     const normalized = new Set(userEmails.map(email));
     return this.usageRows
       .filter((row) => {
         const time = new Date(row.createdAt).getTime();
         const cursorTime = new Date(cursorCreatedAt).getTime();
         const endTime = new Date(until).getTime();
-        return (time > cursorTime || (time === cursorTime && Number(row.id) > Number(cursorId)))
+        const afterCursor = inclusiveCursor
+          ? (time > cursorTime || (time === cursorTime && Number(row.id) >= Number(cursorId)))
+          : (time > cursorTime || (time === cursorTime && Number(row.id) > Number(cursorId)));
+        return afterCursor
           && time < endTime
           && (!normalized.size || normalized.has(email(row.userEmail)));
       })
@@ -626,6 +713,7 @@ export class DemoModelAuditRepository {
       cursorBeforeId: this.settings.cursorId,
       cursorAfterCreatedAt: this.settings.cursorCreatedAt,
       cursorAfterId: this.settings.cursorId,
+      runType: 'scheduled',
       status: 'running',
       scannedCount: 0,
       matchedCount: 0,
@@ -643,11 +731,39 @@ export class DemoModelAuditRepository {
     return { settings: await this.getSettings(), run: { ...run } };
   }
 
+  async claimTestScan(periodStart, periodEnd) {
+    if (!this.settings.testMode) throw httpError('请先启用测试模式', 409);
+    const start = new Date(periodStart);
+    const run = {
+      id: this.nextRunId++,
+      periodStart: start.toISOString(),
+      periodEnd: new Date(periodEnd).toISOString(),
+      cursorBeforeCreatedAt: start.toISOString(),
+      cursorBeforeId: -1,
+      cursorAfterCreatedAt: start.toISOString(),
+      cursorAfterId: -1,
+      runType: 'test',
+      status: 'running',
+      scannedCount: 0,
+      matchedCount: 0,
+      allowedMappingCount: 0,
+      mismatchCount: 0,
+      unknownCount: 0,
+      notificationCount: 0,
+      errorMessage: '',
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    this.runs.unshift(run);
+    return { settings: await this.getSettings(), run: { ...run } };
+  }
+
   async completeScan(runId, payload) {
     const run = this.runs.find((item) => item.id === Number(runId));
     if (!run || run.status !== 'running') return run ? { ...run } : null;
     for (const event of payload.events || []) {
-      if (this.events.some((item) => item.sourceUsageId === event.sourceUsageId)) continue;
+      if (this.events.some((item) => item.scanRunId === run.id
+        && item.sourceUsageId === event.sourceUsageId)) continue;
       this.events.unshift({ id: this.nextEventId++, scanRunId: run.id, recordedAt: new Date().toISOString(), ...event });
     }
     for (const item of payload.notifications || []) {
@@ -674,16 +790,18 @@ export class DemoModelAuditRepository {
       status: 'completed',
       completedAt: new Date().toISOString(),
     });
-    Object.assign(this.settings, {
-      cursorCreatedAt: payload.cursorAfterCreatedAt,
-      cursorId: payload.cursorAfterId,
-      lastRecordCreatedAt: payload.lastRecordCreatedAt,
-      lastRecordId: payload.lastRecordId,
-      lastScanUntil: run.periodEnd,
-      lastScanCompletedAt: run.completedAt,
-      lastScanStatus: 'completed',
-      lastError: '',
-    });
+    if (run.runType === 'scheduled') {
+      Object.assign(this.settings, {
+        cursorCreatedAt: payload.cursorAfterCreatedAt,
+        cursorId: payload.cursorAfterId,
+        lastRecordCreatedAt: payload.lastRecordCreatedAt,
+        lastRecordId: payload.lastRecordId,
+        lastScanUntil: run.periodEnd,
+        lastScanCompletedAt: run.completedAt,
+        lastScanStatus: 'completed',
+        lastError: '',
+      });
+    }
     return { ...run };
   }
 
@@ -691,8 +809,10 @@ export class DemoModelAuditRepository {
     const run = this.runs.find((item) => item.id === Number(runId));
     if (!run) return null;
     Object.assign(run, { status: 'failed', errorMessage, completedAt: new Date().toISOString() });
-    this.settings.lastScanStatus = 'failed';
-    this.settings.lastError = errorMessage;
+    if (run.runType === 'scheduled') {
+      this.settings.lastScanStatus = 'failed';
+      this.settings.lastError = errorMessage;
+    }
     return { ...run };
   }
   async recoverRunning() {
@@ -707,10 +827,10 @@ export class DemoModelAuditRepository {
     const paging = pageArgs({ page, pageSize });
     return { items: this.runs.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: this.runs.length, page: paging.page, pageSize: paging.pageSize };
   }
-  async listEvents({ page = 1, pageSize = 30, status = '', search = '' } = {}) {
+  async listEvents({ page = 1, pageSize = 30, search = '' } = {}) {
     const paging = pageArgs({ page, pageSize });
     const term = String(search || '').toLowerCase();
-    const filtered = this.events.filter((item) => (!status || item.status === status)
+    const filtered = this.events.filter((item) => item.status === 'mismatch'
       && (!term || `${item.userEmail} ${item.upstreamModel} ${item.upstreamResponseModel} ${item.requestedModel}`.toLowerCase().includes(term)));
     return { items: filtered.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: filtered.length, page: paging.page, pageSize: paging.pageSize };
   }

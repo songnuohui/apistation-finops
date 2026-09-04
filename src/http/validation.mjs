@@ -714,6 +714,20 @@ export function normalizeModelAuditSettings(input = {}) {
   };
 }
 
+export function normalizeModelAuditTestRun(input = {}) {
+  const periodStart = dateValue(input.periodStart, 'periodStart');
+  const periodEnd = dateValue(input.periodEnd, 'periodEnd');
+  const start = new Date(periodStart);
+  const end = new Date(periodEnd);
+  const now = Date.now();
+  if (start >= end) throw badRequest('periodStart must be before periodEnd');
+  if (end.getTime() > now) throw badRequest('periodEnd cannot be in the future');
+  if (end.getTime() - start.getTime() > 31 * 86_400_000) {
+    throw badRequest('test scan range cannot exceed 31 days');
+  }
+  return { periodStart, periodEnd };
+}
+
 export function normalizeModelAuditMapping(input = {}) {
   return {
     sourceModel: textValue(input.sourceModel, 'sourceModel', { max: 200 }),
