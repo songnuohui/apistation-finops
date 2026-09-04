@@ -7,7 +7,11 @@ import {
   classifyModelAuditEvent,
 } from '../src/services/model-audit-service.mjs';
 import { DemoModelAuditRepository } from '../src/repositories/model-audit-repository.mjs';
-import { normalizeModelAuditTestRun } from '../src/http/validation.mjs';
+import {
+  normalizeModelAuditClear,
+  normalizeModelAuditTestRun,
+  normalizeModelAuditTimeRange,
+} from '../src/http/validation.mjs';
 
 test('model audit classifies exact matches, legal mappings, mismatches, and missing fields', () => {
   assert.equal(classifyModelAuditEvent({
@@ -458,4 +462,131 @@ test('model audit mappings return independent paginated results', async () => {
   assert.equal(first.items[0].sourceModel, 'source-00');
   assert.equal(third.items.length, 5);
   assert.equal(third.page, 3);
+});
+
+test('model audit list filters use an inclusive start and exclusive end', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  const start = '2026-09-04T00:00:00.000Z';
+  const middle = '2026-09-04T00:05:00.000Z';
+  const end = '2026-09-04T00:10:00.000Z';
+  repository.events = [
+    {
+      id: 1, scanRunId: 1, status: 'mismatch', userEmail: 'first@example.com',
+      requestedModel: 'gpt-4o', upstreamModel: 'gpt-4o',
+      upstreamResponseModel: 'gpt-4o-mini', createdAt: start,
+    },
+    {
+      id: 2, scanRunId: 2, status: 'mismatch', userEmail: 'second@example.com',
+      requestedModel: 'claude', upstreamModel: 'claude',
+      upstreamResponseModel: 'haiku', createdAt: middle,
+    },
+    {
+      id: 3, scanRunId: 3, status: 'mismatch', userEmail: 'third@example.com',
+      requestedModel: 'gemini', upstreamModel: 'gemini',
+      upstreamResponseModel: 'flash', createdAt: end,
+    },
+  ];
+  repository.runs = [
+    { id: 1, periodStart: start },
+    { id: 2, periodStart: middle },
+    { id: 3, periodStart: end },
+  ];
+  repository.notifications = [
+    { id: 1, createdAt: start, status: 'sent' },
+    { id: 2, createdAt: middle, status: 'sent' },
+    { id: 3, createdAt: end, status: 'sent' },
+  ];
+
+  const range = { startAt: start, endAt: end };
+  assert.deepEqual(
+    (await repository.listEvents({ ...range, page: 1, pageSize: 20 })).items
+      .map((item) => item.id),
+    [2, 1],
+  );
+  assert.equal((await repository.listScanRuns({ ...range })).total, 2);
+  assert.equal((await repository.listNotifications({ ...range })).total, 2);
+});
+
+test('model audit clearing events respects search and clearing runs removes linked records', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  repository.runs = [
+    { id: 1, periodStart: '2026-09-04T00:00:00.000Z' },
+    { id: 2, periodStart: '2026-09-04T01:00:00.000Z' },
+  ];
+  repository.events = [
+    {
+      id: 1, scanRunId: 1, status: 'mismatch', userEmail: 'keep@example.com',
+      requestedModel: 'gpt-4o', upstreamModel: 'gpt-4o',
+      upstreamResponseModel: 'gpt-4o-mini', createdAt: '2026-09-04T00:01:00.000Z',
+    },
+    {
+      id: 2, scanRunId: 1, status: 'mismatch', userEmail: 'remove@example.com',
+      requestedModel: 'gpt-4o', upstreamModel: 'gpt-4o',
+      upstreamResponseModel: 'gpt-4.1', createdAt: '2026-09-04T00:02:00.000Z',
+    },
+    {
+      id: 3, scanRunId: 2, status: 'mismatch', userEmail: 'later@example.com',
+      requestedModel: 'claude', upstreamModel: 'claude',
+      upstreamResponseModel: 'haiku', createdAt: '2026-09-04T01:01:00.000Z',
+    },
+  ];
+  repository.notifications = [
+    { id: 1, scanRunId: 1, createdAt: '2026-09-04T00:03:00.000Z', status: 'sent' },
+    { id: 2, scanRunId: 2, createdAt: '2026-09-04T01:03:00.000Z', status: 'sent' },
+  ];
+
+  const filtered = await repository.clearAuditData({
+    scope: 'events',
+    search: 'remove@example.com',
+    startAt: '2026-09-04T00:00:00.000Z',
+    endAt: '2026-09-04T00:10:00.000Z',
+  });
+  assert.deepEqual(filtered.deleted, { events: 1, runs: 0, notifications: 0 });
+  assert.deepEqual(repository.events.map((item) => item.userEmail), [
+    'keep@example.com',
+    'later@example.com',
+  ]);
+
+  const linked = await repository.clearAuditData({
+    scope: 'runs',
+    startAt: '2026-09-04T00:00:00.000Z',
+    endAt: '2026-09-04T01:00:00.000Z',
+  });
+  assert.deepEqual(linked.deleted, { events: 1, runs: 1, notifications: 1 });
+  assert.deepEqual(repository.runs.map((item) => item.id), [2]);
+  assert.deepEqual(repository.notifications.map((item) => item.id), [2]);
+});
+
+test('model audit clear and time range validation reject incomplete or reversed ranges', () => {
+  assert.deepEqual(normalizeModelAuditTimeRange({}), { startAt: null, endAt: null });
+  assert.throws(
+    () => normalizeModelAuditTimeRange({ startAt: '2026-09-04T00:00:00.000Z' }),
+    /must be provided together/,
+  );
+  assert.throws(
+    () => normalizeModelAuditTimeRange({
+      startAt: '2026-09-04T01:00:00.000Z',
+      endAt: '2026-09-04T00:00:00.000Z',
+    }),
+    /startAt must be before endAt/,
+  );
+  assert.deepEqual(
+    normalizeModelAuditClear({ scope: 'events', search: 'user@example.com' }),
+    { scope: 'events', search: 'user@example.com', startAt: null, endAt: null },
+  );
+});
+
+test('model audit clearing refuses active scans and in-flight email delivery', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  repository.runs.push({ id: 1, status: 'running', periodStart: '2026-09-04T00:00:00.000Z' });
+  await assert.rejects(
+    () => repository.clearAuditData({ scope: 'events' }),
+    /扫描正在执行/,
+  );
+  repository.runs[0].status = 'completed';
+  repository.notifications.push({ id: 1, status: 'sending', createdAt: '2026-09-04T00:00:00.000Z' });
+  await assert.rejects(
+    () => repository.clearAuditData({ scope: 'notifications' }),
+    /邮件正在发送/,
+  );
 });

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Edit3, Play, Plus, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-vue-next';
+import { Edit3, Filter, Play, Plus, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
 import PaginationBar from './PaginationBar.vue';
 
@@ -12,6 +12,7 @@ const emit = defineEmits<{ toast: [message: string] }>();
 
 const loading = ref(false);
 const saving = ref(false);
+const clearing = ref(false);
 const running = ref(false);
 const testRunning = ref(false);
 const settings = ref<AnyRecord>({});
@@ -31,6 +32,10 @@ const runPageSize = ref(20);
 const notificationPage = ref(1);
 const notificationPageSize = ref(20);
 const eventSearch = ref('');
+const filterStart = ref('');
+const filterEnd = ref('');
+const appliedStartAt = ref('');
+const appliedEndAt = ref('');
 const selectedNotification = ref<AnyRecord | null>(null);
 const mappingEditor = ref<AnyRecord | null>(null);
 
@@ -100,6 +105,19 @@ function safePageData(value: any): PageData {
   };
 }
 
+function auditTimeQuery() {
+  return {
+    start_at: appliedStartAt.value,
+    end_at: appliedEndAt.value,
+  };
+}
+
+function resetAuditPages() {
+  eventPage.value = 1;
+  runPage.value = 1;
+  notificationPage.value = 1;
+}
+
 async function loadSettings() {
   settings.value = await get('/model-audit/settings');
   copySettings();
@@ -118,6 +136,7 @@ async function loadEvents() {
     page: eventPage.value,
     page_size: eventPageSize.value,
     search: eventSearch.value,
+    ...auditTimeQuery(),
   })}`));
   if (events.value.page !== eventPage.value) eventPage.value = events.value.page;
 }
@@ -126,6 +145,7 @@ async function loadRuns() {
   runs.value = safePageData(await get(`/model-audit/scan-runs?${query({
     page: runPage.value,
     page_size: runPageSize.value,
+    ...auditTimeQuery(),
   })}`));
   if (runs.value.page !== runPage.value) runPage.value = runs.value.page;
 }
@@ -134,8 +154,13 @@ async function loadNotifications() {
   notifications.value = safePageData(await get(`/model-audit/notifications?${query({
     page: notificationPage.value,
     page_size: notificationPageSize.value,
+    ...auditTimeQuery(),
   })}`));
   if (notifications.value.page !== notificationPage.value) notificationPage.value = notifications.value.page;
+}
+
+async function loadAuditLists() {
+  await Promise.all([loadEvents(), loadRuns(), loadNotifications()]);
 }
 
 async function load() {
@@ -146,6 +171,75 @@ async function load() {
     emit('toast', error.message);
   } finally {
     loading.value = false;
+  }
+}
+
+function applyAuditFilters() {
+  if (Boolean(filterStart.value) !== Boolean(filterEnd.value)) {
+    emit('toast', '开始时间和结束时间需要同时填写');
+    return;
+  }
+  const start = filterStart.value ? new Date(filterStart.value) : null;
+  const end = filterEnd.value ? new Date(filterEnd.value) : null;
+  if ((start && !Number.isFinite(start.getTime())) || (end && !Number.isFinite(end.getTime()))) {
+    emit('toast', '时间范围无效');
+    return;
+  }
+  if (start && end && start >= end) {
+    emit('toast', '开始时间必须早于结束时间');
+    return;
+  }
+  appliedStartAt.value = start ? start.toISOString() : '';
+  appliedEndAt.value = end ? end.toISOString() : '';
+  resetAuditPages();
+  void loadAuditLists().catch((error: any) => emit('toast', error.message));
+}
+
+function clearAuditFilters() {
+  filterStart.value = '';
+  filterEnd.value = '';
+  appliedStartAt.value = '';
+  appliedEndAt.value = '';
+  resetAuditPages();
+  void loadAuditLists().catch((error: any) => emit('toast', error.message));
+}
+
+const auditScopeLabels: Record<string, string> = {
+  events: '不一致记录',
+  runs: '扫描窗口',
+  notifications: '邮件记录',
+};
+
+const activeAuditTotal = computed(() => ({
+  events: events.value.total,
+  runs: runs.value.total,
+  notifications: notifications.value.total,
+}[activeAuditTab.value] || 0));
+
+async function clearCurrentAuditList() {
+  const scope = activeAuditTab.value;
+  const rangeText = appliedStartAt.value && appliedEndAt.value
+    ? `时间范围 ${dateTime(appliedStartAt.value)} 至 ${dateTime(appliedEndAt.value)} 内`
+    : '全部时间范围内';
+  const relationText = scope === 'runs'
+    ? '，并同步删除这些扫描窗口关联的不一致记录和邮件记录'
+    : '';
+  if (!window.confirm(`确定清空${rangeText}的${auditScopeLabels[scope]}吗？${relationText}。此操作不可恢复。`)) return;
+  clearing.value = true;
+  try {
+    const result = await send('/model-audit/clear', 'POST', {
+      scope,
+      search: scope === 'events' ? eventSearch.value : '',
+      startAt: appliedStartAt.value || null,
+      endAt: appliedEndAt.value || null,
+    });
+    resetAuditPages();
+    await loadAuditLists();
+    emit('toast', `已清空 ${result.totalDeleted || 0} 条审计数据`);
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    clearing.value = false;
   }
 }
 
@@ -367,8 +461,21 @@ const currentMismatchCount = computed(() => events.value.total || 0);
     </section>
 
     <section v-else class="panel table-panel">
-      <div class="panel-head model-audit-record-head"><div><h2>审计记录</h2><p>只显示审计出来的模型不一致记录；用户邮件按邮箱聚合。</p></div><label class="search-box"><Search :size="16" /><input v-model="eventSearch" placeholder="搜索用户或模型" /></label></div>
-      <div class="compact-tabs model-audit-tabs"><button :class="{ active: activeAuditTab === 'events' }" type="button" @click="activeAuditTab = 'events'">不一致记录 <small>{{ events.total }}</small></button><button :class="{ active: activeAuditTab === 'runs' }" type="button" @click="activeAuditTab = 'runs'">扫描窗口 <small>{{ runs.total }}</small></button><button :class="{ active: activeAuditTab === 'notifications' }" type="button" @click="activeAuditTab = 'notifications'">邮件记录 <small>{{ notifications.total }}</small></button></div>
+      <div class="panel-head model-audit-record-head">
+        <div><h2>审计记录</h2><p>只显示审计出来的模型不一致记录；用户邮件按邮箱聚合。</p></div>
+        <div class="model-audit-filterbar">
+          <label>开始时间<input v-model="filterStart" type="datetime-local" /></label>
+          <span class="model-audit-filter-separator">至</span>
+          <label>结束时间（不含）<input v-model="filterEnd" type="datetime-local" /></label>
+          <button class="secondary-button" type="button" title="应用时间筛选" @click="applyAuditFilters"><Filter :size="15" />筛选</button>
+          <button class="icon-button" type="button" title="清除时间筛选" aria-label="清除时间筛选" :disabled="!appliedStartAt && !appliedEndAt" @click="clearAuditFilters"><X :size="16" /></button>
+          <label class="search-box"><Search :size="16" /><input v-model="eventSearch" placeholder="搜索用户或模型" /></label>
+        </div>
+      </div>
+      <div class="model-audit-tab-toolbar">
+        <div class="compact-tabs model-audit-tabs"><button :class="{ active: activeAuditTab === 'events' }" type="button" @click="activeAuditTab = 'events'">不一致记录 <small>{{ events.total }}</small></button><button :class="{ active: activeAuditTab === 'runs' }" type="button" @click="activeAuditTab = 'runs'">扫描窗口 <small>{{ runs.total }}</small></button><button :class="{ active: activeAuditTab === 'notifications' }" type="button" @click="activeAuditTab = 'notifications'">邮件记录 <small>{{ notifications.total }}</small></button></div>
+        <button class="secondary-button danger-action" type="button" :disabled="clearing || !activeAuditTotal" @click="clearCurrentAuditList"><RefreshCw v-if="clearing" :size="15" class="spin" /><Trash2 v-else :size="15" />清空当前列表</button>
+      </div>
 
       <div v-if="activeAuditTab === 'events'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>记录时间</th><th>用户邮箱</th><th>请求模型</th><th>上游发送模型</th><th>上游响应模型</th><th>判定</th></tr></thead><tbody><tr v-for="item in events.items" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.userEmail || `用户 #${item.sourceUserId}` }}</td><td>{{ item.requestedModel || '--' }}</td><td>{{ item.upstreamModel || '--' }}</td><td>{{ item.upstreamResponseModel || '--' }}</td><td><span class="status-pill danger">不一致</span></td></tr><tr v-if="!loading && !events.items.length"><td colspan="6" class="table-empty">暂无模型不一致记录</td></tr></tbody></table></div>
       <PaginationBar v-if="events.total" v-show="activeAuditTab === 'events'" :page="eventPage" :page-size="eventPageSize" :total="events.total" @update:page="changeEventsPage" @update:page-size="changeEventsPageSize" />

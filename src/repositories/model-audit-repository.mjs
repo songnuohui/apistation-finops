@@ -122,6 +122,42 @@ function pageArgs({ page = 1, pageSize = 20 } = {}) {
   };
 }
 
+function addTimeRange(conditions, params, column, startAt, endAt) {
+  if (startAt) {
+    params.push(startAt);
+    conditions.push(`${column} >= $${params.length}::timestamptz`);
+  }
+  if (endAt) {
+    params.push(endAt);
+    conditions.push(`${column} < $${params.length}::timestamptz`);
+  }
+}
+
+function addEventSearch(conditions, params, search) {
+  if (!search) return;
+  params.push(`%${String(search).trim().toLowerCase()}%`);
+  conditions.push(
+    `LOWER(user_email||' '||upstream_model||' '||upstream_response_model||' '||requested_model) LIKE $${params.length}`,
+  );
+}
+
+function eventMatchesSearch(event, search) {
+  const term = String(search || '').trim().toLowerCase();
+  return !term
+    || `${event.userEmail} ${event.upstreamModel} ${event.upstreamResponseModel} ${event.requestedModel}`
+      .toLowerCase()
+      .includes(term);
+}
+
+function inTimeRange(value, startAt, endAt) {
+  if (!startAt && !endAt) return true;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  if (startAt && timestamp < new Date(startAt).getTime()) return false;
+  if (endAt && timestamp >= new Date(endAt).getTime()) return false;
+  return true;
+}
+
 export class ModelAuditRepository {
   constructor(pool, config) {
     this.pool = pool;
@@ -347,6 +383,12 @@ export class ModelAuditRepository {
     notifications,
   }) {
     return inTransaction(this.pool, async (client) => {
+      const lock = await client.query(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended('finops:model-audit',0)) AS acquired`,
+      );
+      if (!lock.rows[0]?.acquired) {
+        throw httpError('model audit data is busy, please retry', 409);
+      }
       const runResult = await client.query(`SELECT * FROM ${this.schema}.model_audit_scan_runs
         WHERE id=$1 FOR UPDATE`, [runId]);
       if (!runResult.rowCount) throw httpError('model audit scan run not found', 404);
@@ -458,12 +500,18 @@ export class ModelAuditRepository {
     });
   }
 
-  async listScanRuns({ page = 1, pageSize = 20 } = {}) {
+  async listScanRuns({ page = 1, pageSize = 20, startAt = null, endAt = null } = {}) {
     const paging = pageArgs({ page, pageSize });
+    const conditions = [];
+    const params = [];
+    addTimeRange(conditions, params, 'period_start', startAt, endAt);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = params.push(paging.pageSize);
+    const offset = params.push(paging.offset);
     const result = await this.pool.query(`SELECT * FROM ${this.schema}.model_audit_scan_runs
-      ORDER BY started_at DESC,id DESC LIMIT $1 OFFSET $2`, [paging.pageSize, paging.offset]);
+      ${where} ORDER BY started_at DESC,id DESC LIMIT $${limit} OFFSET $${offset}`, params);
     const count = await this.pool.query(`SELECT COUNT(*)::int AS count
-      FROM ${this.schema}.model_audit_scan_runs`);
+      FROM ${this.schema}.model_audit_scan_runs ${where}`, params.slice(0, -2));
     return {
       items: result.rows.map(scanRun),
       total: number(count.rows[0]?.count),
@@ -472,14 +520,18 @@ export class ModelAuditRepository {
     };
   }
 
-  async listEvents({ page = 1, pageSize = 30, search = '' } = {}) {
+  async listEvents({
+    page = 1,
+    pageSize = 30,
+    search = '',
+    startAt = null,
+    endAt = null,
+  } = {}) {
     const paging = pageArgs({ page, pageSize });
     const conditions = ['status=\'mismatch\''];
     const params = [];
-    if (search) {
-      params.push(`%${String(search).trim().toLowerCase()}%`);
-      conditions.push(`LOWER(user_email||' '||upstream_model||' '||upstream_response_model||' '||requested_model) LIKE $${params.length}`);
-    }
+    addEventSearch(conditions, params, search);
+    addTimeRange(conditions, params, 'created_at', startAt, endAt);
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = params.push(paging.pageSize);
     const offset = params.push(paging.offset);
@@ -495,22 +547,140 @@ export class ModelAuditRepository {
     };
   }
 
-  async listNotifications({ page = 1, pageSize = 30, status = '' } = {}) {
+  async listNotifications({
+    page = 1,
+    pageSize = 30,
+    status = '',
+    startAt = null,
+    endAt = null,
+  } = {}) {
     const paging = pageArgs({ page, pageSize });
     const params = [];
-    const where = status ? `WHERE status=$${params.push(status)}` : '';
+    const conditions = [];
+    if (status) conditions.push(`status=$${params.push(status)}`);
+    addTimeRange(conditions, params, 'created_at', startAt, endAt);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = params.push(paging.pageSize);
     const offset = params.push(paging.offset);
     const result = await this.pool.query(`SELECT * FROM ${this.schema}.model_audit_notifications
       ${where} ORDER BY created_at DESC,id DESC LIMIT $${limit} OFFSET $${offset}`, params);
     const count = await this.pool.query(`SELECT COUNT(*)::int AS count
-      FROM ${this.schema}.model_audit_notifications ${where}`, status ? [status] : []);
+      FROM ${this.schema}.model_audit_notifications ${where}`, params.slice(0, -2));
     return {
       items: result.rows.map(notification),
       total: number(count.rows[0]?.count),
       page: paging.page,
       pageSize: paging.pageSize,
     };
+  }
+
+  async clearAuditData({
+    scope = 'all',
+    startAt = null,
+    endAt = null,
+    search = '',
+  } = {}) {
+    return inTransaction(this.pool, async (client) => {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended('finops:model-audit',0))`,
+      );
+      const activeRuns = await client.query(
+        `SELECT id FROM ${this.schema}.model_audit_scan_runs WHERE status='running'`,
+      );
+      if (activeRuns.rowCount) {
+        throw httpError('当前有扫描正在执行，请稍后再清空', 409);
+      }
+      if (scope === 'notifications' || scope === 'runs' || scope === 'all') {
+        const sendingNotifications = await client.query(
+          `SELECT id FROM ${this.schema}.model_audit_notifications WHERE status='sending'`,
+        );
+        if (sendingNotifications.rowCount) {
+          throw httpError('当前有邮件正在发送，请稍后再清空', 409);
+        }
+      }
+      const deleted = { events: 0, runs: 0, notifications: 0 };
+      const deleteRows = async (table, column, key) => {
+        const conditions = [];
+        const params = [];
+        addTimeRange(conditions, params, column, startAt, endAt);
+        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+        const result = await client.query(
+          `DELETE FROM ${this.schema}.${table} ${where} RETURNING id`,
+          params,
+        );
+        deleted[key] += result.rowCount;
+      };
+      const deleteEvents = async () => {
+        const conditions = ['status=\'mismatch\''];
+        const params = [];
+        addEventSearch(conditions, params, search);
+        addTimeRange(conditions, params, 'created_at', startAt, endAt);
+        const where = `WHERE ${conditions.join(' AND ')}`;
+        const result = await client.query(
+          `DELETE FROM ${this.schema}.model_audit_events ${where} RETURNING id`,
+          params,
+        );
+        deleted.events += result.rowCount;
+      };
+      const deleteRuns = async () => {
+        const conditions = [];
+        const params = [];
+        addTimeRange(conditions, params, 'period_start', startAt, endAt);
+        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+        const active = await client.query(
+          `SELECT id FROM ${this.schema}.model_audit_scan_runs
+           ${where ? `${where} AND ` : 'WHERE '}status='running'`,
+          params,
+        );
+        if (active.rowCount) {
+          throw httpError('当前筛选范围包含正在执行的扫描，请稍后再清空', 409);
+        }
+        const selected = await client.query(
+          `SELECT id FROM ${this.schema}.model_audit_scan_runs ${where}`,
+          params,
+        );
+        const runIds = selected.rows
+          .map((row) => Number(row.id))
+          .filter((id) => Number.isSafeInteger(id));
+        if (!runIds.length) return;
+
+        const notificationResult = await client.query(
+          `DELETE FROM ${this.schema}.model_audit_notifications
+           WHERE scan_run_id=ANY($1::bigint[]) RETURNING id`,
+          [runIds],
+        );
+        const eventResult = await client.query(
+          `DELETE FROM ${this.schema}.model_audit_events
+           WHERE scan_run_id=ANY($1::bigint[]) RETURNING id`,
+          [runIds],
+        );
+        const runResult = await client.query(
+          `DELETE FROM ${this.schema}.model_audit_scan_runs
+           WHERE id=ANY($1::bigint[]) RETURNING id`,
+          [runIds],
+        );
+        deleted.notifications += notificationResult.rowCount;
+        deleted.events += eventResult.rowCount;
+        deleted.runs += runResult.rowCount;
+      };
+
+      if (scope === 'events') await deleteEvents();
+      if (scope === 'notifications') {
+        await deleteRows('model_audit_notifications', 'created_at', 'notifications');
+      }
+      if (scope === 'runs') await deleteRuns();
+      if (scope === 'all') {
+        await deleteEvents();
+        await deleteRows('model_audit_notifications', 'created_at', 'notifications');
+        await deleteRuns();
+      }
+      return {
+        ok: true,
+        scope,
+        deleted,
+        totalDeleted: deleted.events + deleted.runs + deleted.notifications,
+      };
+    });
   }
 
   async listPendingNotifications(limit = 20) {
@@ -520,10 +690,16 @@ export class ModelAuditRepository {
   }
 
   async claimNotification(id) {
-    const result = await this.pool.query(`UPDATE ${this.schema}.model_audit_notifications SET
-      status='sending',error_message='',updated_at=NOW()
-      WHERE id=$1 AND status='pending' RETURNING *`, [id]);
-    return result.rowCount ? notification(result.rows[0]) : null;
+    return inTransaction(this.pool, async (client) => {
+      const lock = await client.query(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended('finops:model-audit',0)) AS acquired`,
+      );
+      if (!lock.rows[0]?.acquired) return null;
+      const result = await client.query(`UPDATE ${this.schema}.model_audit_notifications SET
+        status='sending',error_message='',updated_at=NOW()
+        WHERE id=$1 AND status='pending' RETURNING *`, [id]);
+      return result.rowCount ? notification(result.rows[0]) : null;
+    });
   }
 
   async finishNotification(id, status, errorMessage = '') {
@@ -827,22 +1003,103 @@ export class DemoModelAuditRepository {
     }
     return count;
   }
-  async listScanRuns({ page = 1, pageSize = 20 } = {}) {
+  async listScanRuns({ page = 1, pageSize = 20, startAt = null, endAt = null } = {}) {
     const paging = pageArgs({ page, pageSize });
-    return { items: this.runs.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: this.runs.length, page: paging.page, pageSize: paging.pageSize };
+    const filtered = this.runs
+      .filter((item) => inTimeRange(item.periodStart, startAt, endAt))
+      .sort((left, right) => (
+        new Date(right.startedAt || 0).getTime() - new Date(left.startedAt || 0).getTime()
+        || Number(right.id || 0) - Number(left.id || 0)
+      ));
+    return { items: filtered.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: filtered.length, page: paging.page, pageSize: paging.pageSize };
   }
-  async listEvents({ page = 1, pageSize = 30, search = '' } = {}) {
+  async listEvents({
+    page = 1,
+    pageSize = 30,
+    search = '',
+    startAt = null,
+    endAt = null,
+  } = {}) {
     const paging = pageArgs({ page, pageSize });
     const term = String(search || '').toLowerCase();
     const filtered = this.events.filter((item) => item.status === 'mismatch'
-      && (!term || `${item.userEmail} ${item.upstreamModel} ${item.upstreamResponseModel} ${item.requestedModel}`.toLowerCase().includes(term)));
+      && eventMatchesSearch(item, term)
+      && inTimeRange(item.createdAt, startAt, endAt))
+      .sort((left, right) => (
+        new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime()
+        || Number(right.id || 0) - Number(left.id || 0)
+      ));
     return { items: filtered.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: filtered.length, page: paging.page, pageSize: paging.pageSize };
   }
-  async listNotifications({ page = 1, pageSize = 30, status = '' } = {}) {
+  async listNotifications({
+    page = 1,
+    pageSize = 30,
+    status = '',
+    startAt = null,
+    endAt = null,
+  } = {}) {
     const paging = pageArgs({ page, pageSize });
-    const filtered = this.notifications.filter((item) => !status || item.status === status);
+    const filtered = this.notifications.filter((item) => (!status || item.status === status)
+      && inTimeRange(item.createdAt, startAt, endAt))
+      .sort((left, right) => (
+        new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime()
+        || Number(right.id || 0) - Number(left.id || 0)
+      ));
     return { items: filtered.slice(paging.offset, paging.offset + paging.pageSize).map((item) => ({ ...item })), total: filtered.length, page: paging.page, pageSize: paging.pageSize };
   }
+
+  async clearAuditData({
+    scope = 'all',
+    startAt = null,
+    endAt = null,
+    search = '',
+  } = {}) {
+    if (this.runs.some((item) => item.status === 'running')) {
+      throw httpError('当前有扫描正在执行，请稍后再清空', 409);
+    }
+    if (['notifications', 'runs', 'all'].includes(scope)
+      && this.notifications.some((item) => item.status === 'sending')) {
+      throw httpError('当前有邮件正在发送，请稍后再清空', 409);
+    }
+    const before = {
+      events: this.events.length,
+      runs: this.runs.length,
+      notifications: this.notifications.length,
+    };
+    const selected = (value) => inTimeRange(value, startAt, endAt);
+    const selectedEvent = (item) => selected(item.createdAt)
+      && eventMatchesSearch(item, search);
+
+    if (scope === 'events' || scope === 'all') {
+      this.events = this.events.filter((item) => !selectedEvent(item));
+    }
+    if (scope === 'notifications' || scope === 'all') {
+      this.notifications = this.notifications.filter((item) => !selected(item.createdAt));
+    }
+    if (scope === 'runs' || scope === 'all') {
+      const runIds = new Set(this.runs
+        .filter((item) => selected(item.periodStart))
+        .map((item) => Number(item.id)));
+      if (runIds.size) {
+        this.events = this.events.filter((item) => !runIds.has(Number(item.scanRunId)));
+        this.notifications = this.notifications.filter((item) => !runIds.has(Number(item.scanRunId)));
+        this.runs = this.runs.filter((item) => !runIds.has(Number(item.id)));
+      }
+    }
+
+    const deleted = {
+      events: before.events - this.events.length,
+      runs: before.runs - this.runs.length,
+      notifications: before.notifications - this.notifications.length,
+    };
+    return {
+      ok: true,
+      scope,
+      deleted,
+      totalDeleted: deleted.events + deleted.runs + deleted.notifications,
+    };
+  }
+
   async listPendingNotifications(limit = 20) {
     return this.notifications.filter((item) => item.status === 'pending').slice(0, limit).map((item) => ({ ...item }));
   }

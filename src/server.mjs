@@ -31,6 +31,7 @@ import {
   normalizeAccountProfitGuard, normalizeSub2ApiServiceAuthSettings,
   normalizeOAuthSupplyAuthSettings, normalizeEmailSettings, normalizeEmailCampaign,
   normalizeModelAuditSettings, normalizeModelAuditTestRun, normalizeModelAuditMapping,
+  normalizeModelAuditTimeRange, normalizeModelAuditClear,
 } from './http/validation.mjs';
 import { resolveStaticPath } from './http/static-path.mjs';
 import { routeId } from './http/route.mjs';
@@ -354,6 +355,14 @@ async function loginTwoFactor(request,res){
     return json(res,failure.status,{error:failure.error});
   }
 }
+
+function modelAuditTimeRange(searchParams) {
+  return normalizeModelAuditTimeRange({
+    startAt: searchParams.get('start_at') || undefined,
+    endAt: searchParams.get('end_at') || undefined,
+  });
+}
+
 async function api(request,res,url){
   const auth=authorize(request,config);if(!auth.ok)return json(res,401,{error:'unauthorized'});
   const range=()=>resolveRange(url.searchParams,new Date(),config.timezone),page=()=>pagination(url.searchParams);
@@ -402,8 +411,16 @@ async function api(request,res,url){
       normalizeModelAuditTestRun(await body(request)),
     ));
   }
+  if(request.method==='POST'&&url.pathname==='/api/model-audit/clear'){
+    return json(res,200,await modelAuditRepository.clearAuditData(
+      normalizeModelAuditClear(await body(request)),
+    ));
+  }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/scan-runs'){
-    return json(res,200,await modelAuditRepository.listScanRuns(page()));
+    return json(res,200,await modelAuditRepository.listScanRuns({
+      ...page(),
+      ...modelAuditTimeRange(url.searchParams),
+    }));
   }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/events'){
     const status=url.searchParams.get('status')||'';
@@ -413,6 +430,7 @@ async function api(request,res,url){
     return json(res,200,await modelAuditRepository.listEvents({
       ...page(),
       search:searchTerm(url.searchParams),
+      ...modelAuditTimeRange(url.searchParams),
     }));
   }
   if(request.method==='GET'&&url.pathname==='/api/model-audit/notifications'){
@@ -420,7 +438,11 @@ async function api(request,res,url){
     if(status && !['pending','sending','sent','failed','skipped'].includes(status)){
       return json(res,400,{error:'invalid model audit notification status'});
     }
-    return json(res,200,await modelAuditRepository.listNotifications({ ...page(), status }));
+    return json(res,200,await modelAuditRepository.listNotifications({
+      ...page(),
+      status,
+      ...modelAuditTimeRange(url.searchParams),
+    }));
   }
   if(request.method==='PATCH'&&url.pathname==='/api/email/settings'){
     const input=normalizeEmailSettings(await body(request));

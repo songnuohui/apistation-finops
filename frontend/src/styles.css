@@ -206,9 +206,6 @@ button:disabled{cursor:not-allowed!important}
 .model-audit-settings-grid .toggle-field{min-height:58px}
 .model-audit-form-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:18px}
 .model-audit-error{margin-top:12px;padding:10px 12px;border:1px solid #efbdc5;border-radius:6px;background:#fff5f6;color:#a52e40;font-size:12px;line-height:18px}
-.model-audit-filterbar{display:flex;align-items:center;gap:8px}
-.model-audit-filterbar .search-box{width:260px}
-.model-audit-filterbar select{height:39px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:#35445a}
 .model-audit-tabs{margin-bottom:15px}
 .model-audit-table{min-width:980px!important}
 .model-audit-table td strong,.model-audit-table td small{display:block}
@@ -225,8 +222,15 @@ button:disabled{cursor:not-allowed!important}
 .model-audit-top-tabs button.active{color:#1852c2;border-bottom-color:#2563eb;background:#fff;font-weight:700}
 .model-audit-top-tabs small,.model-audit-tabs small{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;color:#607087;background:#edf2f8;font-size:10px}
 .model-audit-top-tabs button.active small,.model-audit-tabs button.active small{color:#1852c2;background:#e4edff}
-.model-audit-record-head{align-items:center}
-.model-audit-record-head .search-box{flex:0 1 290px}
+.model-audit-record-head{align-items:flex-end}
+.model-audit-filterbar{display:flex;align-items:flex-end;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.model-audit-filterbar>label:not(.search-box){display:grid;gap:5px;color:var(--muted);font-size:11px}
+.model-audit-filterbar>label:not(.search-box) input{height:37px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:#fff;color:#26374e;font-size:12px}
+.model-audit-filterbar .search-box{flex:0 1 250px;width:250px;height:37px}
+.model-audit-filter-separator{padding-bottom:10px;color:#8a97a8;font-size:12px}
+.model-audit-tab-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:15px}
+.model-audit-tab-toolbar .model-audit-tabs{margin-bottom:0}
+.model-audit-tab-toolbar .danger-action{color:#b63b4d}
 .test-scan-panel{display:grid;gap:13px;margin-top:20px;padding:16px;border:1px solid #dbe7f5;border-radius:7px;background:#f8fbff}
 .test-scan-panel h3{margin:0;color:#304863;font-size:14px}
 .test-scan-panel p{margin:4px 0 0;color:var(--muted);font-size:11px}
@@ -252,7 +256,12 @@ button:disabled{cursor:not-allowed!important}
   .model-audit-header,.model-audit-form-footer{align-items:stretch;flex-direction:column}
   .model-audit-actions{justify-content:flex-end}
   .model-audit-record-head{align-items:stretch}
-  .model-audit-record-head .search-box{width:100%;max-width:none}
+  .model-audit-filterbar{justify-content:stretch}
+  .model-audit-filterbar>label:not(.search-box){flex:1 1 180px}
+  .model-audit-filterbar .search-box{width:100%;max-width:none;flex-basis:100%}
+  .model-audit-filter-separator{display:none}
+  .model-audit-tab-toolbar{align-items:stretch;flex-direction:column}
+  .model-audit-tab-toolbar .danger-action{width:100%}
   .model-audit-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
   .test-scan-fields{align-items:stretch;flex-direction:column}
   .test-scan-arrow{display:none}

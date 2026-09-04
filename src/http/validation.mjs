@@ -730,6 +730,29 @@ export function normalizeModelAuditTestRun(input = {}) {
   return { periodStart, periodEnd };
 }
 
+const MODEL_AUDIT_CLEAR_SCOPES = new Set(['events', 'runs', 'notifications', 'all']);
+
+export function normalizeModelAuditTimeRange(input = {}) {
+  const hasStart = input.startAt !== undefined && input.startAt !== null && input.startAt !== '';
+  const hasEnd = input.endAt !== undefined && input.endAt !== null && input.endAt !== '';
+  if (hasStart !== hasEnd) throw badRequest('startAt and endAt must be provided together');
+  if (!hasStart) return { startAt: null, endAt: null };
+
+  const startAt = dateValue(input.startAt, 'startAt');
+  const endAt = dateValue(input.endAt, 'endAt');
+  if (new Date(startAt) >= new Date(endAt)) throw badRequest('startAt must be before endAt');
+  return { startAt, endAt };
+}
+
+export function normalizeModelAuditClear(input = {}) {
+  const scope = enumValue(input.scope || 'all', 'scope', MODEL_AUDIT_CLEAR_SCOPES);
+  return {
+    scope,
+    search: textValue(input.search, 'search', { required: false, max: 120 }),
+    ...normalizeModelAuditTimeRange(input),
+  };
+}
+
 export function normalizeModelAuditMapping(input = {}) {
   return {
     sourceModel: textValue(input.sourceModel, 'sourceModel', { max: 200 }),
