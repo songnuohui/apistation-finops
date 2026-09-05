@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>分组状态监控 | ApiStation FinOps</title>
+  <title>ApiStation 服务状态</title>
   <link rel="stylesheet" href="/monitor.css?v=0.5.0">
 </head>
 <body>
@@ -15,9 +15,8 @@
           <img src="/icons/activity.svg" alt="">
         </div>
         <div>
-          <p class="monitor-kicker">ApiStation FinOps</p>
-          <h1>分组状态监控</h1>
-          <p class="monitor-subtitle">按分组查看当前计费倍率与整体可用状态</p>
+          <p class="monitor-kicker">ApiStation</p>
+          <h1>ApiStation 服务状态</h1>
         </div>
       </div>
       <div class="monitor-actions">
@@ -34,8 +33,7 @@
     <section class="monitor-overview" aria-live="polite">
       <div>
         <p class="overview-label">当前状态</p>
-        <h2 id="summary-title">正在读取监控状态</h2>
-          <p class="overview-detail" id="summary-detail">监控数据由 FinOps 通过只读连接实时汇总 Sub2API 状态</p>
+          <h2 id="summary-title">正在读取监控状态</h2>
       </div>
       <div class="overview-controls">
         <div class="range-switch" aria-label="可用率统计范围">
@@ -57,7 +55,6 @@
           <h2 id="group-count">监控分组</h2>
           <span id="status-summary">正在读取监控数据</span>
         </div>
-        <span class="content-note">仅展示分组级别当前值</span>
       </div>
       <div class="group-grid" id="group-grid">
         <div class="monitor-loading"><span></span>正在读取监控数据</div>
