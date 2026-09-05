@@ -20,6 +20,16 @@ function jsonArray(value) {
   return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
 }
 
+function comparableJson(value) {
+  if (Array.isArray(value)) return value.map((item) => comparableJson(item));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, comparableJson(value[key])]));
+}
+
+function jsonEqual(left, right) {
+  return JSON.stringify(comparableJson(left)) === JSON.stringify(comparableJson(right));
+}
+
 function monitorStatus(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'operational') return 'healthy';
@@ -45,7 +55,7 @@ function monitorConfigFromRow(row, { includeSecret = false } = {}) {
     apiKeyMasked: row.api_key_masked || '',
     primaryModel: row.primary_model || '',
     extraModels: jsonArray(row.extra_models),
-    groupName: row.group_name || row.source_group_name || '',
+    groupName: row.group_name || '',
     extraHeaders: jsonObject(row.extra_headers),
     bodyOverrideMode: row.body_override_mode || 'off',
     bodyOverride: jsonObject(row.body_override),
@@ -2785,11 +2795,10 @@ export class PostgresRepository {
         || before.endpoint !== input.endpoint
         || before.api_key_ciphertext !== (input.apiKey ? apiKeyCiphertext : before.api_key_ciphertext)
         || before.primary_model !== input.primaryModel
-        || JSON.stringify(jsonArray(before.extra_models)) !== JSON.stringify(input.extraModels || [])
-        || before.group_name !== (input.groupName || '')
-        || JSON.stringify(jsonObject(before.extra_headers)) !== JSON.stringify(input.extraHeaders || {})
+        || !jsonEqual(jsonArray(before.extra_models), input.extraModels || [])
+        || !jsonEqual(jsonObject(before.extra_headers), input.extraHeaders || {})
         || before.body_override_mode !== (input.bodyOverrideMode || 'off')
-        || JSON.stringify(jsonObject(before.body_override)) !== JSON.stringify(input.bodyOverride || {});
+        || !jsonEqual(jsonObject(before.body_override), input.bodyOverride || {});
       const apiKeyMasked = input.apiKey ? input.apiKeyMasked : (before.api_key_masked || '');
       const result = await client.query(`
         UPDATE ${this.schema}.monitor_groups
