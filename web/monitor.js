@@ -4,7 +4,6 @@ const groupCount = document.querySelector('#group-count');
 const statusSummary = document.querySelector('#status-summary');
 const overallStatus = document.querySelector('#overall-status');
 const overallStatusLabel = document.querySelector('#overall-status-label');
-const summaryTitle = document.querySelector('#summary-title');
 const refreshCountdown = document.querySelector('#refresh-countdown');
 const rangeButtons = [...document.querySelectorAll('[data-window]')];
 
@@ -21,7 +20,7 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => 
 
 const statusText = {
   healthy: '运行正常',
-  degraded: '部分可用',
+  degraded: '响应较慢',
   unavailable: '不可用',
   unknown: '等待数据',
 };
@@ -35,7 +34,7 @@ const statusClass = {
 
 const overallText = {
   healthy: 'OPERATIONAL',
-  degraded: 'DEGRADED',
+  degraded: 'SLOW RESPONSE',
   unavailable: 'UNAVAILABLE',
   unknown: 'PENDING',
 };
@@ -114,16 +113,12 @@ function card(group) {
   const history = normalizedHistory(group);
   const availabilityByWindow = group.availabilityByWindow || { '7d': group.availabilityPercent };
   const availability = availabilityByWindow[selectedWindow];
-  const sampleCount = Number(group.availabilitySampleCount?.[selectedWindow] || 0);
   const provider = providerText[String(group.provider || '').toLowerCase()] || group.provider || '上游分组';
   const model = group.modelLabel || '分组整体状态';
   const historyBars = Array.from({ length: Math.max(0, 60 - history.length) }, () => null)
     .concat(history)
     .map((point) => point ? historyBar(point) : '<span class="history-bar is-unknown"></span>')
     .join('');
-  const historyNote = history.length
-    ? `${history.length} 次采样${sampleCount ? ` · ${sampleCount} 次窗口样本` : ''}`
-    : '等待首次同步';
   return `<article class="group-card is-${escapeHtml(status)}">
     <header class="group-card-header">
       <div class="group-title">
@@ -162,7 +157,6 @@ function card(group) {
       </div>
       <div class="history-heading">
         <span>近 60 次记录</span>
-        <span>${escapeHtml(historyNote)}</span>
       </div>
       <div class="history-bars" aria-label="${escapeHtml(`${group.name || '分组'}最近状态记录`)}">${historyBars}</div>
       <div class="history-axis"><span>过去</span><span>${escapeHtml(relativeTime(group.lastObservedAt))}</span><span>现在</span></div>
@@ -211,10 +205,9 @@ function renderSummary(data, groups) {
   const unavailable = Number(summary.unavailableGroups ?? groups.filter((group) => group.status === 'unavailable').length);
   overallStatus.className = `overall-status is-${status}`;
   overallStatusLabel.textContent = overallText[status];
-  summaryTitle.textContent = statusText[status];
   groupCount.textContent = `${groups.length} 个监控分组`;
   statusSummary.textContent = groups.length
-    ? `${healthy} 个正常 · ${degraded} 个部分可用 · ${unavailable} 个不可用`
+    ? `${healthy} 个正常 · ${degraded} 个响应较慢 · ${unavailable} 个不可用`
     : '暂未配置公开监控分组';
 }
 
@@ -250,7 +243,6 @@ async function load() {
   } catch (error) {
     overallStatus.className = 'overall-status is-unavailable';
     overallStatusLabel.textContent = 'OFFLINE';
-    summaryTitle.textContent = '监控数据暂时不可用';
     groupCount.textContent = '监控分组';
     statusSummary.textContent = '读取失败';
     grid.innerHTML = `<div class="monitor-error">监控数据暂时不可用<br><small>${escapeHtml(error.message)}</small></div>`;

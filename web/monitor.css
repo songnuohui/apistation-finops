@@ -178,7 +178,7 @@ h1 {
 .monitor-overview {
   display: flex;
   align-items: flex-end;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 24px;
   padding: 28px 2px 25px;
 }
@@ -477,12 +477,6 @@ h1 {
   margin-top: 12px;
   color: var(--muted);
   font-size: 10px;
-}
-
-.history-heading span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .history-bars {
