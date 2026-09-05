@@ -54,10 +54,8 @@ input:focus-visible { outline: 2px solid rgba(37, 99, 235, .32); outline-offset:
   font-size: 12px;
 }
 
-.intro { margin: 30px 0 24px; }
-.eyebrow { margin: 0 0 7px; color: #287c5d; font-size: 11px; font-weight: 700; }
+.intro { margin: 26px 0 24px; }
 h1 { margin: 0; color: #172033; font-size: 24px; line-height: 32px; }
-.intro > p:last-child { margin: 7px 0 0; color: #64748b; font-size: 13px; line-height: 20px; }
 
 form { display: grid; gap: 15px; }
 .field { display: grid; gap: 7px; color: #40536a; font-size: 12px; font-weight: 650; }
@@ -97,7 +95,6 @@ form { display: grid; gap: 15px; }
 }
 .submit-button:hover { background: #1d56ca; border-color: #1d56ca; }
 .submit-button:disabled { cursor: wait; opacity: .7; }
-.security-note { margin: 22px 0 0; color: #7a899c; font-size: 11px; line-height: 18px; }
 
 @media (max-width: 480px) {
   .login-shell { padding: 14px; background: #f4f8fc; }
