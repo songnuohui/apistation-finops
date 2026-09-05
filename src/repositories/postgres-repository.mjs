@@ -2510,7 +2510,7 @@ export class PostgresRepository {
 
   async getMonitorSettings() {
     const result = await this.pool.query(`
-      SELECT refresh_interval_seconds,announcement_text
+      SELECT refresh_interval_seconds,announcement_title,announcement_text
       FROM ${this.schema}.monitor_settings
       WHERE id=TRUE
       LIMIT 1`);
@@ -2518,6 +2518,7 @@ export class PostgresRepository {
       refreshIntervalSeconds: result.rowCount
         ? number(result.rows[0].refresh_interval_seconds)
         : 60,
+      announcementTitle: result.rowCount ? result.rows[0].announcement_title || '' : '',
       announcementText: result.rowCount ? result.rows[0].announcement_text || '' : '',
     };
   }
@@ -2525,14 +2526,17 @@ export class PostgresRepository {
   async updateMonitorSettings(input, actor='admin') {
     return inTransaction(this.pool, async (client) => {
       const result = await client.query(`
-        INSERT INTO ${this.schema}.monitor_settings(id,refresh_interval_seconds,announcement_text,updated_at)
-        VALUES(TRUE,$1,COALESCE($2,''),NOW())
+        INSERT INTO ${this.schema}.monitor_settings(
+          id,refresh_interval_seconds,announcement_title,announcement_text,updated_at)
+        VALUES(TRUE,$1,COALESCE($2,''),COALESCE($3,''),NOW())
         ON CONFLICT(id) DO UPDATE SET
           refresh_interval_seconds=EXCLUDED.refresh_interval_seconds,
-          announcement_text=COALESCE($2,${this.schema}.monitor_settings.announcement_text),
+          announcement_title=COALESCE($2,${this.schema}.monitor_settings.announcement_title),
+          announcement_text=COALESCE($3,${this.schema}.monitor_settings.announcement_text),
           updated_at=NOW()
-        RETURNING refresh_interval_seconds,announcement_text,updated_at`, [
+        RETURNING refresh_interval_seconds,announcement_title,announcement_text,updated_at`, [
         input.refreshIntervalSeconds,
+        input.announcementTitle === undefined ? null : input.announcementTitle,
         input.announcementText === undefined ? null : input.announcementText,
       ]);
       await client.query(`
@@ -2540,11 +2544,13 @@ export class PostgresRepository {
         VALUES($1,'update','monitor_settings','singleton',$2::jsonb)`,
       [actor, JSON.stringify({
         refreshIntervalSeconds: number(result.rows[0].refresh_interval_seconds),
+        announcementTitle: result.rows[0].announcement_title || '',
         announcementText: result.rows[0].announcement_text || '',
         updatedAt: result.rows[0].updated_at,
       })]);
       return {
         refreshIntervalSeconds: number(result.rows[0].refresh_interval_seconds),
+        announcementTitle: result.rows[0].announcement_title || '',
         announcementText: result.rows[0].announcement_text || '',
       };
     });

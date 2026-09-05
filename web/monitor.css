@@ -187,10 +187,10 @@ h1 {
   align-items: flex-start;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid #ead9a8;
+  border: 1px solid #8bcfb0;
   border-radius: 8px;
-  background: #fffaf0;
-  color: #795f20;
+  background: #c6efdf;
+  color: #175d49;
 }
 
 .monitor-announcement[hidden] { display: none; }
@@ -203,7 +203,7 @@ h1 {
   justify-content: center;
   flex: 0 0 auto;
   border-radius: 7px;
-  background: #fff0c7;
+  background: #a9dfc8;
 }
 
 .announcement-icon img { width: 16px; height: 16px; }
@@ -212,16 +212,25 @@ h1 {
 
 .announcement-label {
   margin: 0 0 3px;
-  color: #8a681b;
+  color: #0b684d;
   font-size: 13px;
   font-weight: 800;
   line-height: 1.35;
 }
 
+.announcement-title {
+  margin: 0 0 3px;
+  color: #0b684d;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .announcement-text {
   margin: 0;
   overflow-wrap: anywhere;
-  color: #6f5b2e;
+  color: #245e4d;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -537,11 +546,22 @@ h1 {
 
 .history-bar {
   display: block;
+  position: relative;
   min-width: 2px;
   flex: 1 1 0;
   height: 25px;
   border-radius: 2px 2px 1px 1px;
   background: var(--green);
+  cursor: help;
+  transform-origin: center bottom;
+  transition: transform .14s ease, filter .14s ease;
+  z-index: 0;
+}
+
+.history-bar:hover {
+  filter: brightness(.88) saturate(1.15);
+  transform: translateY(-3px) scaleX(1.55);
+  z-index: 2;
 }
 
 .history-bar.is-degraded {

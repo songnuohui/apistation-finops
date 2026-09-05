@@ -310,6 +310,7 @@ export class FinopsGroupMonitorService {
     const knownGroups = healthyGroups + degradedGroups + unavailableGroups;
     return {
       generatedAt: new Date().toISOString(),
+      announcementTitle: settings.announcementTitle || '',
       announcementText: settings.announcementText || '',
       refreshIntervalSeconds: groups.length
         ? Math.min(...groups.map((group) => Math.max(MIN_INTERVAL_SECONDS, Number(group.refreshIntervalSeconds) || DEFAULT_INTERVAL_SECONDS)))

@@ -619,6 +619,12 @@ export function normalizeMonitorSettings(input) {
       { min: 5, max: 3600 },
     ),
   };
+  if (Object.hasOwn(input, 'announcementTitle')) {
+    normalized.announcementTitle = textValue(input.announcementTitle, 'announcementTitle', {
+      required: false,
+      max: 200,
+    });
+  }
   if (Object.hasOwn(input, 'announcementText')) {
     normalized.announcementText = textValue(input.announcementText, 'announcementText', {
       required: false,

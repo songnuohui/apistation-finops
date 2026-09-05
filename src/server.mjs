@@ -1401,6 +1401,11 @@ async function readiness(){
     ['073_monitor_announcement'],
   );
   if(!monitorAnnouncementMigration.rowCount)throw new Error('required FinOps migration 073_monitor_announcement is not applied');
+  const monitorAnnouncementTitleMigration=await finopsPool.query(
+    `SELECT 1 FROM "${config.finopsSchema}".schema_migrations WHERE version=$1`,
+    ['074_monitor_announcement_title'],
+  );
+  if(!monitorAnnouncementTitleMigration.rowCount)throw new Error('required FinOps migration 074_monitor_announcement_title is not applied');
   const sync=await repository.getSyncState();
   return {
     status:'ready',

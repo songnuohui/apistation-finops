@@ -6,6 +6,7 @@ const overallStatus = document.querySelector('#overall-status');
 const overallStatusLabel = document.querySelector('#overall-status-label');
 const monitorOverview = document.querySelector('.monitor-overview');
 const announcement = document.querySelector('#monitor-announcement');
+const announcementTitle = document.querySelector('#monitor-announcement-title');
 const announcementText = document.querySelector('#monitor-announcement-text');
 const refreshCountdown = document.querySelector('#refresh-countdown');
 const rangeButtons = [...document.querySelectorAll('[data-window]')];
@@ -224,10 +225,15 @@ function renderGroups(data) {
 }
 
 function renderAnnouncement(data) {
-  const value = String(data?.announcementText || '').trim();
-  if (monitorOverview) monitorOverview.hidden = !value;
-  if (announcement) announcement.hidden = !value;
-  if (announcementText) announcementText.textContent = value;
+  const content = String(data?.announcementText || '').trim();
+  const title = String(data?.announcementTitle || '').trim();
+  if (monitorOverview) monitorOverview.hidden = !content;
+  if (announcement) announcement.hidden = !content;
+  if (announcementTitle) {
+    announcementTitle.hidden = !title;
+    announcementTitle.textContent = title;
+  }
+  if (announcementText) announcementText.textContent = content;
 }
 
 function selectWindow(value) {

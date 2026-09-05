@@ -16,7 +16,8 @@ const savingAnnouncement = ref(false);
 const deleting = ref<number | null>(null);
 const running = ref<number | null>(null);
 const editor = ref<AnyRecord | null>(null);
-const monitorSettings = ref<AnyRecord>({ refreshIntervalSeconds: 60, announcementText: '' });
+const monitorSettings = ref<AnyRecord>({ refreshIntervalSeconds: 60, announcementTitle: '', announcementText: '' });
+const announcementTitle = ref('');
 const announcementText = ref('');
 const candidatePlatform = ref('');
 const candidateSearch = ref('');
@@ -163,7 +164,8 @@ async function load() {
     ]);
     groups.value = Array.isArray(nextGroups) ? nextGroups : [];
     candidates.value = Array.isArray(nextCandidates) ? nextCandidates : [];
-    monitorSettings.value = nextSettings || { refreshIntervalSeconds: 60, announcementText: '' };
+    monitorSettings.value = nextSettings || { refreshIntervalSeconds: 60, announcementTitle: '', announcementText: '' };
+    announcementTitle.value = String(monitorSettings.value.announcementTitle || '');
     announcementText.value = String(monitorSettings.value.announcementText || '');
   } catch (error: any) {
     emit('toast', error.message);
@@ -177,9 +179,11 @@ async function saveAnnouncement() {
   try {
     const saved = await send('/monitor-settings', 'PATCH', {
       refreshIntervalSeconds: Number(monitorSettings.value.refreshIntervalSeconds || 60),
+      announcementTitle: announcementTitle.value,
       announcementText: announcementText.value,
     });
     monitorSettings.value = saved || monitorSettings.value;
+    announcementTitle.value = String(monitorSettings.value.announcementTitle || '');
     announcementText.value = String(monitorSettings.value.announcementText || '');
     emit('toast', announcementText.value ? '运行公告已保存' : '运行公告已清空');
   } catch (error: any) {
@@ -284,6 +288,10 @@ onMounted(load);
         <div><h2>运行公告</h2><p>显示在公开监控页顶部，留空后不展示公告栏。</p></div>
         <Megaphone :size="20" class="head-icon" />
       </div>
+      <label class="monitor-announcement-field">
+        <span>公告标题</span>
+        <input v-model="announcementTitle" maxlength="200" placeholder="例如：部分分组正在进行例行维护" />
+      </label>
       <label class="monitor-announcement-field">
         <span>公告内容</span>
         <textarea v-model="announcementText" maxlength="2000" rows="4" placeholder="例如：GPT Plus 分组正在进行例行维护，预计 10 分钟内恢复。"></textarea>

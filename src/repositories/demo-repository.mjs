@@ -305,12 +305,14 @@ export class DemoRepository {
   async getMonitorSettings() {
     return {
       refreshIntervalSeconds: this.monitorRefreshIntervalSeconds || 30,
+      announcementTitle: this.monitorAnnouncementTitle || '',
       announcementText: this.monitorAnnouncementText || '',
     };
   }
 
   async updateMonitorSettings(input) {
     this.monitorRefreshIntervalSeconds = input.refreshIntervalSeconds;
+    if (input.announcementTitle !== undefined) this.monitorAnnouncementTitle = input.announcementTitle;
     if (input.announcementText !== undefined) this.monitorAnnouncementText = input.announcementText;
     return this.getMonitorSettings();
   }
@@ -453,6 +455,7 @@ export class DemoRepository {
     return {
       generatedAt: new Date().toISOString(),
       refreshIntervalSeconds: settings.refreshIntervalSeconds,
+      announcementTitle: settings.announcementTitle,
       announcementText: settings.announcementText,
       summary: {
         overallStatus,
