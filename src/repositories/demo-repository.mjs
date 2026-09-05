@@ -303,11 +303,15 @@ export class DemoRepository {
   }
 
   async getMonitorSettings() {
-    return { refreshIntervalSeconds: this.monitorRefreshIntervalSeconds || 30 };
+    return {
+      refreshIntervalSeconds: this.monitorRefreshIntervalSeconds || 30,
+      announcementText: this.monitorAnnouncementText || '',
+    };
   }
 
   async updateMonitorSettings(input) {
     this.monitorRefreshIntervalSeconds = input.refreshIntervalSeconds;
+    if (input.announcementText !== undefined) this.monitorAnnouncementText = input.announcementText;
     return this.getMonitorSettings();
   }
 
@@ -434,6 +438,7 @@ export class DemoRepository {
     const groups = this.monitorGroups
       .filter((group) => group.enabled)
       .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
+    const settings = await this.getMonitorSettings();
     const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
     const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
     const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
@@ -447,7 +452,8 @@ export class DemoRepository {
           : 'healthy';
     return {
       generatedAt: new Date().toISOString(),
-      refreshIntervalSeconds: (await this.getMonitorSettings()).refreshIntervalSeconds,
+      refreshIntervalSeconds: settings.refreshIntervalSeconds,
+      announcementText: settings.announcementText,
       summary: {
         overallStatus,
         totalGroups: groups.length,

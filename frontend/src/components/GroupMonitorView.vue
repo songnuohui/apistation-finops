@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Activity, CircleDot, Cloud, Edit3, ExternalLink, Play, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, X } from 'lucide-vue-next';
+import { Activity, CircleDot, Cloud, Edit3, ExternalLink, Megaphone, Play, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, X } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -12,9 +12,12 @@ const groups = ref<AnyRecord[]>([]);
 const candidates = ref<AnyRecord[]>([]);
 const loading = ref(false);
 const saving = ref(false);
+const savingAnnouncement = ref(false);
 const deleting = ref<number | null>(null);
 const running = ref<number | null>(null);
 const editor = ref<AnyRecord | null>(null);
+const monitorSettings = ref<AnyRecord>({ refreshIntervalSeconds: 60, announcementText: '' });
+const announcementText = ref('');
 const candidatePlatform = ref('');
 const candidateSearch = ref('');
 const providerOptions = [
@@ -153,16 +156,36 @@ function apiModeButtonClass(mode: string) {
 async function load() {
   loading.value = true;
   try {
-    const [nextGroups, nextCandidates] = await Promise.all([
+    const [nextGroups, nextCandidates, nextSettings] = await Promise.all([
       get<AnyRecord[]>('/monitor-groups'),
       get<AnyRecord[]>('/monitor-group-candidates'),
+      get<AnyRecord>('/monitor-settings'),
     ]);
     groups.value = Array.isArray(nextGroups) ? nextGroups : [];
     candidates.value = Array.isArray(nextCandidates) ? nextCandidates : [];
+    monitorSettings.value = nextSettings || { refreshIntervalSeconds: 60, announcementText: '' };
+    announcementText.value = String(monitorSettings.value.announcementText || '');
   } catch (error: any) {
     emit('toast', error.message);
   } finally {
     loading.value = false;
+  }
+}
+
+async function saveAnnouncement() {
+  savingAnnouncement.value = true;
+  try {
+    const saved = await send('/monitor-settings', 'PATCH', {
+      refreshIntervalSeconds: Number(monitorSettings.value.refreshIntervalSeconds || 60),
+      announcementText: announcementText.value,
+    });
+    monitorSettings.value = saved || monitorSettings.value;
+    announcementText.value = String(monitorSettings.value.announcementText || '');
+    emit('toast', announcementText.value ? '运行公告已保存' : '运行公告已清空');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    savingAnnouncement.value = false;
   }
 }
 
@@ -255,6 +278,26 @@ onMounted(load);
       <div class="metric-card"><span>已配置分组</span><strong>{{ groups.length }}</strong><small>仅保留仍处于启用状态的 Sub2API 分组</small></div>
       <div class="metric-card good"><span>当前启用</span><strong>{{ enabledCount }}</strong><small>会出现在公开监控页</small></div>
     </div>
+
+    <section class="panel monitor-announcement-panel">
+      <div class="panel-head">
+        <div><h2>运行公告</h2><p>显示在公开监控页顶部，留空后不展示公告栏。</p></div>
+        <Megaphone :size="20" class="head-icon" />
+      </div>
+      <label class="monitor-announcement-field">
+        <span>公告内容</span>
+        <textarea v-model="announcementText" maxlength="2000" rows="4" placeholder="例如：GPT Plus 分组正在进行例行维护，预计 10 分钟内恢复。"></textarea>
+        <small>支持换行，公开页面按纯文本展示。</small>
+      </label>
+      <div class="monitor-announcement-footer">
+        <span>{{ announcementText.length }}/2000</span>
+        <button class="primary-button" type="button" :disabled="savingAnnouncement" @click="saveAnnouncement">
+          <RefreshCw v-if="savingAnnouncement" :size="15" class="spin" />
+          <Save v-else :size="15" />
+          保存公告
+        </button>
+      </div>
+    </section>
 
     <section class="panel table-panel">
       <div class="panel-head">
@@ -370,6 +413,11 @@ onMounted(load);
 .group-monitor-table{min-width:1180px!important}
 .group-monitor-table td small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
 .group-current-multiplier{color:var(--primary-dark)}
+.monitor-announcement-field{display:grid;gap:7px;color:#53677f;font-size:11px}
+.monitor-announcement-field textarea{width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:7px;resize:vertical;background:#fbfdff;color:var(--ink);font:inherit;line-height:1.6}
+.monitor-announcement-field textarea:focus{border-color:#8eb5ea;background:#fff;box-shadow:0 0 0 3px rgba(49,119,219,.1);outline:0}
+.monitor-announcement-field small{color:var(--muted);font-size:11px}
+.monitor-announcement-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;color:var(--muted);font-size:11px}
 .monitor-source-label{display:inline-flex;padding:4px 8px;border-radius:999px;color:#63758b;background:#eef3f8;font-size:11px}
 .monitor-source-label.custom{color:#1658ae;background:#eaf2ff}
 .group-monitor-editor-modal{width:min(920px,100%)}
@@ -395,6 +443,8 @@ onMounted(load);
   .group-monitor-actions{width:100%}
   .group-monitor-actions .primary-button{flex:1}
   .group-monitor-metrics{grid-template-columns:1fr}
+  .monitor-announcement-footer{align-items:stretch;flex-direction:column}
+  .monitor-announcement-footer .primary-button{width:100%}
   .candidate-filterbar{grid-template-columns:1fr}
   .provider-picker,.api-mode-picker{grid-template-columns:repeat(2,minmax(0,1fr))}
 }

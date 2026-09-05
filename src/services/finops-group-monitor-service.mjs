@@ -303,12 +303,14 @@ export class FinopsGroupMonitorService {
         historyStartedAt: group.historyStartedAt,
         history: group.history,
       }));
+    const settings = await this.repository.getMonitorSettings();
     const healthyGroups = groups.filter((group) => group.status === 'healthy').length;
     const degradedGroups = groups.filter((group) => group.status === 'degraded').length;
     const unavailableGroups = groups.filter((group) => group.status === 'unavailable').length;
     const knownGroups = healthyGroups + degradedGroups + unavailableGroups;
     return {
       generatedAt: new Date().toISOString(),
+      announcementText: settings.announcementText || '',
       refreshIntervalSeconds: groups.length
         ? Math.min(...groups.map((group) => Math.max(MIN_INTERVAL_SECONDS, Number(group.refreshIntervalSeconds) || DEFAULT_INTERVAL_SECONDS)))
         : DEFAULT_INTERVAL_SECONDS,

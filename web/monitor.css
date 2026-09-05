@@ -178,9 +178,55 @@ h1 {
 .monitor-overview {
   display: flex;
   align-items: flex-end;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 24px;
   padding: 28px 2px 25px;
+}
+
+.monitor-announcement {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #ead9a8;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: #795f20;
+}
+
+.monitor-announcement[hidden] { display: none; }
+
+.announcement-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  background: #fff0c7;
+}
+
+.announcement-icon img { width: 16px; height: 16px; }
+
+.announcement-copy { min-width: 0; }
+
+.announcement-label {
+  margin: 0 0 4px;
+  color: #8a681b;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.announcement-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #6f5b2e;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
 }
 
 .overview-label,
@@ -210,6 +256,7 @@ h1 {
 .overview-controls {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 14px;
 }
 

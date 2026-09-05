@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>ApiStation 服务状态</title>
-  <link rel="stylesheet" href="/monitor.css?v=0.5.1">
+  <link rel="stylesheet" href="/monitor.css?v=0.5.2">
 </head>
 <body>
   <main class="monitor-shell">
@@ -31,6 +31,15 @@
     </header>
 
     <section class="monitor-overview" aria-live="polite">
+      <aside class="monitor-announcement" id="monitor-announcement" hidden>
+        <div class="announcement-icon" aria-hidden="true">
+          <img src="/icons/triangle-alert.svg" alt="">
+        </div>
+        <div class="announcement-copy">
+          <p class="announcement-label">运行公告</p>
+          <p class="announcement-text" id="monitor-announcement-text"></p>
+        </div>
+      </aside>
       <div class="overview-controls">
         <div class="range-switch" aria-label="可用率统计范围">
           <button class="active" type="button" data-window="7d" aria-pressed="true">7 天</button>
@@ -57,6 +66,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="/monitor.js?v=0.5.2"></script>
+  <script type="module" src="/monitor.js?v=0.5.3"></script>
 </body>
 </html>

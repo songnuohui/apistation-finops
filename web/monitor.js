@@ -4,6 +4,8 @@ const groupCount = document.querySelector('#group-count');
 const statusSummary = document.querySelector('#status-summary');
 const overallStatus = document.querySelector('#overall-status');
 const overallStatusLabel = document.querySelector('#overall-status-label');
+const announcement = document.querySelector('#monitor-announcement');
+const announcementText = document.querySelector('#monitor-announcement-text');
 const refreshCountdown = document.querySelector('#refresh-countdown');
 const rangeButtons = [...document.querySelectorAll('[data-window]')];
 
@@ -213,10 +215,17 @@ function renderSummary(data, groups) {
 
 function renderGroups(data) {
   const groups = Array.isArray(data?.groups) ? data.groups : [];
+  renderAnnouncement(data || {});
   renderSummary(data || {}, groups);
   grid.innerHTML = groups.length
     ? groups.map(card).join('')
     : '<div class="empty-monitor">暂无已启用的监控分组</div>';
+}
+
+function renderAnnouncement(data) {
+  const value = String(data?.announcementText || '').trim();
+  if (announcement) announcement.hidden = !value;
+  if (announcementText) announcementText.textContent = value;
 }
 
 function selectWindow(value) {
@@ -241,6 +250,7 @@ async function load() {
     setRefreshInterval(data.refreshIntervalSeconds);
     renderGroups(data);
   } catch (error) {
+    renderAnnouncement({});
     overallStatus.className = 'overall-status is-unavailable';
     overallStatusLabel.textContent = 'OFFLINE';
     groupCount.textContent = '监控分组';

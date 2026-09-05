@@ -612,13 +612,20 @@ export function normalizeMonitorGroup(input) {
 }
 
 export function normalizeMonitorSettings(input) {
-  return {
+  const normalized = {
     refreshIntervalSeconds: integerValue(
       input.refreshIntervalSeconds,
       'refreshIntervalSeconds',
       { min: 5, max: 3600 },
     ),
   };
+  if (Object.hasOwn(input, 'announcementText')) {
+    normalized.announcementText = textValue(input.announcementText, 'announcementText', {
+      required: false,
+      max: 2000,
+    });
+  }
+  return normalized;
 }
 
 export function normalizeCashTransaction(input) {
