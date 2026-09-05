@@ -184,44 +184,44 @@ h1 {
 .monitor-announcement {
   width: 100%;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid #8bcfb0;
+  align-items: center;
+  gap: 14px;
+  padding: 17px 20px;
+  border: 1px solid #a9ddc5;
   border-radius: 8px;
-  background: #c6efdf;
-  color: #175d49;
+  background: var(--green-soft);
+  color: #315f52;
 }
 
 .monitor-announcement[hidden] { display: none; }
 
 .announcement-icon {
-  width: 28px;
-  height: 28px;
+  width: 40px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  border-radius: 7px;
-  background: #a9dfc8;
+  border-radius: 50%;
+  background: #c1ecd7;
 }
 
-.announcement-icon img { width: 16px; height: 16px; }
+.announcement-icon img { width: 18px; height: 18px; }
 
 .announcement-copy { min-width: 0; }
 
 .announcement-label {
-  margin: 0 0 3px;
-  color: #0b684d;
-  font-size: 13px;
-  font-weight: 800;
+  margin: 0 0 2px;
+  color: #5f8177;
+  font-size: 12px;
+  font-weight: 700;
   line-height: 1.35;
 }
 
 .announcement-title {
-  margin: 0 0 3px;
-  color: #0b684d;
-  font-size: 16px;
+  margin: 0 0 2px;
+  color: #17374e;
+  font-size: 17px;
   font-weight: 800;
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -230,7 +230,7 @@ h1 {
 .announcement-text {
   margin: 0;
   overflow-wrap: anywhere;
-  color: #245e4d;
+  color: #4d6876;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
