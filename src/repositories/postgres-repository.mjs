@@ -2795,7 +2795,7 @@ export class PostgresRepository {
         WHERE source_group_id=$1 AND status='active'
         FOR SHARE`, [input.sourceGroupId]);
       if (!source.rowCount) throw httpError('source group is unavailable or deleted', 409);
-      const probeChanged = before.source_group_id !== input.sourceGroupId
+      const probeChanged = Number(before.source_group_id) !== Number(input.sourceGroupId)
         || before.provider !== input.provider
         || before.api_mode !== input.apiMode
         || before.endpoint !== input.endpoint
