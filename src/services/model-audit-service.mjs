@@ -370,11 +370,15 @@ export class ModelAuditService {
         );
         await this.repository.finishNotification(claimed.id, 'sent');
       } catch (error) {
-        await this.repository.finishNotification(
-          claimed.id,
-          'failed',
-          error?.message || error,
-        );
+        try {
+          await this.repository.finishNotification(
+            claimed.id,
+            'failed',
+            error?.message || error,
+          );
+        } catch (finishError) {
+          this.logger.error('[model audit email status]', finishError?.message || finishError);
+        }
         this.logger.error('[model audit email]', error?.message || error);
       }
     }
@@ -394,11 +398,15 @@ export class ModelAuditService {
         );
         await this.repository.finishNotification(claimed.id, 'sent');
       } catch (error) {
-        await this.repository.finishNotification(
-          claimed.id,
-          'failed',
-          error?.message || error,
-        );
+        try {
+          await this.repository.finishNotification(
+            claimed.id,
+            'failed',
+            error?.message || error,
+          );
+        } catch (finishError) {
+          this.logger.error('[model audit email status]', finishError?.message || finishError);
+        }
         this.logger.error('[model audit email]', error?.message || error);
       }
     }

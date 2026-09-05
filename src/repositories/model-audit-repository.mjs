@@ -107,10 +107,16 @@ function notification(row) {
     status: row.status,
     errorMessage: row.error_message || '',
     sentAt: row.sent_at || null,
+    confirmedBy: row.confirmed_by || '',
+    confirmedAt: row.confirmed_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
+
+const NOTIFICATION_CONFIRMABLE_STATUSES = ['pending', 'sending', 'needs_confirmation'];
+const NOTIFICATION_RESTART_REVIEW_MESSAGE = 'FinOps 服务重启，邮件投递结果未知，请人工确认';
+const LEGACY_RESTART_REVIEW_MESSAGE = 'FinOps 服务重启，邮件待重新投递';
 
 function pageArgs({ page = 1, pageSize = 20 } = {}) {
   const normalizedPage = Math.max(1, Number(page) || 1);
@@ -704,8 +710,9 @@ export class ModelAuditRepository {
 
   async finishNotification(id, status, errorMessage = '') {
     const result = await this.pool.query(`UPDATE ${this.schema}.model_audit_notifications SET
-      status=$2,error_message=$3,sent_at=CASE WHEN $2='sent' THEN NOW() ELSE sent_at END,
-      updated_at=NOW() WHERE id=$1 RETURNING *`, [
+      status=$2::varchar,error_message=$3::text,
+      sent_at=CASE WHEN $2::varchar='sent' THEN NOW() ELSE sent_at END,
+      updated_at=NOW() WHERE id=$1 AND status='sending' RETURNING *`, [
       id,
       status,
       String(errorMessage || '').slice(0, 4000),
@@ -713,10 +720,65 @@ export class ModelAuditRepository {
     return result.rowCount ? notification(result.rows[0]) : null;
   }
 
+  async confirmNotification(id, actor = 'admin') {
+    return inTransaction(this.pool, async (client) => {
+      const existing = await client.query(
+        `SELECT * FROM ${this.schema}.model_audit_notifications WHERE id=$1 FOR UPDATE`,
+        [id],
+      );
+      if (!existing.rowCount) throw httpError('model audit notification not found', 404);
+      if (existing.rows[0].status === 'sent') return notification(existing.rows[0]);
+      if (!NOTIFICATION_CONFIRMABLE_STATUSES.includes(existing.rows[0].status)) {
+        throw httpError('该邮件记录不是待人工确认状态', 409);
+      }
+      const result = await client.query(`UPDATE ${this.schema}.model_audit_notifications SET
+        status='sent',sent_at=COALESCE(sent_at,NOW()),confirmed_by=$2::varchar,
+        confirmed_at=NOW(),error_message='',updated_at=NOW()
+        WHERE id=$1 RETURNING *`, [id, String(actor || 'admin').slice(0, 255)]);
+      return notification(result.rows[0]);
+    });
+  }
+
+  async confirmNotifications(ids, actor = 'admin') {
+    const normalizedIds = [...new Set((ids || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0))];
+    if (!normalizedIds.length) return { ok: true, updated: 0, ids: [] };
+    const result = await this.pool.query(`UPDATE ${this.schema}.model_audit_notifications SET
+      status='sent',sent_at=COALESCE(sent_at,NOW()),confirmed_by=$2::varchar,
+      confirmed_at=NOW(),error_message='',updated_at=NOW()
+      WHERE id=ANY($1::bigint[]) AND status IN ('pending','sending','needs_confirmation')
+      RETURNING id`, [normalizedIds, String(actor || 'admin').slice(0, 255)]);
+    return {
+      ok: true,
+      updated: result.rowCount,
+      ids: result.rows.map((row) => number(row.id)),
+    };
+  }
+
+  async confirmAllNotifications({ startAt = null, endAt = null } = {}, actor = 'admin') {
+    const conditions = [`status IN ('pending','sending','needs_confirmation')`];
+    const params = [String(actor || 'admin').slice(0, 255)];
+    addTimeRange(conditions, params, 'created_at', startAt, endAt);
+    const result = await this.pool.query(`UPDATE ${this.schema}.model_audit_notifications SET
+      status='sent',sent_at=COALESCE(sent_at,NOW()),confirmed_by=$1::varchar,
+      confirmed_at=NOW(),error_message='',updated_at=NOW()
+      WHERE ${conditions.join(' AND ')}
+      RETURNING id`, params);
+    return {
+      ok: true,
+      updated: result.rowCount,
+      ids: result.rows.map((row) => number(row.id)),
+    };
+  }
+
   async recoverSendingNotifications() {
     const result = await this.pool.query(`UPDATE ${this.schema}.model_audit_notifications
-      SET status='pending',error_message='FinOps 服务重启，邮件待重新投递',updated_at=NOW()
-      WHERE status='sending' RETURNING id`);
+      SET status='needs_confirmation',error_message=$1,updated_at=NOW()
+      WHERE status='sending' OR (status='pending' AND error_message=$2) RETURNING id`, [
+      NOTIFICATION_RESTART_REVIEW_MESSAGE,
+      LEGACY_RESTART_REVIEW_MESSAGE,
+    ]);
     return result.rowCount;
   }
 }
@@ -954,6 +1016,8 @@ export class DemoModelAuditRepository {
         status: 'pending',
         errorMessage: '',
         sentAt: null,
+        confirmedBy: '',
+        confirmedAt: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -1110,19 +1174,75 @@ export class DemoModelAuditRepository {
     return { ...item };
   }
   async finishNotification(id, status, errorMessage = '') {
-    const item = this.notifications.find((entry) => entry.id === Number(id));
+    const item = this.notifications.find((entry) => entry.id === Number(id) && entry.status === 'sending');
     if (!item) return null;
     item.status = status;
     item.errorMessage = errorMessage;
-    if (status === 'sent') item.sentAt = new Date().toISOString();
+    if (status === 'sent') item.sentAt = item.sentAt || new Date().toISOString();
     item.updatedAt = new Date().toISOString();
     return { ...item };
   }
+
+  async confirmNotification(id, actor = 'demo') {
+    const item = this.notifications.find((entry) => entry.id === Number(id));
+    if (!item) throw httpError('model audit notification not found', 404);
+    if (item.status === 'sent') return { ...item };
+    if (!NOTIFICATION_CONFIRMABLE_STATUSES.includes(item.status)) {
+      throw httpError('该邮件记录不是待人工确认状态', 409);
+    }
+    item.status = 'sent';
+    item.sentAt = item.sentAt || new Date().toISOString();
+    item.confirmedBy = String(actor || 'demo');
+    item.confirmedAt = new Date().toISOString();
+    item.errorMessage = '';
+    item.updatedAt = new Date().toISOString();
+    return { ...item };
+  }
+
+  async confirmNotifications(ids, actor = 'demo') {
+    const normalizedIds = [...new Set((ids || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0))];
+    const confirmed = [];
+    for (const id of normalizedIds) {
+      const item = this.notifications.find((entry) => entry.id === id);
+      if (!item || !NOTIFICATION_CONFIRMABLE_STATUSES.includes(item.status)) continue;
+      item.status = 'sent';
+      item.sentAt = item.sentAt || new Date().toISOString();
+      item.confirmedBy = String(actor || 'demo');
+      item.confirmedAt = new Date().toISOString();
+      item.errorMessage = '';
+      item.updatedAt = new Date().toISOString();
+      confirmed.push(item.id);
+    }
+    return { ok: true, updated: confirmed.length, ids: confirmed };
+  }
+
+  async confirmAllNotifications({ startAt = null, endAt = null } = {}, actor = 'demo') {
+    const confirmed = [];
+    for (const item of this.notifications) {
+      if (!NOTIFICATION_CONFIRMABLE_STATUSES.includes(item.status)
+        || !inTimeRange(item.createdAt, startAt, endAt)) continue;
+      item.status = 'sent';
+      item.sentAt = item.sentAt || new Date().toISOString();
+      item.confirmedBy = String(actor || 'demo');
+      item.confirmedAt = new Date().toISOString();
+      item.errorMessage = '';
+      item.updatedAt = new Date().toISOString();
+      confirmed.push(item.id);
+    }
+    return { ok: true, updated: confirmed.length, ids: confirmed };
+  }
+
   async recoverSendingNotifications() {
     let count = 0;
-    for (const item of this.notifications.filter((entry) => entry.status === 'sending')) {
-      item.status = 'pending';
-      item.errorMessage = 'FinOps 服务重启，邮件待重新投递';
+    for (const item of this.notifications.filter((entry) => (
+      entry.status === 'sending'
+      || (entry.status === 'pending' && entry.errorMessage === LEGACY_RESTART_REVIEW_MESSAGE)
+    ))) {
+      item.status = 'needs_confirmation';
+      item.errorMessage = NOTIFICATION_RESTART_REVIEW_MESSAGE;
+      item.updatedAt = new Date().toISOString();
       count += 1;
     }
     return count;

@@ -692,7 +692,7 @@ export function normalizeEmailCampaign(input) {
 
 export function normalizeModelAuditSettings(input = {}) {
   const enabled = booleanValue(input.enabled ?? false, 'enabled');
-  const scanIntervalMinutes = integerValue(input.scanIntervalMinutes ?? 5, 'scanIntervalMinutes', { min: 5, max: 1440 });
+  const scanIntervalMinutes = integerValue(input.scanIntervalMinutes ?? 5, 'scanIntervalMinutes', { min: 1, max: 1440 });
   const testMode = booleanValue(input.testMode ?? false, 'testMode');
   const notifyUserEmails = booleanValue(input.notifyUserEmails ?? true, 'notifyUserEmails');
   const normalizeEmails = (value, field) => {
@@ -751,6 +751,18 @@ export function normalizeModelAuditClear(input = {}) {
     search: textValue(input.search, 'search', { required: false, max: 120 }),
     ...normalizeModelAuditTimeRange(input),
   };
+}
+
+export function normalizeModelAuditNotificationId(value) {
+  return integerValue(value, 'id', { min: 1, max: Number.MAX_SAFE_INTEGER });
+}
+
+export function normalizeModelAuditNotificationIds(input = {}) {
+  return { ids: idList(input.ids, 'ids', { max: 1000 }) };
+}
+
+export function normalizeModelAuditNotificationConfirmAll(input = {}) {
+  return normalizeModelAuditTimeRange(input);
 }
 
 export function normalizeModelAuditMapping(input = {}) {

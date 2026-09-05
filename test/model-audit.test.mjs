@@ -6,9 +6,14 @@ import {
   buildModelAuditNotifications,
   classifyModelAuditEvent,
 } from '../src/services/model-audit-service.mjs';
-import { DemoModelAuditRepository } from '../src/repositories/model-audit-repository.mjs';
+import {
+  DemoModelAuditRepository,
+  ModelAuditRepository,
+} from '../src/repositories/model-audit-repository.mjs';
 import {
   normalizeModelAuditClear,
+  normalizeModelAuditNotificationIds,
+  normalizeModelAuditSettings,
   normalizeModelAuditTestRun,
   normalizeModelAuditTimeRange,
 } from '../src/http/validation.mjs';
@@ -576,6 +581,86 @@ test('model audit clear and time range validation reject incomplete or reversed 
   );
 });
 
+test('model audit accepts a one-minute interval and rejects zero', () => {
+  assert.equal(normalizeModelAuditSettings({
+    enabled: false,
+    scanIntervalMinutes: 1,
+    testMode: false,
+    notifyUserEmails: true,
+    adminEmail: '',
+  }).scanIntervalMinutes, 1);
+  assert.throws(
+    () => normalizeModelAuditSettings({ scanIntervalMinutes: 0 }),
+    /invalid scanIntervalMinutes/,
+  );
+});
+
+test('model audit notification confirmations are idempotent and record the actor', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  repository.notifications = [
+    { id: 1, status: 'sending', createdAt: '2026-09-04T00:01:00.000Z', sentAt: null, errorMessage: 'unknown' },
+    { id: 2, status: 'pending', createdAt: '2026-09-04T00:02:00.000Z', sentAt: null, errorMessage: '' },
+    { id: 3, status: 'needs_confirmation', createdAt: '2026-09-04T00:03:00.000Z', sentAt: null, errorMessage: 'unknown' },
+    { id: 4, status: 'sent', createdAt: '2026-09-04T00:04:00.000Z', sentAt: '2026-09-04T00:04:01.000Z', confirmedBy: '', confirmedAt: null },
+    { id: 5, status: 'failed', createdAt: '2026-09-04T00:05:00.000Z', sentAt: null, errorMessage: 'smtp failed' },
+  ];
+
+  const first = await repository.confirmNotification(1, 'admin@example.com');
+  const repeated = await repository.confirmNotification(1, 'other@example.com');
+  assert.equal(first.status, 'sent');
+  assert.equal(first.confirmedBy, 'admin@example.com');
+  assert.ok(first.confirmedAt);
+  assert.equal(repeated.confirmedBy, 'admin@example.com');
+
+  const batch = await repository.confirmNotifications([2, 4, 5], 'admin@example.com');
+  assert.equal(batch.updated, 1);
+  assert.deepEqual(batch.ids, [2]);
+  assert.equal(repository.notifications.find((item) => item.id === 4).status, 'sent');
+  assert.equal(repository.notifications.find((item) => item.id === 5).status, 'failed');
+});
+
+test('model audit confirm-all only confirms pending delivery states in the requested time range', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  repository.notifications = [
+    { id: 1, status: 'pending', createdAt: '2026-09-04T00:01:00.000Z' },
+    { id: 2, status: 'needs_confirmation', createdAt: '2026-09-04T00:05:00.000Z' },
+    { id: 3, status: 'sending', createdAt: '2026-09-04T00:09:00.000Z' },
+    { id: 4, status: 'sent', createdAt: '2026-09-04T00:05:00.000Z' },
+  ];
+
+  const result = await repository.confirmAllNotifications({
+    startAt: '2026-09-04T00:00:00.000Z',
+    endAt: '2026-09-04T00:06:00.000Z',
+  }, 'admin@example.com');
+
+  assert.equal(result.updated, 2);
+  assert.deepEqual(result.ids, [1, 2]);
+  assert.equal(repository.notifications.find((item) => item.id === 3).status, 'sending');
+  assert.equal(repository.notifications.find((item) => item.id === 4).status, 'sent');
+});
+
+test('model audit recovery marks uncertain delivery for manual confirmation and never queues it again', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  repository.notifications = [
+    { id: 1, status: 'sending', errorMessage: '', createdAt: '2026-09-04T00:01:00.000Z' },
+    { id: 2, status: 'pending', errorMessage: 'FinOps 服务重启，邮件待重新投递', createdAt: '2026-09-04T00:02:00.000Z' },
+    { id: 3, status: 'pending', errorMessage: '', createdAt: '2026-09-04T00:03:00.000Z' },
+  ];
+
+  assert.equal(await repository.recoverSendingNotifications(), 2);
+  assert.equal(repository.notifications.find((item) => item.id === 1).status, 'needs_confirmation');
+  assert.equal(repository.notifications.find((item) => item.id === 2).status, 'needs_confirmation');
+  assert.deepEqual((await repository.listPendingNotifications()).map((item) => item.id), [3]);
+});
+
+test('model audit notification id validation requires positive safe integer ids', () => {
+  assert.deepEqual(normalizeModelAuditNotificationIds({ ids: [1, '2', 2] }), { ids: [1, 2] });
+  assert.throws(
+    () => normalizeModelAuditNotificationIds({ ids: [] }),
+    /invalid ids/,
+  );
+});
+
 test('model audit clearing refuses active scans and in-flight email delivery', async () => {
   const repository = new DemoModelAuditRepository({ users: [] });
   repository.runs.push({ id: 1, status: 'running', periodStart: '2026-09-04T00:00:00.000Z' });
@@ -589,4 +674,30 @@ test('model audit clearing refuses active scans and in-flight email delivery', a
     () => repository.clearAuditData({ scope: 'notifications' }),
     /邮件正在发送/,
   );
+});
+
+test('model audit notification completion pins PostgreSQL parameter types', async () => {
+  const queries = [];
+  const pool = {
+    async query(text, params) {
+      queries.push({ text, params });
+      return {
+        rowCount: 1,
+        rows: [{
+          id: 1,
+          status: 'sent',
+          error_message: '',
+          sent_at: '2026-09-04T00:00:00.000Z',
+        }],
+      };
+    },
+  };
+  const repository = new ModelAuditRepository(pool, { finopsSchema: 'finops' });
+  const result = await repository.finishNotification(1, 'sent');
+
+  assert.equal(result.status, 'sent');
+  assert.match(queries[0].text, /status=\$2::varchar/);
+  assert.match(queries[0].text, /error_message=\$3::text/);
+  assert.match(queries[0].text, /CASE WHEN \$2::varchar='sent'/);
+  assert.match(queries[0].text, /WHERE id=\$1 AND status='sending'/);
 });

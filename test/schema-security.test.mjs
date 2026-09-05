@@ -397,6 +397,7 @@ test('model audit migration and grants remain FinOps-owned and source-read-only'
   const migration = read('migrations/069_model_audit.sql');
   const testRunsMigration = read('migrations/070_model_audit_test_runs.sql');
   const userNotificationsMigration = read('migrations/071_model_audit_user_notifications.sql');
+  const notificationConfirmationMigration = read('migrations/072_model_audit_notification_confirmation.sql');
   const grants = read('deploy/postgres-grants.sql');
   assert.match(migration, /model_audit_settings/);
   assert.match(migration, /model_audit_mappings/);
@@ -415,4 +416,10 @@ test('model audit migration and grants remain FinOps-owned and source-read-only'
   assert.match(userNotificationsMigration, /notify_user_emails/);
   assert.doesNotMatch(userNotificationsMigration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.doesNotMatch(userNotificationsMigration, /\bredis\b/i);
+  assert.match(notificationConfirmationMigration, /confirmed_by/);
+  assert.match(notificationConfirmationMigration, /confirmed_at/);
+  assert.match(notificationConfirmationMigration, /needs_confirmation/);
+  assert.match(notificationConfirmationMigration, /BETWEEN 1 AND 1440/);
+  assert.doesNotMatch(notificationConfirmationMigration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(notificationConfirmationMigration, /\bredis\b/i);
 });

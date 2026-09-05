@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Edit3, Filter, Play, Plus, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-vue-next';
+import { Check, CheckSquare, Edit3, Filter, Play, Plus, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-vue-next';
 import { get, query, send } from '../api';
 import PaginationBar from './PaginationBar.vue';
 
@@ -37,7 +37,9 @@ const filterEnd = ref('');
 const appliedStartAt = ref('');
 const appliedEndAt = ref('');
 const selectedNotification = ref<AnyRecord | null>(null);
+const selectedNotificationIds = ref(new Set<number>());
 const mappingEditor = ref<AnyRecord | null>(null);
+const confirmingNotifications = ref(false);
 
 const form = ref({
   enabled: false,
@@ -64,6 +66,7 @@ const statusLabels: Record<string, string> = {
   failed: '失败',
   pending: '待发送',
   sending: '发送中',
+  needs_confirmation: '待人工确认',
   sent: '已发送',
 };
 const kindLabels: Record<string, string> = { user: '用户邮件', admin: '管理员汇总', test: '测试邮件' };
@@ -92,6 +95,17 @@ function statusClass(value: any) {
     : ['failed'].includes(String(value)) ? 'danger' : 'warning';
 }
 
+function canConfirmNotification(item: AnyRecord) {
+  return ['pending', 'sending', 'needs_confirmation'].includes(String(item.status));
+}
+
+const selectableNotificationItems = computed(() => notifications.value.items.filter(canConfirmNotification));
+const selectedNotificationCount = computed(() => selectedNotificationIds.value.size);
+const allNotificationPageSelected = computed(() => (
+  selectableNotificationItems.value.length > 0
+  && selectableNotificationItems.value.every((item) => selectedNotificationIds.value.has(Number(item.id)))
+));
+
 function parseEmails(value: string) {
   return [...new Set(value.split(/[,\n]/).map((item) => item.trim().toLowerCase()).filter(Boolean))];
 }
@@ -116,6 +130,7 @@ function resetAuditPages() {
   eventPage.value = 1;
   runPage.value = 1;
   notificationPage.value = 1;
+  selectedNotificationIds.value = new Set();
 }
 
 async function loadSettings() {
@@ -240,6 +255,75 @@ async function clearCurrentAuditList() {
     emit('toast', error.message);
   } finally {
     clearing.value = false;
+  }
+}
+
+function toggleNotificationSelection(id: number, checked: boolean) {
+  const next = new Set(selectedNotificationIds.value);
+  if (checked) next.add(Number(id));
+  else next.delete(Number(id));
+  selectedNotificationIds.value = next;
+}
+
+function toggleNotificationPageSelection(checked: boolean) {
+  const next = new Set(selectedNotificationIds.value);
+  selectableNotificationItems.value.forEach((item) => {
+    if (checked) next.add(Number(item.id));
+    else next.delete(Number(item.id));
+  });
+  selectedNotificationIds.value = next;
+}
+
+async function confirmNotification(item: AnyRecord) {
+  confirmingNotifications.value = true;
+  try {
+    await send(`/model-audit/notifications/${item.id}/confirm`, 'POST', {});
+    selectedNotificationIds.value.delete(Number(item.id));
+    selectedNotificationIds.value = new Set(selectedNotificationIds.value);
+    await loadNotifications();
+    emit('toast', '邮件记录已确认发送');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    confirmingNotifications.value = false;
+  }
+}
+
+async function confirmSelectedNotifications() {
+  if (!selectedNotificationIds.value.size) return;
+  confirmingNotifications.value = true;
+  try {
+    const result = await send('/model-audit/notifications/confirm', 'POST', {
+      ids: [...selectedNotificationIds.value],
+    });
+    selectedNotificationIds.value = new Set();
+    await loadNotifications();
+    emit('toast', `已确认 ${result.updated || 0} 条邮件记录`);
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    confirmingNotifications.value = false;
+  }
+}
+
+async function confirmAllNotifications() {
+  const rangeText = appliedStartAt.value && appliedEndAt.value
+    ? `时间范围 ${dateTime(appliedStartAt.value)} 至 ${dateTime(appliedEndAt.value)} 内`
+    : '全部时间范围内';
+  if (!window.confirm(`确定将${rangeText}所有待确认邮件标记为已发送吗？不会重新发送邮件。`)) return;
+  confirmingNotifications.value = true;
+  try {
+    const result = await send('/model-audit/notifications/confirm-all', 'POST', {
+      startAt: appliedStartAt.value || null,
+      endAt: appliedEndAt.value || null,
+    });
+    selectedNotificationIds.value = new Set();
+    await loadNotifications();
+    emit('toast', `已确认 ${result.updated || 0} 条邮件记录`);
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    confirmingNotifications.value = false;
   }
 }
 
@@ -411,7 +495,7 @@ const currentMismatchCount = computed(() => events.value.total || 0);
 
     <div class="metric-grid model-audit-metrics">
       <div class="metric-card" :class="{ good: settings.enabled }"><span>审计开关</span><strong>{{ settings.enabled ? '已启用' : '已停用' }}</strong><small>重新启用从当前时间前 5 分钟开始</small></div>
-      <div class="metric-card"><span>扫描间隔</span><strong>{{ settings.scanIntervalMinutes || 5 }} 分钟</strong><small>最低 5 分钟，窗口严格连续不重叠</small></div>
+      <div class="metric-card"><span>扫描间隔</span><strong>{{ settings.scanIntervalMinutes || 5 }} 分钟</strong><small>最低 1 分钟，窗口严格连续不重叠</small></div>
       <div class="metric-card bad"><span>当前不一致记录</span><strong>{{ currentMismatchCount }}</strong><small>仅保存模型不一致项</small></div>
       <div class="metric-card"><span>上次正式扫描</span><strong>{{ dateTime(settings.lastScanCompletedAt) }}</strong><small>{{ statusLabels[settings.lastScanStatus] || settings.lastScanStatus || '未扫描' }}</small></div>
     </div>
@@ -428,7 +512,7 @@ const currentMismatchCount = computed(() => events.value.total || 0);
         <label class="toggle-field"><input v-model="form.enabled" type="checkbox" /><span><strong>启用模型一致性审计</strong><small>后台按配置间隔自动执行扫描。</small></span></label>
         <label class="toggle-field"><input v-model="form.testMode" type="checkbox" /><span><strong>测试模式</strong><small>正式扫描只对指定用户生成测试告警，并发送到测试收件邮箱。</small></span></label>
         <label class="toggle-field"><input v-model="form.notifyUserEmails" type="checkbox" /><span><strong>通知对应用户邮箱</strong><small>开启后向发生模型不一致的用户发送邮件；关闭后只通知管理员。</small></span></label>
-        <label>扫描间隔（分钟）<input v-model.number="form.scanIntervalMinutes" type="number" min="5" max="1440" step="1" /></label>
+        <label>扫描间隔（分钟）<input v-model.number="form.scanIntervalMinutes" type="number" min="1" max="1440" step="1" /></label>
         <label>管理员汇总邮箱<input v-model="form.adminEmail" type="email" placeholder="admin@example.com" /></label>
         <label v-if="form.testMode" class="wide-field">测试用户邮箱（每行一个）<textarea v-model="form.testUserEmails" rows="3" placeholder="只扫描这些用户的记录"></textarea></label>
         <label v-if="form.testMode">测试收件邮箱<input v-model="form.testRecipientEmail" type="email" placeholder="test@example.com" /></label>
@@ -474,6 +558,11 @@ const currentMismatchCount = computed(() => events.value.total || 0);
       </div>
       <div class="model-audit-tab-toolbar">
         <div class="compact-tabs model-audit-tabs"><button :class="{ active: activeAuditTab === 'events' }" type="button" @click="activeAuditTab = 'events'">不一致记录 <small>{{ events.total }}</small></button><button :class="{ active: activeAuditTab === 'runs' }" type="button" @click="activeAuditTab = 'runs'">扫描窗口 <small>{{ runs.total }}</small></button><button :class="{ active: activeAuditTab === 'notifications' }" type="button" @click="activeAuditTab = 'notifications'">邮件记录 <small>{{ notifications.total }}</small></button></div>
+        <div v-if="activeAuditTab === 'notifications'" class="model-audit-notification-actions">
+          <span class="selection-text">已选择 {{ selectedNotificationCount }} 条</span>
+          <button class="secondary-button" type="button" :disabled="confirmingNotifications || !selectedNotificationCount" @click="confirmSelectedNotifications"><Check :size="15" />确认已发送</button>
+          <button class="secondary-button" type="button" :disabled="confirmingNotifications || !notifications.total" @click="confirmAllNotifications"><CheckSquare :size="15" />一键确认所有</button>
+        </div>
         <button class="secondary-button danger-action" type="button" :disabled="clearing || !activeAuditTotal" @click="clearCurrentAuditList"><RefreshCw v-if="clearing" :size="15" class="spin" /><Trash2 v-else :size="15" />清空当前列表</button>
       </div>
 
@@ -483,11 +572,11 @@ const currentMismatchCount = computed(() => events.value.total || 0);
       <div v-if="activeAuditTab === 'runs'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>扫描类型</th><th>扫描窗口</th><th>状态</th><th>读取</th><th>一致</th><th>合法映射</th><th>异常</th><th>字段缺失</th><th>邮件</th></tr></thead><tbody><tr v-for="item in runs.items" :key="item.id"><td><span class="status-pill" :class="item.runType === 'test' ? 'warning' : 'success'">{{ item.runType === 'test' ? '测试' : '正式' }}</span></td><td>{{ dateTime(item.periodStart) }}<small>至 {{ dateTime(item.periodEnd) }}</small></td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td>{{ item.scannedCount }}</td><td>{{ item.matchedCount }}</td><td>{{ item.allowedMappingCount }}</td><td>{{ item.mismatchCount }}</td><td>{{ item.unknownCount }}</td><td>{{ item.notificationCount }}</td></tr><tr v-if="!loading && !runs.items.length"><td colspan="9" class="table-empty">暂无扫描窗口</td></tr></tbody></table></div>
       <PaginationBar v-if="runs.total" v-show="activeAuditTab === 'runs'" :page="runPage" :page-size="runPageSize" :total="runs.total" @update:page="changeRunsPage" @update:page-size="changeRunsPageSize" />
 
-      <div v-if="activeAuditTab === 'notifications'" class="table-wrap"><table class="model-audit-table"><thead><tr><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>记录数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in notifications.items" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ kindLabels[item.kind] || item.kind }}</td><td>{{ item.recipientEmail || '--' }}</td><td>{{ item.subject }}</td><td>{{ item.eventCount }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td><button class="small-button" type="button" @click="selectedNotification = item">查看正文</button></td></tr><tr v-if="!loading && !notifications.items.length"><td colspan="7" class="table-empty">暂无邮件记录</td></tr></tbody></table></div>
+      <div v-if="activeAuditTab === 'notifications'" class="table-wrap"><table class="model-audit-table model-audit-notification-table"><thead><tr><th><input type="checkbox" title="选择当前页待确认邮件" :checked="allNotificationPageSelected" :disabled="!selectableNotificationItems.length" @change="toggleNotificationPageSelection(($event.target as HTMLInputElement).checked)" /></th><th>时间</th><th>类型</th><th>收件人</th><th>主题</th><th>记录数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in notifications.items" :key="item.id"><td><input type="checkbox" :checked="selectedNotificationIds.has(Number(item.id))" :disabled="!canConfirmNotification(item) || confirmingNotifications" @change="toggleNotificationSelection(Number(item.id), ($event.target as HTMLInputElement).checked)" /></td><td>{{ dateTime(item.createdAt) }}</td><td>{{ kindLabels[item.kind] || item.kind }}</td><td>{{ item.recipientEmail || '--' }}</td><td>{{ item.subject }}</td><td>{{ item.eventCount }}</td><td><span class="status-pill" :class="statusClass(item.status)">{{ statusLabels[item.status] || item.status }}</span><small v-if="item.confirmedBy">人工确认：{{ item.confirmedBy }} · {{ dateTime(item.confirmedAt) }}</small><small v-if="item.errorMessage" class="error-text">{{ item.errorMessage }}</small></td><td><div class="row-actions"><button v-if="canConfirmNotification(item)" class="small-button" type="button" :disabled="confirmingNotifications" @click="confirmNotification(item)"><Check :size="14" />确认已发送</button><button class="small-button" type="button" @click="selectedNotification = item">查看正文</button></div></td></tr><tr v-if="!loading && !notifications.items.length"><td colspan="8" class="table-empty">暂无邮件记录</td></tr></tbody></table></div>
       <PaginationBar v-if="notifications.total" v-show="activeAuditTab === 'notifications'" :page="notificationPage" :page-size="notificationPageSize" :total="notifications.total" @update:page="changeNotificationsPage" @update:page-size="changeNotificationsPageSize" />
     </section>
 
     <div v-if="mappingEditor" class="modal-layer" @click.self="mappingEditor = null"><section class="modal form-modal model-audit-modal"><header><div><h2>{{ mappingEditor.id ? '编辑合法映射' : '新增合法映射' }}</h2><p>精确匹配，比较时忽略首尾空格和大小写。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="mappingEditor = null"><X :size="19" /></button></header><div class="form-grid"><label>上游发送模型<input v-model="mappingEditor.sourceModel" maxlength="200" placeholder="例如 claude-3-7-sonnet" /></label><label>允许的响应模型<input v-model="mappingEditor.allowedResponseModel" maxlength="200" placeholder="例如 claude-3-7-sonnet-20250219" /></label></div><div class="form-note">只有该上游发送模型返回这里配置的响应模型时，才会记录为“合法映射”；完全一致的模型不需要配置。</div><footer><button class="secondary-button" type="button" @click="mappingEditor = null">取消</button><button class="primary-button" type="button" :disabled="saving" @click="saveMapping"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存映射</button></footer></section></div>
-    <div v-if="selectedNotification" class="modal-layer" @click.self="selectedNotification = null"><section class="modal model-audit-notification-modal"><header><div><h2>{{ selectedNotification.subject }}</h2><p>{{ selectedNotification.recipientEmail }} · {{ dateTime(selectedNotification.createdAt) }}</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="selectedNotification = null"><X :size="19" /></button></header><div class="notification-preview"><strong>纯文本正文</strong><pre>{{ selectedNotification.textContent }}</pre><strong>HTML 正文</strong><pre>{{ selectedNotification.htmlContent }}</pre></div></section></div>
+    <div v-if="selectedNotification" class="modal-layer" @click.self="selectedNotification = null"><section class="modal model-audit-notification-modal"><header><div><h2>{{ selectedNotification.subject }}</h2><p>{{ selectedNotification.recipientEmail }} · {{ dateTime(selectedNotification.createdAt) }}</p><p v-if="selectedNotification.confirmedBy">人工确认：{{ selectedNotification.confirmedBy }} · {{ dateTime(selectedNotification.confirmedAt) }}</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="selectedNotification = null"><X :size="19" /></button></header><div class="notification-preview"><strong>纯文本正文</strong><pre>{{ selectedNotification.textContent }}</pre><strong>HTML 正文</strong><pre>{{ selectedNotification.htmlContent }}</pre></div></section></div>
   </div>
 </template>
