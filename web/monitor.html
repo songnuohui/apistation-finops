@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>ApiStation 服务状态</title>
-  <link rel="stylesheet" href="/monitor.css?v=0.5.2">
+  <link rel="stylesheet" href="/monitor.css?v=0.5.3">
 </head>
 <body>
   <main class="monitor-shell">
@@ -30,35 +30,35 @@
       </div>
     </header>
 
-    <section class="monitor-overview" aria-live="polite">
+    <section class="monitor-overview" aria-live="polite" hidden>
       <aside class="monitor-announcement" id="monitor-announcement" hidden>
         <div class="announcement-icon" aria-hidden="true">
-          <img src="/icons/triangle-alert.svg" alt="">
+          <img src="/icons/bell.svg" alt="">
         </div>
         <div class="announcement-copy">
           <p class="announcement-label">运行公告</p>
           <p class="announcement-text" id="monitor-announcement-text"></p>
         </div>
       </aside>
-      <div class="overview-controls">
-        <div class="range-switch" aria-label="可用率统计范围">
-          <button class="active" type="button" data-window="7d" aria-pressed="true">7 天</button>
-          <button type="button" data-window="15d" aria-pressed="false">15 天</button>
-          <button type="button" data-window="30d" aria-pressed="false">30 天</button>
-        </div>
-        <div class="auto-refresh">
-          <span class="pulse-dot" aria-hidden="true"></span>
-          <span>自动刷新</span>
-          <strong id="refresh-countdown">--</strong>
-        </div>
-      </div>
     </section>
 
     <section class="monitor-content">
       <div class="content-heading">
-        <div>
+        <div class="content-heading-copy">
           <h2 id="group-count">监控分组</h2>
           <span id="status-summary">正在读取监控数据</span>
+        </div>
+        <div class="overview-controls">
+          <div class="range-switch" aria-label="可用率统计范围">
+            <button class="active" type="button" data-window="7d" aria-pressed="true">7 天</button>
+            <button type="button" data-window="15d" aria-pressed="false">15 天</button>
+            <button type="button" data-window="30d" aria-pressed="false">30 天</button>
+          </div>
+          <div class="auto-refresh">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span>自动刷新</span>
+            <strong id="refresh-countdown">--</strong>
+          </div>
         </div>
       </div>
       <div class="group-grid" id="group-grid">
@@ -66,6 +66,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="/monitor.js?v=0.5.3"></script>
+  <script type="module" src="/monitor.js?v=0.5.4"></script>
 </body>
 </html>

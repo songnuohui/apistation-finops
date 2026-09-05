@@ -176,16 +176,13 @@ h1 {
 .icon-button img { width: 17px; height: 17px; }
 
 .monitor-overview {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 28px 2px 25px;
+  padding: 28px 2px 17px;
 }
 
+.monitor-overview[hidden] { display: none; }
+
 .monitor-announcement {
-  min-width: 0;
-  flex: 1 1 auto;
+  width: 100%;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -214,10 +211,11 @@ h1 {
 .announcement-copy { min-width: 0; }
 
 .announcement-label {
-  margin: 0 0 4px;
+  margin: 0 0 3px;
   color: #8a681b;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 800;
+  line-height: 1.35;
 }
 
 .announcement-text {
@@ -312,12 +310,14 @@ h1 {
 
 .content-heading {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 13px;
   padding: 0 2px;
 }
+
+.content-heading-copy { min-width: 0; }
 
 .content-heading h2 {
   display: inline;
@@ -631,8 +631,7 @@ h1 {
 
 @media (max-width: 920px) {
   .monitor-shell { width: min(100% - 34px, 680px); padding-top: 24px; }
-  .monitor-header,
-  .monitor-overview { align-items: flex-start; flex-direction: column; }
+  .monitor-header { align-items: flex-start; flex-direction: column; }
   .monitor-actions,
   .overview-controls { width: 100%; justify-content: space-between; }
   .group-grid { grid-template-columns: repeat(2, minmax(240px, 1fr)); }
@@ -641,7 +640,7 @@ h1 {
 @media (max-width: 600px) {
   .monitor-shell { width: min(100% - 22px, 420px); padding-top: 18px; }
   .monitor-header { gap: 17px; }
-  .monitor-overview { gap: 18px; padding-top: 22px; }
+  .monitor-overview { padding-top: 22px; }
   .overview-controls { align-items: flex-start; flex-direction: column; }
   .content-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
   .group-grid { grid-template-columns: 1fr; }

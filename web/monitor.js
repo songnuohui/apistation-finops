@@ -4,6 +4,7 @@ const groupCount = document.querySelector('#group-count');
 const statusSummary = document.querySelector('#status-summary');
 const overallStatus = document.querySelector('#overall-status');
 const overallStatusLabel = document.querySelector('#overall-status-label');
+const monitorOverview = document.querySelector('.monitor-overview');
 const announcement = document.querySelector('#monitor-announcement');
 const announcementText = document.querySelector('#monitor-announcement-text');
 const refreshCountdown = document.querySelector('#refresh-countdown');
@@ -224,6 +225,7 @@ function renderGroups(data) {
 
 function renderAnnouncement(data) {
   const value = String(data?.announcementText || '').trim();
+  if (monitorOverview) monitorOverview.hidden = !value;
   if (announcement) announcement.hidden = !value;
   if (announcementText) announcementText.textContent = value;
 }
