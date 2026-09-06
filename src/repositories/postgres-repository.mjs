@@ -2467,14 +2467,6 @@ export class PostgresRepository {
         group.availabilityByWindow[`${days}d`] = stats.total
           ? Number((stats.ok * 100 / stats.total).toFixed(2))
           : null;
-        if (days === 7) {
-          group.averageLatencyMs = stats.countLatency
-            ? Math.round(stats.sumLatency / stats.countLatency)
-            : group.averageLatencyMs;
-          group.averagePingLatencyMs = stats.countPing
-            ? Math.round(stats.sumPing / stats.countPing)
-            : group.averagePingLatencyMs;
-        }
       }
       group.availabilityPercent = group.availabilityByWindow['7d'];
       return group;
