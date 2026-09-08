@@ -234,7 +234,7 @@ export class ModelAuditRepository {
       ]);
       return mapping(result.rows[0]);
     } catch (error) {
-      if (error?.code === '23505') throw httpError('该实际模型已经存在映射，请直接编辑原映射', 409);
+      if (error?.code === '23505') throw httpError('该模型映射已经存在，请勿重复添加', 409);
       throw error;
     }
   }
@@ -252,7 +252,7 @@ export class ModelAuditRepository {
       if (!result.rowCount) throw httpError('model audit mapping not found', 404);
       return mapping(result.rows[0]);
     } catch (error) {
-      if (error?.code === '23505') throw httpError('该实际模型已经存在映射，请直接编辑原映射', 409);
+      if (error?.code === '23505') throw httpError('该模型映射已经存在，请勿重复添加', 409);
       throw error;
     }
   }
@@ -879,8 +879,10 @@ export class DemoModelAuditRepository {
   }
   async createMapping(input, actor = 'demo') {
     const sourceKey = String(input.sourceModel || '').trim().toLowerCase();
-    if (this.mappings.some((item) => item.sourceModel.trim().toLowerCase() === sourceKey)) {
-      throw httpError('该实际模型已经存在映射，请直接编辑原映射', 409);
+    const responseKey = String(input.allowedResponseModel || '').trim().toLowerCase();
+    if (this.mappings.some((item) => item.sourceModel.trim().toLowerCase() === sourceKey
+      && item.allowedResponseModel.trim().toLowerCase() === responseKey)) {
+      throw httpError('该模型映射已经存在，请勿重复添加', 409);
     }
     const item = { id: this.mappings.length + 1, ...input, createdBy: actor, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     this.mappings.push(item);
@@ -890,9 +892,11 @@ export class DemoModelAuditRepository {
     const item = this.mappings.find((entry) => Number(entry.id) === Number(id));
     if (!item) throw httpError('model audit mapping not found', 404);
     const sourceKey = String(input.sourceModel || '').trim().toLowerCase();
+    const responseKey = String(input.allowedResponseModel || '').trim().toLowerCase();
     if (this.mappings.some((entry) => Number(entry.id) !== Number(id)
-      && entry.sourceModel.trim().toLowerCase() === sourceKey)) {
-      throw httpError('该实际模型已经存在映射，请直接编辑原映射', 409);
+      && entry.sourceModel.trim().toLowerCase() === sourceKey
+      && entry.allowedResponseModel.trim().toLowerCase() === responseKey)) {
+      throw httpError('该模型映射已经存在，请勿重复添加', 409);
     }
     Object.assign(item, input, { updatedBy: actor, updatedAt: new Date().toISOString() });
     return { ...item };

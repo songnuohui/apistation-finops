@@ -379,7 +379,7 @@ async function saveMapping() {
 }
 
 async function deleteMapping(item: AnyRecord) {
-  if (!window.confirm(`确定删除“${item.sourceModel}”的合法映射吗？删除后只有完全相同的模型名才会被视为合法。`)) return;
+  if (!window.confirm(`确定删除“${item.sourceModel} → ${item.allowedResponseModel}”的合法映射吗？删除后这组模型组合将不再被视为合法。`)) return;
   try {
     await send(`/model-audit/mappings/${item.id}`, 'DELETE', {});
     await loadMappings();
@@ -532,7 +532,7 @@ const currentMismatchCount = computed(() => events.value.total || 0);
     </section>
 
     <section v-else-if="activeTopTab === 'mappings'" class="panel table-panel">
-      <div class="panel-head"><div><h2>全局合法映射</h2><p>默认只有上游发送模型与响应模型完全一致才合法；这里可添加精确映射。</p></div><button class="secondary-button" type="button" @click="openMapping()"><Plus :size="15" />新增映射</button></div>
+      <div class="panel-head"><div><h2>全局合法映射</h2><p>默认只有上游发送模型与响应模型完全一致才合法；同一个上游模型可以添加多个合法响应模型。</p></div><button class="secondary-button" type="button" @click="openMapping()"><Plus :size="15" />新增映射</button></div>
       <div class="table-wrap">
         <table class="model-audit-table mapping-table"><thead><tr><th>上游发送模型</th><th>允许的响应模型</th><th>更新时间</th><th>操作</th></tr></thead>
           <tbody>
@@ -576,7 +576,7 @@ const currentMismatchCount = computed(() => events.value.total || 0);
       <PaginationBar v-if="notifications.total" v-show="activeAuditTab === 'notifications'" :page="notificationPage" :page-size="notificationPageSize" :total="notifications.total" @update:page="changeNotificationsPage" @update:page-size="changeNotificationsPageSize" />
     </section>
 
-    <div v-if="mappingEditor" class="modal-layer" @click.self="mappingEditor = null"><section class="modal form-modal model-audit-modal"><header><div><h2>{{ mappingEditor.id ? '编辑合法映射' : '新增合法映射' }}</h2><p>精确匹配，比较时忽略首尾空格和大小写。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="mappingEditor = null"><X :size="19" /></button></header><div class="form-grid"><label>上游发送模型<input v-model="mappingEditor.sourceModel" maxlength="200" placeholder="例如 claude-3-7-sonnet" /></label><label>允许的响应模型<input v-model="mappingEditor.allowedResponseModel" maxlength="200" placeholder="例如 claude-3-7-sonnet-20250219" /></label></div><div class="form-note">只有该上游发送模型返回这里配置的响应模型时，才会记录为“合法映射”；完全一致的模型不需要配置。</div><footer><button class="secondary-button" type="button" @click="mappingEditor = null">取消</button><button class="primary-button" type="button" :disabled="saving" @click="saveMapping"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存映射</button></footer></section></div>
+    <div v-if="mappingEditor" class="modal-layer" @click.self="mappingEditor = null"><section class="modal form-modal model-audit-modal"><header><div><h2>{{ mappingEditor.id ? '编辑合法映射' : '新增合法映射' }}</h2><p>精确匹配，比较时忽略首尾空格和大小写。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="mappingEditor = null"><X :size="19" /></button></header><div class="form-grid"><label>上游发送模型<input v-model="mappingEditor.sourceModel" maxlength="200" placeholder="例如 claude-3-7-sonnet" /></label><label>允许的响应模型<input v-model="mappingEditor.allowedResponseModel" maxlength="200" placeholder="例如 claude-3-7-sonnet-20250219" /></label></div><div class="form-note">同一个上游发送模型可以配置多个不同的合法响应模型；完全一致的模型不需要配置。</div><footer><button class="secondary-button" type="button" @click="mappingEditor = null">取消</button><button class="primary-button" type="button" :disabled="saving" @click="saveMapping"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存映射</button></footer></section></div>
     <div v-if="selectedNotification" class="modal-layer" @click.self="selectedNotification = null"><section class="modal model-audit-notification-modal"><header><div><h2>{{ selectedNotification.subject }}</h2><p>{{ selectedNotification.recipientEmail }} · {{ dateTime(selectedNotification.createdAt) }}</p><p v-if="selectedNotification.confirmedBy">人工确认：{{ selectedNotification.confirmedBy }} · {{ dateTime(selectedNotification.confirmedAt) }}</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="selectedNotification = null"><X :size="19" /></button></header><div class="notification-preview"><strong>纯文本正文</strong><pre>{{ selectedNotification.textContent }}</pre><strong>HTML 正文</strong><pre>{{ selectedNotification.htmlContent }}</pre></div></section></div>
   </div>
 </template>

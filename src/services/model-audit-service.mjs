@@ -32,8 +32,17 @@ export function classifyModelAuditEvent(row, mappings = []) {
   const responseModel = display(row.upstream_response_model ?? row.upstreamResponseModel);
   const upstreamKey = normalized(upstreamModel);
   const responseKey = normalized(responseModel);
-  const mapping = mappings.find((item) => normalized(item.sourceModel ?? item.source_model) === upstreamKey);
-  const allowedResponseModel = display(mapping?.allowedResponseModel ?? mapping?.allowed_response_model);
+  const sourceMappings = mappings.filter(
+    (item) => normalized(item.sourceModel ?? item.source_model) === upstreamKey,
+  );
+  const mapping = sourceMappings.find(
+    (item) => normalized(item.allowedResponseModel ?? item.allowed_response_model) === responseKey,
+  );
+  const allowedResponseModels = sourceMappings
+    .map((item) => display(item.allowedResponseModel ?? item.allowed_response_model))
+    .filter(Boolean);
+  const allowedResponseModel = display(mapping?.allowedResponseModel ?? mapping?.allowed_response_model)
+    || allowedResponseModels.join(', ').slice(0, 200);
 
   if (!upstreamKey || !responseKey) {
     return {

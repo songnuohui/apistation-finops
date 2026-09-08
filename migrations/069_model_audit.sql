@@ -38,8 +38,12 @@ CREATE TABLE IF NOT EXISTS {{FINOPS_SCHEMA}}.model_audit_mappings (
   CHECK (BTRIM(source_model) <> ''),
   CHECK (BTRIM(allowed_response_model) <> '')
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_model_audit_mappings_source
-  ON {{FINOPS_SCHEMA}}.model_audit_mappings (LOWER(BTRIM(source_model)));
+DROP INDEX IF EXISTS {{FINOPS_SCHEMA}}.uq_model_audit_mappings_source;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_model_audit_mappings_source_response
+  ON {{FINOPS_SCHEMA}}.model_audit_mappings (
+    LOWER(BTRIM(source_model)),
+    LOWER(BTRIM(allowed_response_model))
+  );
 CREATE INDEX IF NOT EXISTS idx_model_audit_mappings_response
   ON {{FINOPS_SCHEMA}}.model_audit_mappings (LOWER(BTRIM(allowed_response_model)));
 

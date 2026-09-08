@@ -42,6 +42,22 @@ test('model audit classifies exact matches, legal mappings, mismatches, and miss
   }).status, 'matched');
 });
 
+test('model audit accepts any configured legal response for the same upstream model', () => {
+  const mappings = [
+    { sourceModel: 'claude-sonnet', allowedResponseModel: 'claude-sonnet-2025' },
+    { sourceModel: 'claude-sonnet', allowedResponseModel: 'claude-sonnet-latest' },
+  ];
+
+  assert.equal(classifyModelAuditEvent({
+    upstream_model: 'claude-sonnet',
+    upstream_response_model: 'claude-sonnet-latest',
+  }, mappings).status, 'allowed_mapping');
+  assert.equal(classifyModelAuditEvent({
+    upstream_model: 'claude-sonnet',
+    upstream_response_model: 'claude-haiku',
+  }, mappings).status, 'mismatch');
+});
+
 test('model audit notifications aggregate mismatches by user and add one admin summary', () => {
   const run = {
     periodStart: '2026-09-04T00:00:00.000Z',
@@ -467,6 +483,29 @@ test('model audit mappings return independent paginated results', async () => {
   assert.equal(first.items[0].sourceModel, 'source-00');
   assert.equal(third.items.length, 5);
   assert.equal(third.page, 3);
+});
+
+test('model audit mappings allow multiple responses per source but reject duplicate pairs', async () => {
+  const repository = new DemoModelAuditRepository({ users: [] });
+  await repository.createMapping({
+    sourceModel: 'claude-sonnet',
+    allowedResponseModel: 'claude-sonnet-2025',
+  });
+  await repository.createMapping({
+    sourceModel: ' CLAUDE-SONNET ',
+    allowedResponseModel: 'claude-sonnet-latest',
+  });
+
+  await assert.rejects(
+    () => repository.createMapping({
+      sourceModel: 'claude-sonnet',
+      allowedResponseModel: 'CLAUDE-SONNET-2025',
+    }),
+    /该模型映射已经存在/,
+  );
+
+  const result = await repository.listMappings({ page: 1, pageSize: 20 });
+  assert.equal(result.total, 2);
 });
 
 test('model audit list filters use an inclusive start and exclusive end', async () => {

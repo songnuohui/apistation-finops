@@ -404,6 +404,10 @@ test('model audit migration and grants remain FinOps-owned and source-read-only'
   assert.match(migration, /model_audit_scan_runs/);
   assert.match(migration, /model_audit_events/);
   assert.match(migration, /model_audit_notifications/);
+  assert.match(migration, /DROP INDEX IF EXISTS \{\{FINOPS_SCHEMA\}\}\.uq_model_audit_mappings_source/);
+  assert.match(migration, /uq_model_audit_mappings_source_response/);
+  assert.match(migration, /LOWER\(BTRIM\(source_model\)\),\s*LOWER\(BTRIM\(allowed_response_model\)\)/s);
+  assert.doesNotMatch(migration, /uq_model_audit_mappings_source\s*\n\s+ON/);
   assert.match(migration, /UNIQUE \(scan_run_id, kind, recipient_email\)/);
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
   assert.match(grants, /upstream_response_model,upstream_model_mismatch/);
