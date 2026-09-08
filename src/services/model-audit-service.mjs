@@ -217,10 +217,23 @@ export class ModelAuditService {
     this.logger = logger;
     this.timer = null;
     this.running = false;
+    this.unavailableReason = '';
+  }
+
+  setUnavailable(reason) {
+    this.unavailableReason = String(reason || '模型审计源数据结构不可用');
+  }
+
+  ensureAvailable() {
+    if (!this.unavailableReason) return;
+    throw Object.assign(
+      new Error(`模型审计暂不可用：${this.unavailableReason}`),
+      { statusCode: 503 },
+    );
   }
 
   start() {
-    if (this.timer) return;
+    if (this.timer || this.unavailableReason) return;
     this.timer = setInterval(() => this.runDue().catch((error) => {
       this.logger.error('[model audit]', error?.message || error);
     }), 15_000);
@@ -242,6 +255,7 @@ export class ModelAuditService {
   }
 
   async runDue() {
+    if (this.unavailableReason) return null;
     if (this.running) return null;
     this.running = true;
     try {
@@ -254,6 +268,7 @@ export class ModelAuditService {
   }
 
   async runNow() {
+    this.ensureAvailable();
     if (this.running) throw Object.assign(new Error('模型审计扫描正在执行'), { statusCode: 409 });
     this.running = true;
     try {
@@ -268,6 +283,7 @@ export class ModelAuditService {
   }
 
   async runTest({ periodStart, periodEnd }) {
+    this.ensureAvailable();
     if (this.running) throw Object.assign(new Error('模型审计扫描正在执行'), { statusCode: 409 });
     this.running = true;
     try {

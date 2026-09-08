@@ -1481,7 +1481,12 @@ const server=http.createServer(async(request,res)=>{
 async function start(){
   if(!config.demoMode){
     await assertDistinctDatabases(sourcePool,finopsPool);
-    await sourceUsageRepository.validateModelAuditSchema();
+    try{
+      await sourceUsageRepository.validateModelAuditSchema();
+    }catch(error){
+      modelAuditService.setUnavailable(error?.message||error);
+      console.error('[model audit disabled]',error?.message||error);
+    }
   }
   await emailService.recoverInterruptedCampaigns();
   modelAuditService.start();
