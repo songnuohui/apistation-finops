@@ -7,6 +7,7 @@ import {
 } from './replenishment-forecast.mjs';
 
 const ACTIVE_STATUSES = new Set(['ordering', 'queued', 'processing', 'ready_to_collect', 'importing']);
+const SUB2API_ACCOUNT_LIST_CACHE_MS = 15_000;
 
 function errorWithStatus(message, statusCode = 502) {
   return Object.assign(new Error(message), { statusCode });
@@ -583,6 +584,8 @@ export class ReplenishmentService {
     this.runtimeCache = new Map();
     this.runtimeInflight = new Map();
     this.runtimeUsageHistory = new Map();
+    this.sub2ApiAccountIdsCache = null;
+    this.sub2ApiAccountIdsInflight = null;
   }
 
   start() {
@@ -1309,10 +1312,43 @@ export class ReplenishmentService {
     return true;
   }
 
+  async currentSub2ApiAccountIds() {
+    if (!this.accountReader?.listAllAccounts) return null;
+    const now = this.now();
+    if (this.sub2ApiAccountIdsCache?.expiresAt > now) {
+      return this.sub2ApiAccountIdsCache.ids;
+    }
+    if (this.sub2ApiAccountIdsInflight) return this.sub2ApiAccountIdsInflight;
+
+    this.sub2ApiAccountIdsInflight = (async () => {
+      try {
+        const accounts = await this.accountReader.listAllAccounts({ status: '' });
+        const ids = new Set((accounts || [])
+          .map((account) => Number(account?.id))
+          .filter((id) => Number.isSafeInteger(id) && id > 0));
+        this.sub2ApiAccountIdsCache = {
+          ids,
+          expiresAt: this.now() + SUB2API_ACCOUNT_LIST_CACHE_MS,
+        };
+        return ids;
+      } catch (error) {
+        this.logger.warn(
+          '[replenishment] current Sub2API account list failed',
+          error?.message || error,
+        );
+        return this.sub2ApiAccountIdsCache?.ids || null;
+      } finally {
+        this.sub2ApiAccountIdsInflight = null;
+      }
+    })();
+    return this.sub2ApiAccountIdsInflight;
+  }
+
   async inspectRuleInventory(rule) {
     const items = await this.repository.listTrackedItems(rule.id);
     const recoveries = await this.repository.listRecoveries({ limit: 500 });
     const openByItem = latestRecoveryByItem(recoveries, (entry) => OPEN_RECOVERY_STATUSES.has(entry.status));
+    const currentAccountIds = await this.currentSub2ApiAccountIds();
     const accounts = [];
     let effectiveAccounts = 0;
     let lowQuotaAccounts = 0;
@@ -1324,19 +1360,24 @@ export class ReplenishmentService {
       let account = null;
       let usage = null;
       let readError = '';
-      try {
-        account = await this.sub2ApiGateway.getAccount(tracked.sub2apiAccountId);
-        const platform = String(account?.platform || '').trim().toLowerCase();
-        const accountType = String(account?.type || account?.account_type || '').trim().toLowerCase();
-        const passiveUsageSupported = platform === 'anthropic'
-          && ['oauth', 'setup-token', 'setup_token'].includes(accountType);
-        if (passiveUsageSupported) {
-          usage = await this.sub2ApiGateway
-            .getAccountUsage(tracked.sub2apiAccountId, { source: 'passive' })
-            .catch(() => null);
+      const trackedAccountId = Number(tracked.sub2apiAccountId);
+      if (currentAccountIds && !currentAccountIds.has(trackedAccountId)) {
+        readError = 'Sub2API 账号不存在或已删除';
+      } else {
+        try {
+          account = await this.sub2ApiGateway.getAccount(tracked.sub2apiAccountId);
+          const platform = String(account?.platform || '').trim().toLowerCase();
+          const accountType = String(account?.type || account?.account_type || '').trim().toLowerCase();
+          const passiveUsageSupported = platform === 'anthropic'
+            && ['oauth', 'setup-token', 'setup_token'].includes(accountType);
+          if (passiveUsageSupported) {
+            usage = await this.sub2ApiGateway
+              .getAccountUsage(tracked.sub2apiAccountId, { source: 'passive' })
+              .catch(() => null);
+          }
+        } catch (error) {
+          readError = String(error?.message || error);
         }
-      } catch (error) {
-        readError = String(error?.message || error);
       }
       const expiresAt = epochSeconds(
         account?.expires_at

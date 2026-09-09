@@ -815,6 +815,49 @@ test('only normal and schedulable Sub2API accounts count as effective inventory'
   assert.deepEqual(snapshot.accounts.map((account) => account.schedulable), [true, false, false, true, true]);
 });
 
+test('inventory skips detail reads for deleted Sub2API accounts', async () => {
+  const repository = new ReplenishmentRepository(null, config);
+  const rule = await repository.getRule(1);
+  rule.quotaWindow = 'any';
+  await trackedItem(repository, rule, 37, 137);
+  await trackedItem(repository, rule, 38, 138);
+  await trackedItem(repository, rule, 39, 139);
+  const detailCalls = [];
+  const gateway = {
+    async getAccount(id) {
+      detailCalls.push(id);
+      return {
+        id,
+        platform: 'openai',
+        status: 'active',
+        schedulable: true,
+        group_ids: [1],
+      };
+    },
+    async getAccountUsage() {
+      return { codex_7d_used_percent: 20 };
+    },
+  };
+  const service = new ReplenishmentService(repository, authStub(), gateway, config, console, {
+    client: {},
+    accountReader: {
+      async listAllAccounts() {
+        return [{ id: 137 }];
+      },
+    },
+  });
+
+  const snapshot = await service.inspectRuleInventory(rule);
+
+  assert.deepEqual(detailCalls, [137]);
+  assert.equal(snapshot.effectiveAccounts, 1);
+  assert.equal(snapshot.unavailableAccounts, 2);
+  assert.match(
+    snapshot.accounts.find((account) => account.sub2apiAccountId === 138).readError,
+    /不存在或已删除/,
+  );
+});
+
 test('a transient Sub2API read failure keeps the last known healthy account in inventory', async () => {
   const repository = new ReplenishmentRepository(null, config);
   const rule = await repository.getRule(1);
