@@ -2716,7 +2716,7 @@ export class PostgresRepository {
         FROM ${this.schema}.monitor_group_daily_rollups
         WHERE monitor_group_id=$1
           AND model=$2
-          AND bucket_date >= (($3::timestamptz AT TIME ZONE $4)::date - $5)
+          AND bucket_date >= (($3::timestamptz AT TIME ZONE $4)::date - $5::int)
           AND bucket_date <= (($3::timestamptz AT TIME ZONE $4)::date)`, [
         id,primaryModel,nowAt,this.config.timezone || 'UTC',windowDays - 1,
       ]);

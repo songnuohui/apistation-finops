@@ -1539,6 +1539,7 @@ test('monitor history adjustment uses the selected window and records FinOps sna
   );
   const rollupQuery = queries.find((query) => query.text.includes('FROM "finops".monitor_group_daily_rollups'));
   assert.deepEqual(rollupQuery.params.slice(0, 2), [1, 'gpt-test']);
+  assert.match(rollupQuery.text, /bucket_date\s*>=\s*\(\(.+\)::date\s*-\s*\$5::int\)/);
   assert.ok(queries.every((query) => !/\b(?:public|sub2api)\./i.test(query.text)));
 });
 
