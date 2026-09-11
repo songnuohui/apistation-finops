@@ -181,6 +181,8 @@ const demoMonitorDefinitions = [
 function demoMonitorHistory(group) {
   const failed = Math.max(0, Math.min(12, Math.round(60 * (100 - group.availabilityPercent) / 100)));
   const history = Array.from({ length: 60 }, (_, index) => ({
+    id: index + 1,
+    model: group.modelLabel,
     observedAt: new Date(Date.now() - (59 - index) * 60_000).toISOString(),
     status: 'healthy',
   }));
@@ -189,6 +191,36 @@ function demoMonitorHistory(group) {
     history[position].status = index % 3 === 0 ? 'degraded' : 'unavailable';
   }
   return history;
+}
+
+function demoMonitorAdjustmentDefaults() {
+  return {
+    availabilityWindow: '7d',
+    targetAvailability: null,
+    historyGreenifyPercent: 90,
+    preserveLatestStatus: true,
+    updatedBy: '',
+    updatedAt: null,
+    lastBatch: null,
+  };
+}
+
+function demoMonitorAdjustmentBatchSummary(batch) {
+  if (!batch) return null;
+  return {
+    id: batch.id,
+    availabilityWindow: batch.availabilityWindow,
+    targetAvailability: batch.targetAvailability,
+    historyGreenifyPercent: batch.historyGreenifyPercent,
+    preserveLatestStatus: batch.preserveLatestStatus,
+    changedHistoryCount: batch.changedHistoryCount,
+    changedRollupCount: batch.changedRollupCount,
+    reason: batch.reason,
+    createdBy: batch.createdBy,
+    createdAt: batch.createdAt,
+    revertedAt: batch.revertedAt || null,
+    revertedBy: batch.revertedBy || '',
+  };
 }
 
 export class DemoRepository {
@@ -203,7 +235,14 @@ export class DemoRepository {
     this.emailCampaigns = [];
     this.emailRecipients = new Map();
     this.costProfiles = demoCostProfiles.map((profile) => ({ ...profile }));
-    this.monitorGroups = demoMonitorDefinitions.map((group) => ({ ...group }));
+    this.monitorGroups = demoMonitorDefinitions.map((group) => ({
+      ...group,
+      availabilityByWindow: { '7d': group.availabilityPercent, '15d': group.availabilityPercent, '30d': group.availabilityPercent },
+      availabilitySampleCount: { '7d': 60, '15d': 60, '30d': 60 },
+      history: demoMonitorHistory(group),
+      historyAdjustment: demoMonitorAdjustmentDefaults(),
+    }));
+    this.monitorHistoryAdjustmentBatches = new Map();
     this.supplierConnections = [{
       supplierNotes: '',
       id: 1, supplierId: 1, supplierName: 'Cloud Seats', name: '主账号', adapterType: 'sub2api',
@@ -298,7 +337,19 @@ export class DemoRepository {
 
   async listMonitorGroups() {
     return this.monitorGroups
-      .map((group) => ({ ...group }))
+      .map((group) => ({
+        ...group,
+        history: (group.history || []).map((item) => ({ ...item })),
+        availabilityByWindow: { ...(group.availabilityByWindow || {}) },
+        availabilitySampleCount: { ...(group.availabilitySampleCount || {}) },
+        historyAdjustment: {
+          ...demoMonitorAdjustmentDefaults(),
+          ...(group.historyAdjustment || {}),
+          lastBatch: group.historyAdjustment?.lastBatch
+            ? demoMonitorAdjustmentBatchSummary(group.historyAdjustment.lastBatch)
+            : null,
+        },
+      }))
       .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
   }
 
@@ -315,6 +366,135 @@ export class DemoRepository {
     if (input.announcementTitle !== undefined) this.monitorAnnouncementTitle = input.announcementTitle;
     if (input.announcementText !== undefined) this.monitorAnnouncementText = input.announcementText;
     return this.getMonitorSettings();
+  }
+
+  async getMonitorHistoryAdjustmentSettings(id) {
+    const group = this.monitorGroups.find((item) => Number(item.id) === Number(id));
+    if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    return {
+      ...demoMonitorAdjustmentDefaults(),
+      ...(group.historyAdjustment || {}),
+      lastBatch: group.historyAdjustment?.lastBatch
+        ? demoMonitorAdjustmentBatchSummary(group.historyAdjustment.lastBatch)
+        : null,
+    };
+  }
+
+  async updateMonitorHistoryAdjustmentSettings(id, input, actor = 'admin') {
+    const group = this.monitorGroups.find((item) => Number(item.id) === Number(id));
+    if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    const current = await this.getMonitorHistoryAdjustmentSettings(id);
+    group.historyAdjustment = {
+      ...current,
+      availabilityWindow: input.availabilityWindow,
+      targetAvailability: input.targetAvailability === null || input.targetAvailability === undefined
+        ? null : Number(input.targetAvailability),
+      historyGreenifyPercent: Number(input.historyGreenifyPercent),
+      preserveLatestStatus: Boolean(input.preserveLatestStatus),
+      updatedBy: actor,
+      updatedAt: new Date().toISOString(),
+    };
+    return this.getMonitorHistoryAdjustmentSettings(id);
+  }
+
+  async applyMonitorHistoryAdjustment(id, input, actor = 'admin') {
+    if (input.targetAvailability === null || input.targetAvailability === undefined) {
+      throw Object.assign(new Error('target availability is required'), { statusCode: 400 });
+    }
+    const group = this.monitorGroups.find((item) => Number(item.id) === Number(id));
+    if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    const history = group.history || demoMonitorHistory(group);
+    const beforeHistory = history.map((item) => ({ ...item }));
+    const eligible = history
+      .map((item, index) => ({ item, index }))
+      .filter(({ item, index }) => item.status !== 'healthy'
+        && (!input.preserveLatestStatus || index !== history.length - 1));
+    const changeCount = Math.round(eligible.length * Number(input.historyGreenifyPercent) / 100);
+    eligible
+      .sort(() => Math.random() - 0.5)
+      .slice(0, changeCount)
+      .forEach(({ item }) => { item.status = 'healthy'; });
+    const beforeAvailabilityByWindow = { ...(group.availabilityByWindow || {}) };
+    const beforeAvailabilitySampleCount = { ...(group.availabilitySampleCount || {}) };
+    const window = input.availabilityWindow || '7d';
+    group.availabilityByWindow = {
+      '7d': group.availabilityByWindow?.['7d'] ?? group.availabilityPercent,
+      '15d': group.availabilityByWindow?.['15d'] ?? group.availabilityPercent,
+      '30d': group.availabilityByWindow?.['30d'] ?? group.availabilityPercent,
+      [window]: Number(input.targetAvailability),
+    };
+    group.availabilitySampleCount = {
+      '7d': group.availabilitySampleCount?.['7d'] ?? history.length,
+      '15d': group.availabilitySampleCount?.['15d'] ?? history.length,
+      '30d': group.availabilitySampleCount?.['30d'] ?? history.length,
+    };
+    group.availabilityPercent = group.availabilityByWindow['7d'];
+    group.history = history;
+    const batch = {
+      id: (this.monitorHistoryAdjustmentBatches.get(Number(id))?.id || 0) + 1,
+      availabilityWindow: window,
+      targetAvailability: Number(input.targetAvailability),
+      historyGreenifyPercent: Number(input.historyGreenifyPercent),
+      preserveLatestStatus: Boolean(input.preserveLatestStatus),
+      changedHistoryCount: eligible.slice(0, changeCount).length,
+      changedRollupCount: beforeAvailabilityByWindow[window] === group.availabilityByWindow[window] ? 0 : 1,
+      reason: input.reason || '',
+      createdBy: actor,
+      createdAt: new Date().toISOString(),
+      revertedAt: null,
+      beforeHistory,
+      afterHistory: history.map((item) => ({ ...item })),
+      beforeAvailabilityByWindow,
+      beforeAvailabilitySampleCount,
+    };
+    this.monitorHistoryAdjustmentBatches.set(Number(id), batch);
+    group.historyAdjustment = {
+      ...(await this.getMonitorHistoryAdjustmentSettings(id)),
+      availabilityWindow: window,
+      targetAvailability: Number(input.targetAvailability),
+      historyGreenifyPercent: Number(input.historyGreenifyPercent),
+      preserveLatestStatus: Boolean(input.preserveLatestStatus),
+      updatedBy: actor,
+      updatedAt: new Date().toISOString(),
+      lastBatch: demoMonitorAdjustmentBatchSummary(batch),
+    };
+    return {
+      settings: await this.getMonitorHistoryAdjustmentSettings(id),
+      batch: {
+        id: batch.id,
+        availabilityWindow: batch.availabilityWindow,
+        targetAvailability: batch.targetAvailability,
+        historyGreenifyPercent: batch.historyGreenifyPercent,
+        preserveLatestStatus: batch.preserveLatestStatus,
+        changedHistoryCount: batch.changedHistoryCount,
+        changedRollupCount: batch.changedRollupCount,
+        reason: batch.reason,
+        createdBy: batch.createdBy,
+        createdAt: batch.createdAt,
+      },
+      resultingAvailability: Number(input.targetAvailability),
+      resultingSampleCount: group.availabilitySampleCount[window],
+    };
+  }
+
+  async undoMonitorHistoryAdjustment(id, actor = 'admin') {
+    const group = this.monitorGroups.find((item) => Number(item.id) === Number(id));
+    if (!group) throw Object.assign(new Error('monitor group not found'), { statusCode: 404 });
+    const batch = this.monitorHistoryAdjustmentBatches.get(Number(id));
+    if (!batch || batch.revertedAt) {
+      throw Object.assign(new Error('no reversible monitor adjustment found'), { statusCode: 404 });
+    }
+    group.history = batch.beforeHistory.map((item) => ({ ...item }));
+    group.availabilityByWindow = { ...batch.beforeAvailabilityByWindow };
+    group.availabilitySampleCount = { ...batch.beforeAvailabilitySampleCount };
+    group.availabilityPercent = group.availabilityByWindow['7d'] ?? null;
+    batch.revertedAt = new Date().toISOString();
+    batch.revertedBy = actor;
+    group.historyAdjustment = {
+      ...(await this.getMonitorHistoryAdjustmentSettings(id)),
+      lastBatch: demoMonitorAdjustmentBatchSummary(batch),
+    };
+    return { id: batch.id, revertedAt: batch.revertedAt, revertedBy: batch.revertedBy };
   }
 
   async listMonitorGroupCandidates() {

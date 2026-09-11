@@ -87,6 +87,33 @@ function monitorConfigFromRow(row, { includeSecret = false } = {}) {
   return result;
 }
 
+function monitorAdjustmentSettingsFromRow(row) {
+  return {
+    availabilityWindow: row?.availability_window || '7d',
+    targetAvailability: row?.target_availability === null
+      || row?.target_availability === undefined
+      ? null : number(row.target_availability),
+    historyGreenifyPercent: row?.history_greenify_percent === null
+      || row?.history_greenify_percent === undefined
+      ? 90 : number(row.history_greenify_percent),
+    preserveLatestStatus: row?.preserve_latest_status === undefined
+      ? true : Boolean(row.preserve_latest_status),
+    updatedBy: row?.updated_by || '',
+    updatedAt: row?.updated_at || null,
+    lastBatch: row?.last_batch_id
+      ? {
+        id: number(row.last_batch_id),
+        createdAt: row.last_batch_created_at || null,
+        createdBy: row.last_batch_created_by || '',
+        changedHistoryCount: number(row.last_batch_changed_history_count),
+        changedRollupCount: number(row.last_batch_changed_rollup_count),
+        revertedAt: row.last_batch_reverted_at || null,
+        revertedBy: row.last_batch_reverted_by || '',
+      }
+      : null,
+  };
+}
+
 function supplierKeyPurchaseBatch(row) {
   const externalId = String(row?.external_key_id ?? row?.externalId ?? '').trim();
   const identity = String(row?.name || '').trim()
@@ -2353,6 +2380,24 @@ export class PostgresRepository {
 
     const ids = base.rows.map((row) => Number(row.id));
     const params = [ids];
+    const adjustmentSettings = await this.pool.query(`
+      SELECT s.monitor_group_id,s.availability_window,s.target_availability,
+             s.history_greenify_percent,s.preserve_latest_status,s.updated_by,s.updated_at,
+             b.id AS last_batch_id,b.created_at AS last_batch_created_at,
+             b.created_by AS last_batch_created_by,
+             b.changed_history_count AS last_batch_changed_history_count,
+             b.changed_rollup_count AS last_batch_changed_rollup_count,
+             b.reverted_at AS last_batch_reverted_at,
+             b.reverted_by AS last_batch_reverted_by
+      FROM ${this.schema}.monitor_group_history_adjustment_settings s
+      LEFT JOIN LATERAL (
+        SELECT id,created_at,created_by,changed_history_count,changed_rollup_count,reverted_at,reverted_by
+        FROM ${this.schema}.monitor_group_history_adjustment_batches
+        WHERE monitor_group_id=s.monitor_group_id
+        ORDER BY created_at DESC,id DESC
+        LIMIT 1
+      ) b ON TRUE
+      WHERE s.monitor_group_id=ANY($1::bigint[])`, params);
     const latest = await this.pool.query(`
       SELECT DISTINCT ON (h.monitor_group_id,h.model)
              h.monitor_group_id,h.model,h.status,h.latency_ms,h.ping_latency_ms,
@@ -2391,6 +2436,12 @@ export class PostgresRepository {
     ]);
 
     const latestByGroup = new Map();
+    const adjustmentSettingsByGroup = new Map(
+      adjustmentSettings.rows.map((row) => [
+        Number(row.monitor_group_id),
+        monitorAdjustmentSettingsFromRow(row),
+      ]),
+    );
     for (const row of latest.rows) {
       const groupId = Number(row.monitor_group_id);
       if (!latestByGroup.has(groupId)) latestByGroup.set(groupId, new Map());
@@ -2423,6 +2474,7 @@ export class PostgresRepository {
 
     return base.rows.map((row) => {
       const group = monitorConfigFromRow(row, { includeSecret: includeSecrets });
+      group.historyAdjustment = adjustmentSettingsByGroup.get(group.id) || monitorAdjustmentSettingsFromRow(null);
       const latestModels = latestByGroup.get(group.id) || new Map();
       const models = [...new Set([group.primaryModel, ...group.extraModels].filter(Boolean))];
       group.models = models.map((model) => {
@@ -2513,6 +2565,388 @@ export class PostgresRepository {
       announcementTitle: result.rowCount ? result.rows[0].announcement_title || '' : '',
       announcementText: result.rowCount ? result.rows[0].announcement_text || '' : '',
     };
+  }
+
+  async getMonitorHistoryAdjustmentSettings(id) {
+    const result = await this.pool.query(`
+      SELECT s.monitor_group_id,s.availability_window,s.target_availability,
+             s.history_greenify_percent,s.preserve_latest_status,s.updated_by,s.updated_at,
+             b.id AS last_batch_id,b.created_at AS last_batch_created_at,
+             b.created_by AS last_batch_created_by,
+             b.changed_history_count AS last_batch_changed_history_count,
+             b.changed_rollup_count AS last_batch_changed_rollup_count,
+             b.reverted_at AS last_batch_reverted_at,
+             b.reverted_by AS last_batch_reverted_by
+      FROM ${this.schema}.monitor_group_history_adjustment_settings s
+      LEFT JOIN LATERAL (
+        SELECT id,created_at,created_by,changed_history_count,changed_rollup_count,reverted_at,reverted_by
+        FROM ${this.schema}.monitor_group_history_adjustment_batches
+        WHERE monitor_group_id=s.monitor_group_id
+        ORDER BY created_at DESC,id DESC
+        LIMIT 1
+      ) b ON TRUE
+      WHERE s.monitor_group_id=$1
+      LIMIT 1`, [id]);
+    return monitorAdjustmentSettingsFromRow(result.rows[0] || null);
+  }
+
+  async updateMonitorHistoryAdjustmentSettings(id, input, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const group = await client.query(
+        `SELECT id FROM ${this.schema}.monitor_groups WHERE id=$1 FOR UPDATE`,
+        [id],
+      );
+      if (!group.rowCount) throw httpError('monitor group not found', 404);
+      const result = await client.query(`
+        INSERT INTO ${this.schema}.monitor_group_history_adjustment_settings(
+          monitor_group_id,availability_window,target_availability,
+          history_greenify_percent,preserve_latest_status,updated_by,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,NOW())
+        ON CONFLICT(monitor_group_id) DO UPDATE SET
+          availability_window=EXCLUDED.availability_window,
+          target_availability=EXCLUDED.target_availability,
+          history_greenify_percent=EXCLUDED.history_greenify_percent,
+          preserve_latest_status=EXCLUDED.preserve_latest_status,
+          updated_by=EXCLUDED.updated_by,
+          updated_at=NOW()
+        RETURNING monitor_group_id,availability_window,target_availability,
+                  history_greenify_percent,preserve_latest_status,updated_by,updated_at`, [
+        id,input.availabilityWindow,input.targetAvailability,input.historyGreenifyPercent,
+        input.preserveLatestStatus,actor,
+      ]);
+      const saved = monitorAdjustmentSettingsFromRow(result.rows[0]);
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'update','monitor_group_history_adjustment_settings',$2,$3::jsonb)`, [
+        actor,String(id),JSON.stringify(saved),
+      ]);
+      return saved;
+    });
+  }
+
+  async applyMonitorHistoryAdjustment(id, input, actor='admin') {
+    if (input.targetAvailability === null || input.targetAvailability === undefined) {
+      throw httpError('target availability is required', 400);
+    }
+    const windowDays = { '7d': 7, '15d': 15, '30d': 30 }[input.availabilityWindow] || 7;
+    const nowAt = new Date().toISOString();
+    return inTransaction(this.pool, async (client) => {
+      const monitor = await client.query(`
+        SELECT id,primary_model,history_started_at
+        FROM ${this.schema}.monitor_groups
+        WHERE id=$1
+        FOR UPDATE`, [id]);
+      if (!monitor.rowCount) throw httpError('monitor group not found', 404);
+      const primaryModel = monitor.rows[0].primary_model;
+      if (!primaryModel) throw httpError('monitor group has no primary model', 409);
+
+      await client.query(`
+        CREATE TEMP TABLE monitor_adjust_history_selected ON COMMIT DROP AS
+        WITH latest AS (
+          SELECT h.id AS latest_id
+          FROM ${this.schema}.monitor_group_check_history h
+          WHERE h.monitor_group_id=$1
+            AND h.model=$2
+            AND h.checked_at >= GREATEST(
+              $3::timestamptz,
+              (($4::timestamptz AT TIME ZONE $5)::date - ($6::int - 1))::timestamp AT TIME ZONE $5
+            )
+          ORDER BY h.checked_at DESC,h.id DESC
+          LIMIT 1
+        ), eligible AS (
+          SELECT h.id,h.status,
+                 COUNT(*) OVER () AS non_green_count,
+                 ROW_NUMBER() OVER (
+                   ORDER BY md5(h.id::text || ':' || CURRENT_TIMESTAMP::text),h.id
+                 ) AS random_rank
+          FROM ${this.schema}.monitor_group_check_history h
+          WHERE h.monitor_group_id=$1
+            AND h.model=$2
+            AND h.checked_at >= GREATEST(
+              $3::timestamptz,
+              (($4::timestamptz AT TIME ZONE $5)::date - ($6::int - 1))::timestamp AT TIME ZONE $5
+            )
+            AND h.status <> 'operational'
+            AND ($7::boolean = FALSE OR h.id <> (SELECT latest_id FROM latest))
+        )
+        SELECT id,status AS before_status,'operational'::varchar(24) AS after_status
+        FROM eligible
+        WHERE random_rank <= round(non_green_count * $8 / 100.0)`, [
+        id,primaryModel,monitor.rows[0].history_started_at,nowAt,this.config.timezone || 'UTC',
+        windowDays,input.preserveLatestStatus,input.historyGreenifyPercent,
+      ]);
+      const historyBefore = await client.query(`
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'id',id,'status',before_status
+        ) ORDER BY id),'[]'::jsonb) AS snapshot
+        FROM monitor_adjust_history_selected`);
+      await client.query(`
+        UPDATE ${this.schema}.monitor_group_check_history h
+        SET status='operational'
+        FROM monitor_adjust_history_selected x
+        WHERE h.id=x.id`);
+      const historyAfter = await client.query(`
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'id',id,'status',after_status
+        ) ORDER BY id),'[]'::jsonb) AS snapshot
+        FROM monitor_adjust_history_selected`);
+
+      await client.query(`
+        CREATE TEMP TABLE monitor_adjust_rollup_work (
+          monitor_group_id bigint NOT NULL,
+          model varchar(200) NOT NULL,
+          bucket_date date NOT NULL,
+          total_checks integer NOT NULL,
+          ok_count integer NOT NULL,
+          sum_latency_ms bigint NOT NULL,
+          count_latency integer NOT NULL,
+          sum_ping_latency_ms bigint NOT NULL,
+          count_ping_latency integer NOT NULL,
+          existed_before boolean NOT NULL DEFAULT TRUE,
+          PRIMARY KEY(monitor_group_id,model,bucket_date)
+        ) ON COMMIT DROP`);
+      await client.query(`
+        INSERT INTO monitor_adjust_rollup_work(
+          monitor_group_id,model,bucket_date,total_checks,ok_count,
+          sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency)
+        SELECT monitor_group_id,model,bucket_date,total_checks,ok_count,
+               sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency
+        FROM ${this.schema}.monitor_group_daily_rollups
+        WHERE monitor_group_id=$1
+          AND model=$2
+          AND bucket_date >= (($3::timestamptz AT TIME ZONE $4)::date - $5)
+          AND bucket_date <= (($3::timestamptz AT TIME ZONE $4)::date)`, [
+        id,primaryModel,nowAt,this.config.timezone || 'UTC',windowDays - 1,
+      ]);
+      await client.query(`
+        CREATE TEMP TABLE monitor_adjust_rollup_before ON COMMIT DROP AS
+        SELECT monitor_group_id,model,bucket_date,total_checks,ok_count,
+               sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency,
+               existed_before
+        FROM monitor_adjust_rollup_work`);
+      const currentTotal = await client.query(`
+        SELECT COALESCE(SUM(total_checks),0)::int AS value
+        FROM monitor_adjust_rollup_before`);
+      const target = await client.query(`
+        SELECT $1::int AS target_total,
+               CASE WHEN $1::int=0 THEN 0
+                 ELSE LEAST($1::int,GREATEST(0,ROUND($2::numeric*$1::int/100)::int))
+               END AS ok_count`, [
+        Number(currentTotal.rows[0].value),input.targetAvailability,
+      ]);
+      if (!target.rowCount) throw httpError('could not calculate an integer availability target', 400);
+      const targetTotal = Number(target.rows[0].target_total);
+      const targetOk = Number(target.rows[0].ok_count);
+      await client.query(`
+        WITH shares AS (
+          SELECT w.monitor_group_id,w.model,w.bucket_date,w.total_checks,
+                 $1::int AS target_ok,
+                 $2::int AS target_total,
+                 $1::numeric*w.total_checks/NULLIF($2::numeric,0) AS exact_ok
+          FROM monitor_adjust_rollup_work w
+          WHERE w.monitor_group_id=$3 AND w.model=$4
+        ), ranked AS (
+          SELECT s.*,floor(s.exact_ok)::int AS base_ok,
+                 ROW_NUMBER() OVER (
+                   ORDER BY s.exact_ok-floor(s.exact_ok) DESC,s.bucket_date
+                 ) AS remainder_rank,
+                 SUM(floor(s.exact_ok)::int) OVER () AS base_sum
+          FROM shares s
+        )
+        UPDATE monitor_adjust_rollup_work w
+        SET ok_count=r.base_ok+
+          CASE WHEN r.remainder_rank <= r.target_ok-r.base_sum THEN 1 ELSE 0 END
+        FROM ranked r
+        WHERE r.monitor_group_id=w.monitor_group_id
+          AND r.model=w.model
+          AND r.bucket_date=w.bucket_date`, [
+        targetOk,targetTotal,id,primaryModel,
+      ]);
+      const rollupsBefore = await client.query(`
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'model',model,'bucket_date',bucket_date,'total_checks',total_checks,
+          'ok_count',ok_count,'existed_before',existed_before
+        ) ORDER BY bucket_date),'[]'::jsonb) AS snapshot
+        FROM monitor_adjust_rollup_before`);
+      const rollupsAfter = await client.query(`
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'model',model,'bucket_date',bucket_date,'total_checks',total_checks,
+          'ok_count',ok_count,'existed_before',existed_before
+        ) ORDER BY bucket_date),'[]'::jsonb) AS snapshot
+        FROM monitor_adjust_rollup_work`);
+      const rollupChanges = await client.query(`
+        SELECT COUNT(*)::int AS count
+        FROM monitor_adjust_rollup_work after_rows
+        LEFT JOIN monitor_adjust_rollup_before before_rows
+          ON before_rows.monitor_group_id=after_rows.monitor_group_id
+         AND before_rows.model=after_rows.model
+         AND before_rows.bucket_date=after_rows.bucket_date
+        WHERE before_rows.monitor_group_id IS NULL
+           OR before_rows.total_checks<>after_rows.total_checks
+           OR before_rows.ok_count<>after_rows.ok_count`);
+      await client.query(`
+        INSERT INTO ${this.schema}.monitor_group_daily_rollups(
+          monitor_group_id,model,bucket_date,total_checks,ok_count,
+          sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency)
+        SELECT monitor_group_id,model,bucket_date,total_checks,ok_count,
+               sum_latency_ms,count_latency,sum_ping_latency_ms,count_ping_latency
+        FROM monitor_adjust_rollup_work
+        ON CONFLICT(monitor_group_id,model,bucket_date) DO UPDATE SET
+          total_checks=EXCLUDED.total_checks,
+          ok_count=EXCLUDED.ok_count,
+          updated_at=NOW()`);
+      const changedHistory = await client.query(`
+        SELECT COUNT(*)::int AS count
+        FROM monitor_adjust_history_selected`);
+      const settings = await client.query(`
+        INSERT INTO ${this.schema}.monitor_group_history_adjustment_settings(
+          monitor_group_id,availability_window,target_availability,
+          history_greenify_percent,preserve_latest_status,updated_by,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,NOW())
+        ON CONFLICT(monitor_group_id) DO UPDATE SET
+          availability_window=EXCLUDED.availability_window,
+          target_availability=EXCLUDED.target_availability,
+          history_greenify_percent=EXCLUDED.history_greenify_percent,
+          preserve_latest_status=EXCLUDED.preserve_latest_status,
+          updated_by=EXCLUDED.updated_by,
+          updated_at=NOW()
+        RETURNING monitor_group_id,availability_window,target_availability,
+                  history_greenify_percent,preserve_latest_status,updated_by,updated_at`, [
+        id,input.availabilityWindow,input.targetAvailability,input.historyGreenifyPercent,
+        input.preserveLatestStatus,actor,
+      ]);
+      const batch = await client.query(`
+        INSERT INTO ${this.schema}.monitor_group_history_adjustment_batches(
+          monitor_group_id,availability_window,target_availability,
+          history_greenify_percent,preserve_latest_status,
+          history_before,history_after,rollups_before,rollups_after,
+          changed_history_count,changed_rollup_count,reason,created_by)
+        VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12,$13)
+        RETURNING id,monitor_group_id,availability_window,target_availability,
+                  history_greenify_percent,preserve_latest_status,
+                  changed_history_count,changed_rollup_count,reason,created_by,created_at`,
+      [
+        id,input.availabilityWindow,input.targetAvailability,input.historyGreenifyPercent,
+        input.preserveLatestStatus,historyBefore.rows[0].snapshot,historyAfter.rows[0].snapshot,
+        rollupsBefore.rows[0].snapshot,rollupsAfter.rows[0].snapshot,
+        Number(changedHistory.rows[0].count),
+        Number(rollupChanges.rows[0].count),input.reason,actor,
+      ]);
+      const batchRow = batch.rows[0];
+      const savedSettings = monitorAdjustmentSettingsFromRow(settings.rows[0]);
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,after_value)
+        VALUES($1,'create','monitor_group_history_adjustment_batch',$2,$3::jsonb)`, [
+        actor,String(batchRow.id),JSON.stringify({
+          ...batchRow,
+          targetAvailability: Number(batchRow.target_availability),
+          historyGreenifyPercent: Number(batchRow.history_greenify_percent),
+        }),
+      ]);
+      return {
+        settings: savedSettings,
+        batch: {
+          id: Number(batchRow.id),
+          availabilityWindow: batchRow.availability_window,
+          targetAvailability: Number(batchRow.target_availability),
+          historyGreenifyPercent: Number(batchRow.history_greenify_percent),
+          preserveLatestStatus: Boolean(batchRow.preserve_latest_status),
+          changedHistoryCount: Number(batchRow.changed_history_count),
+          changedRollupCount: Number(batchRow.changed_rollup_count),
+          reason: batchRow.reason || '',
+          createdBy: batchRow.created_by || '',
+          createdAt: batchRow.created_at || null,
+        },
+        resultingAvailability: targetTotal
+          ? Number((targetOk * 100 / targetTotal).toFixed(2))
+          : null,
+        resultingSampleCount: targetTotal,
+      };
+    });
+  }
+
+  async undoMonitorHistoryAdjustment(id, actor='admin') {
+    return inTransaction(this.pool, async (client) => {
+      const group = await client.query(
+        `SELECT id FROM ${this.schema}.monitor_groups WHERE id=$1 FOR UPDATE`,
+        [id],
+      );
+      if (!group.rowCount) throw httpError('monitor group not found', 404);
+      const batch = await client.query(`
+        SELECT *
+        FROM ${this.schema}.monitor_group_history_adjustment_batches
+        WHERE monitor_group_id=$1 AND reverted_at IS NULL
+        ORDER BY created_at DESC,id DESC
+        LIMIT 1`, [id]);
+      if (!batch.rowCount) throw httpError('no reversible monitor adjustment found', 404);
+      const row = batch.rows[0];
+      const historyConflict = await client.query(`
+        SELECT 1
+        FROM jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)
+        LEFT JOIN ${this.schema}.monitor_group_check_history h ON h.id=expected.id
+        WHERE h.id IS NULL OR h.status<>expected.status
+        LIMIT 1`, [row.history_after]);
+      if (historyConflict.rowCount) {
+        throw httpError('monitor history changed after this adjustment; undo was not applied', 409);
+      }
+      const rollupConflict = await client.query(`
+        SELECT 1
+        FROM jsonb_to_recordset($1::jsonb) AS expected(
+          model text,bucket_date date,total_checks integer,ok_count integer,existed_before boolean)
+        LEFT JOIN ${this.schema}.monitor_group_daily_rollups r
+          ON r.monitor_group_id=$2 AND r.model=expected.model AND r.bucket_date=expected.bucket_date
+        WHERE (expected.existed_before=FALSE AND r.monitor_group_id IS NOT NULL)
+           OR (expected.existed_before=TRUE AND (
+             r.monitor_group_id IS NULL
+             OR r.total_checks<>expected.total_checks
+             OR r.ok_count<>expected.ok_count
+           ))
+        LIMIT 1`, [row.rollups_after, id]);
+      if (rollupConflict.rowCount) {
+        throw httpError('monitor rollups changed after this adjustment; undo was not applied', 409);
+      }
+      await client.query(`
+        UPDATE ${this.schema}.monitor_group_check_history h
+        SET status=expected.status
+        FROM jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)
+        WHERE h.id=expected.id`, [row.history_before]);
+      await client.query(`
+        DELETE FROM ${this.schema}.monitor_group_daily_rollups r
+        USING jsonb_to_recordset($1::jsonb) AS expected(
+          model text,bucket_date date,total_checks integer,ok_count integer,existed_before boolean)
+        WHERE r.monitor_group_id=$2
+          AND r.model=expected.model
+          AND r.bucket_date=expected.bucket_date
+          AND expected.existed_before=FALSE`, [row.rollups_before,id]);
+      await client.query(`
+        UPDATE ${this.schema}.monitor_group_daily_rollups r
+        SET total_checks=expected.total_checks,
+            ok_count=expected.ok_count,
+            updated_at=NOW()
+        FROM jsonb_to_recordset($1::jsonb) AS expected(
+          model text,bucket_date date,total_checks integer,ok_count integer,existed_before boolean)
+        WHERE r.monitor_group_id=$2
+          AND r.model=expected.model
+          AND r.bucket_date=expected.bucket_date
+          AND expected.existed_before=TRUE`, [row.rollups_before,id]);
+      const result = await client.query(`
+        UPDATE ${this.schema}.monitor_group_history_adjustment_batches
+        SET reverted_at=NOW(),reverted_by=$2
+        WHERE id=$1
+        RETURNING id,reverted_at,reverted_by`, [row.id,actor]);
+      await client.query(`
+        INSERT INTO ${this.schema}.audit_logs(actor,action,object_type,object_id,before_value,after_value)
+        VALUES($1,'revert','monitor_group_history_adjustment_batch',$2,$3::jsonb,$4::jsonb)`, [
+        actor,String(row.id),JSON.stringify({
+          id: Number(row.id),monitorGroupId: Number(row.monitor_group_id),
+        }),JSON.stringify(result.rows[0]),
+      ]);
+      return {
+        id: Number(result.rows[0].id),
+        revertedAt: result.rows[0].reverted_at,
+        revertedBy: result.rows[0].reverted_by,
+      };
+    });
   }
 
   async updateMonitorSettings(input, actor='admin') {

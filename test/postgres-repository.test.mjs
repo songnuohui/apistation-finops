@@ -1467,6 +1467,113 @@ test('group selling multiplier history starts at midnight then uses the observed
   assert.equal(nextRule.params[2], '2026-08-01T04:00:00.000Z');
 });
 
+test('monitor history adjustment uses the selected window and records FinOps snapshots', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT id,primary_model,history_started_at')) {
+        return { rows: [{ id: '1', primary_model: 'gpt-test', history_started_at: '2026-09-01T00:00:00.000Z' }], rowCount: 1 };
+      }
+      if (text.includes('CREATE TEMP TABLE monitor_adjust_history_selected')) return { rows: [], rowCount: 0 };
+      if (text.includes('before_status')) return { rows: [{ snapshot: [{ id: 11, status: 'failed' }] }], rowCount: 1 };
+      if (text.includes('UPDATE "finops".monitor_group_check_history')) return { rows: [], rowCount: 1 };
+      if (text.includes('after_status')) return { rows: [{ snapshot: [{ id: 11, status: 'operational' }] }], rowCount: 1 };
+      if (text.includes('CREATE TEMP TABLE monitor_adjust_rollup_work')) return { rows: [], rowCount: 0 };
+      if (text.includes('FROM "finops".monitor_group_daily_rollups')) return { rows: [], rowCount: 0 };
+      if (text.includes('CREATE TEMP TABLE monitor_adjust_rollup_before')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT COALESCE(SUM(total_checks)')) return { rows: [{ value: 40 }], rowCount: 1 };
+      if (text.includes('SELECT $1::int AS target_total')) return { rows: [{ target_total: 40, ok_count: 37 }], rowCount: 1 };
+      if (text.includes('WITH shares AS')) return { rows: [], rowCount: 1 };
+      if (text.includes('FROM monitor_adjust_rollup_before')) return {
+        rows: [{ snapshot: [{ model: 'gpt-test', bucket_date: '2026-09-10', total_checks: 40, ok_count: 35, existed_before: true }] }],
+        rowCount: 1,
+      };
+      if (text.includes('FROM monitor_adjust_rollup_work')) return {
+        rows: [{ snapshot: [{ model: 'gpt-test', bucket_date: '2026-09-10', total_checks: 40, ok_count: 37, existed_before: true }] }],
+        rowCount: 1,
+      };
+      if (text.includes('SELECT COUNT(*)::int AS count')) return { rows: [{ count: 1 }], rowCount: 1 };
+      if (text.includes('INSERT INTO "finops".monitor_group_daily_rollups')) return { rows: [], rowCount: 1 };
+      if (text.includes('INSERT INTO "finops".monitor_group_history_adjustment_settings')) return {
+        rows: [{
+          monitor_group_id: '1', availability_window: '7d', target_availability: '92.50',
+          history_greenify_percent: '90.00', preserve_latest_status: true,
+          updated_by: 'tester', updated_at: '2026-09-11T00:00:00.000Z',
+        }],
+        rowCount: 1,
+      };
+      if (text.includes('INSERT INTO "finops".monitor_group_history_adjustment_batches')) return {
+        rows: [{
+          id: '7', monitor_group_id: '1', availability_window: '7d',
+          target_availability: '92.50', history_greenify_percent: '90.00',
+          preserve_latest_status: true, changed_history_count: 1,
+          changed_rollup_count: 1, reason: 'test', created_by: 'tester',
+          created_at: '2026-09-11T00:00:00.000Z',
+        }],
+        rowCount: 1,
+      };
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  const result = await repository.applyMonitorHistoryAdjustment(1, {
+    availabilityWindow: '7d',
+    targetAvailability: '92.50',
+    historyGreenifyPercent: '90.00',
+    preserveLatestStatus: true,
+    reason: 'test',
+  }, 'tester');
+
+  assert.equal(result.batch.id, 7);
+  assert.equal(result.resultingAvailability, 92.5);
+  const historyQuery = queries.find((query) => query.text.includes('CREATE TEMP TABLE monitor_adjust_history_selected'));
+  assert.equal(historyQuery.params[0], 1);
+  assert.equal(historyQuery.params[1], 'gpt-test');
+  assert.equal(historyQuery.params[5], 7);
+  const rollupQuery = queries.find((query) => query.text.includes('FROM "finops".monitor_group_daily_rollups'));
+  assert.deepEqual(rollupQuery.params.slice(0, 2), [1, 'gpt-test']);
+  assert.ok(queries.every((query) => !/\b(?:public|sub2api)\./i.test(query.text)));
+});
+
+test('monitor history adjustment undo rejects a deleted history row', async () => {
+  const queries = [];
+  const client = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT id FROM "finops".monitor_groups')) {
+        return { rows: [{ id: '1' }], rowCount: 1 };
+      }
+      if (text.includes('SELECT *') && text.includes('monitor_group_history_adjustment_batches')) {
+        return {
+          rows: [{
+            id: '7', monitor_group_id: '1',
+            history_after: [{ id: 11, status: 'operational' }],
+            rollups_after: [],
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)')) {
+        return { rows: [{ conflict: true }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+    release() {},
+  };
+  const repository = new PostgresRepository({ connect: async () => client }, config);
+  await assert.rejects(
+    repository.undoMonitorHistoryAdjustment(1, 'tester'),
+    /history changed after this adjustment/,
+  );
+  const conflictQuery = queries.find((query) => query.text.includes('jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)'));
+  assert.match(conflictQuery.text, /h\.id IS NULL/);
+  assert.equal(queries.at(-1).text, 'ROLLBACK');
+});
+
 test('sync state is pending when a required cursor is absent', async () => {
   const completeRows = REQUIRED_SYNC_SOURCES
     .filter((sourceName) => sourceName !== 'credit_reconciliation')

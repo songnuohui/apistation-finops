@@ -106,6 +106,16 @@ test('monitor PING latency migration remains FinOps-owned', () => {
   assert.doesNotMatch(migration, /credentials|api_key/i);
 });
 
+test('monitor history adjustment migration writes only audited FinOps data', () => {
+  const migration = read('migrations/075_monitor_history_adjustments.sql');
+  assert.match(migration, /monitor_group_history_adjustment_settings/);
+  assert.match(migration, /monitor_group_history_adjustment_batches/);
+  assert.match(migration, /history_before JSONB/);
+  assert.match(migration, /rollups_after JSONB/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO|DELETE FROM|ALTER TABLE)\s+(?:public|sub2api)\./i);
+  assert.doesNotMatch(migration, /\bredis\b/i);
+});
+
 test('multiplier history migration remains FinOps-owned and keeps open facts explicitly scoped', () => {
   const migration = read('migrations/010_multiplier_effective_history.sql');
   assert.match(migration, /CREATE TABLE IF NOT EXISTS .*group_selling_rate_rules/s);

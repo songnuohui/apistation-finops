@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Activity, CircleDot, Cloud, Edit3, ExternalLink, Megaphone, Play, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, X } from 'lucide-vue-next';
+import { Activity, CircleDot, Cloud, Database, Edit3, ExternalLink, Megaphone, Play, Plus, RefreshCw, RotateCcw, Save, Search, Settings2, Sparkles, Trash2, X } from 'lucide-vue-next';
 import { get, send } from '../api';
 
 type AnyRecord = Record<string, any>;
@@ -13,6 +13,9 @@ const candidates = ref<AnyRecord[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const savingAnnouncement = ref(false);
+const savingAdjustment = ref(false);
+const applyingAdjustment = ref(false);
+const undoingAdjustment = ref(false);
 const deleting = ref<number | null>(null);
 const running = ref<number | null>(null);
 const editor = ref<AnyRecord | null>(null);
@@ -97,6 +100,7 @@ function parseJson(value: any, fallback: AnyRecord) {
 }
 
 function openEditor(group: AnyRecord | null = null, candidate: AnyRecord | null = null) {
+  const historyAdjustment = group?.historyAdjustment || {};
   editor.value = {
     id: group?.id || null,
     name: group?.name || candidate?.name || '',
@@ -119,6 +123,16 @@ function openEditor(group: AnyRecord | null = null, candidate: AnyRecord | null 
     extraHeadersText: JSON.stringify(group?.extraHeaders || {}, null, 2),
     bodyOverrideMode: group?.bodyOverrideMode || 'off',
     bodyOverrideText: JSON.stringify(group?.bodyOverride || {}, null, 2),
+    historyAdjustment: {
+      availabilityWindow: historyAdjustment.availabilityWindow || '7d',
+      targetAvailability: historyAdjustment.targetAvailability ?? '',
+      historyGreenifyPercent: historyAdjustment.historyGreenifyPercent ?? 90,
+      preserveLatestStatus: historyAdjustment.preserveLatestStatus ?? true,
+      reason: '',
+      updatedBy: historyAdjustment.updatedBy || '',
+      updatedAt: historyAdjustment.updatedAt || null,
+      lastBatch: historyAdjustment.lastBatch ? { ...historyAdjustment.lastBatch } : null,
+    },
   };
 }
 
@@ -226,6 +240,116 @@ async function saveGroup() {
     emit('toast', error.message);
   } finally {
     saving.value = false;
+  }
+}
+
+function historyAdjustmentPayload() {
+  if (!editor.value?.historyAdjustment) return null;
+  const adjustment = editor.value.historyAdjustment;
+  const targetAvailability = adjustment.targetAvailability === ''
+    || adjustment.targetAvailability === null
+    || adjustment.targetAvailability === undefined
+    ? null
+    : Number(adjustment.targetAvailability);
+  return {
+    availabilityWindow: adjustment.availabilityWindow || '7d',
+    targetAvailability,
+    historyGreenifyPercent: Number(adjustment.historyGreenifyPercent),
+    preserveLatestStatus: Boolean(adjustment.preserveLatestStatus),
+    reason: String(adjustment.reason || '').trim(),
+  };
+}
+
+function syncEditorAdjustment() {
+  if (!editor.value?.id) return;
+  const refreshed = groups.value.find((item) => Number(item.id) === Number(editor.value?.id));
+  if (!refreshed) return;
+  const reason = editor.value.historyAdjustment?.reason || '';
+  editor.value.historyAdjustment = {
+    availabilityWindow: refreshed.historyAdjustment?.availabilityWindow || '7d',
+    targetAvailability: refreshed.historyAdjustment?.targetAvailability ?? '',
+    historyGreenifyPercent: refreshed.historyAdjustment?.historyGreenifyPercent ?? 90,
+    preserveLatestStatus: refreshed.historyAdjustment?.preserveLatestStatus ?? true,
+    reason,
+    updatedBy: refreshed.historyAdjustment?.updatedBy || '',
+    updatedAt: refreshed.historyAdjustment?.updatedAt || null,
+    lastBatch: refreshed.historyAdjustment?.lastBatch
+      ? { ...refreshed.historyAdjustment.lastBatch }
+      : null,
+  };
+}
+
+async function saveHistoryAdjustmentSettings() {
+  if (!editor.value?.id) return;
+  const payload = historyAdjustmentPayload();
+  if (!payload) return;
+  savingAdjustment.value = true;
+  try {
+    await send(`/monitor-groups/${editor.value.id}/history-adjustment-settings`, 'PATCH', payload);
+    await load();
+    syncEditorAdjustment();
+    emit('toast', '历史调整参数已保存，尚未修改历史数据');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    savingAdjustment.value = false;
+  }
+}
+
+async function applyHistoryAdjustment() {
+  if (!editor.value?.id) return;
+  const payload = historyAdjustmentPayload();
+  if (!payload || payload.targetAvailability === null || !Number.isFinite(payload.targetAvailability)) {
+    emit('toast', '请填写目标可用性');
+    return;
+  }
+  const label = editor.value.name || `分组 #${editor.value.id}`;
+  const confirmed = window.confirm(
+    `确定对“${label}”执行一次历史调整吗？\n\n`
+    + `统计窗口：${payload.availabilityWindow}\n`
+    + `目标可用性：${payload.targetAvailability}%\n`
+    + `异常状态柱转绿：${payload.historyGreenifyPercent}%\n\n`
+    + '本次会直接修改 FinOps 历史记录和日报汇总，后续探针仍会继续自然改变结果。',
+  );
+  if (!confirmed) return;
+  applyingAdjustment.value = true;
+  try {
+    const result = await send<AnyRecord>(
+      `/monitor-groups/${editor.value.id}/history-adjustment/apply`,
+      'POST',
+      payload,
+    );
+    await load();
+    syncEditorAdjustment();
+    const availability = result.resultingAvailability === null
+      || result.resultingAvailability === undefined
+      ? '暂无日报样本'
+      : `${Number(result.resultingAvailability).toFixed(2)}%`;
+    emit(
+      'toast',
+      `历史调整已应用：${result.batch?.changedHistoryCount || 0} 条状态、${result.batch?.changedRollupCount || 0} 条日报，结果 ${availability}`,
+    );
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    applyingAdjustment.value = false;
+  }
+}
+
+async function undoHistoryAdjustment() {
+  if (!editor.value?.id || !editor.value.historyAdjustment?.lastBatch
+    || editor.value.historyAdjustment.lastBatch.revertedAt) return;
+  if (!window.confirm('确定撤销最近一次历史调整吗？如果后续探针已经改动相关数据，系统会拒绝撤销。')) return;
+  undoingAdjustment.value = true;
+  try {
+    await send(`/monitor-groups/${editor.value.id}/history-adjustment/undo`, 'POST', {});
+    await load();
+    syncEditorAdjustment();
+    emit('toast', '最近一次历史调整已撤销');
+  } catch (error: any) {
+    emit('toast', error.message);
+  } finally {
+    undoingAdjustment.value = false;
   }
 }
 
@@ -403,6 +527,67 @@ onMounted(load);
           <label class="full-field">请求体覆盖 JSON<textarea v-model="editor.bodyOverrideText" rows="5" spellcheck="false" placeholder='{"temperature":0}'></textarea><small>合并模式保护模型、消息和 challenge 字段；替换模式按 Sub2API 规则使用非空响应判定。</small></label>
           <label class="toggle-field"><input v-model="editor.enabled" type="checkbox" /><span><strong>在公开监控页显示</strong><small>停用后保留配置，但不会展示给用户。</small></span></label>
         </div>
+        <section v-if="editor.id" class="history-adjustment-section">
+          <div class="history-adjustment-head">
+            <div>
+              <strong>历史数据调整</strong>
+              <small>参数按当前监控分组独立保存。</small>
+            </div>
+            <Database :size="19" />
+          </div>
+          <div class="form-grid history-adjustment-grid">
+            <label>统计窗口
+              <select v-model="editor.historyAdjustment.availabilityWindow">
+                <option value="7d">最近 7 天</option>
+                <option value="15d">最近 15 天</option>
+                <option value="30d">最近 30 天</option>
+              </select>
+            </label>
+            <label>目标可用性（%）
+              <input v-model.number="editor.historyAdjustment.targetAvailability" type="number" min="0" max="100" step="0.01" placeholder="例如 98.55" />
+            </label>
+            <label>异常状态柱转绿（%）
+              <input v-model.number="editor.historyAdjustment.historyGreenifyPercent" type="number" min="0" max="100" step="0.01" />
+            </label>
+            <label class="toggle-field">
+              <input v-model="editor.historyAdjustment.preserveLatestStatus" type="checkbox" />
+              <span><strong>保留最新状态柱</strong><small>不修改当前最新一次探针状态。</small></span>
+            </label>
+            <label class="full-field">调整原因
+              <textarea v-model="editor.historyAdjustment.reason" maxlength="500" rows="3" placeholder="填写本次调整原因，便于审计追溯。"></textarea>
+            </label>
+          </div>
+          <div v-if="editor.historyAdjustment.lastBatch" class="history-adjustment-last">
+            <span>最近执行：{{ dateTime(editor.historyAdjustment.lastBatch.createdAt) }}</span>
+            <span>状态 {{ editor.historyAdjustment.lastBatch.changedHistoryCount || 0 }} 条</span>
+            <span>日报 {{ editor.historyAdjustment.lastBatch.changedRollupCount || 0 }} 条</span>
+            <span :class="{ reverted: editor.historyAdjustment.lastBatch.revertedAt }">
+              {{ editor.historyAdjustment.lastBatch.revertedAt ? '已撤销' : '已生效' }}
+            </span>
+          </div>
+          <div class="history-adjustment-actions">
+            <button class="secondary-button" type="button" :disabled="savingAdjustment || applyingAdjustment || undoingAdjustment" @click="saveHistoryAdjustmentSettings">
+              <RefreshCw v-if="savingAdjustment" :size="15" class="spin" />
+              <Save v-else :size="15" />
+              保存参数
+            </button>
+            <button
+              class="secondary-button danger-action"
+              type="button"
+              :disabled="undoingAdjustment || applyingAdjustment || !editor.historyAdjustment.lastBatch || editor.historyAdjustment.lastBatch.revertedAt"
+              @click="undoHistoryAdjustment"
+            >
+              <RefreshCw v-if="undoingAdjustment" :size="15" class="spin" />
+              <RotateCcw v-else :size="15" />
+              撤销最近调整
+            </button>
+            <button class="primary-button" type="button" :disabled="applyingAdjustment || savingAdjustment || undoingAdjustment" @click="applyHistoryAdjustment">
+              <RefreshCw v-if="applyingAdjustment" :size="15" class="spin" />
+              <Database v-else :size="15" />
+              应用历史调整
+            </button>
+          </div>
+        </section>
         <div class="form-note">Sub2API 当前倍率：<strong>{{ multiplier(editor.sourceGroupMultiplier) }}</strong>。自定义值只覆盖 FinOps 页面展示；清空后恢复自动跟随。修改探测配置或更换分组后，历史从本次配置时间开始计算。</div>
         <footer><button class="secondary-button" type="button" @click="editor = null">取消</button><button class="primary-button" type="button" :disabled="saving" @click="saveGroup"><RefreshCw v-if="saving" :size="15" class="spin" /><Save v-else :size="15" />保存配置</button></footer>
       </section>
@@ -446,6 +631,16 @@ onMounted(load);
 .candidate-select{width:100%}
 .candidate-empty{color:var(--muted);font-size:11px}
 .form-grid label>small{color:var(--muted);font-size:11px;line-height:16px}
+.history-adjustment-section{margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}
+.history-adjustment-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:14px;color:#526b87}
+.history-adjustment-head strong,.history-adjustment-head small{display:block}
+.history-adjustment-head strong{color:var(--ink);font-size:14px}
+.history-adjustment-head small{margin-top:4px;color:var(--muted);font-size:11px}
+.history-adjustment-grid{gap:12px}
+.history-adjustment-last{display:flex;align-items:center;flex-wrap:wrap;gap:7px 13px;margin-top:13px;color:#63758b;font-size:11px}
+.history-adjustment-last span:last-child{color:#08734d;font-weight:700}
+.history-adjustment-last span.reverted{color:#a63443}
+.history-adjustment-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap;margin-top:15px}
 @media(max-width:760px){
   .group-monitor-header{align-items:flex-start;flex-direction:column}
   .group-monitor-actions{width:100%}
@@ -455,5 +650,7 @@ onMounted(load);
   .monitor-announcement-footer .primary-button{width:100%}
   .candidate-filterbar{grid-template-columns:1fr}
   .provider-picker,.api-mode-picker{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .history-adjustment-actions{align-items:stretch;flex-direction:column}
+  .history-adjustment-actions button{width:100%}
 }
 </style>

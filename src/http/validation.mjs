@@ -17,6 +17,7 @@ const SUPPLIER_QUALITY_MODES = new Set(['off', 'passive', 'active', 'hybrid']);
 const MONITOR_PROVIDERS = new Set(['openai', 'anthropic', 'gemini', 'grok']);
 const MONITOR_API_MODES = new Set(['chat_completions', 'responses']);
 const MONITOR_BODY_MODES = new Set(['off', 'merge', 'replace']);
+const MONITOR_AVAILABILITY_WINDOWS = new Set(['7d', '15d', '30d']);
 const MONITOR_FORBIDDEN_HEADERS = new Set([
   'connection', 'content-length', 'content-encoding', 'host',
   'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate',
@@ -111,6 +112,14 @@ function optionalId(value, field) {
 function optionalDecimal(value, field, { min = 0, allowZero = false } = {}) {
   if (value === undefined || value === null || value === '') return null;
   return decimalValue(value, field, { min, allowZero });
+}
+
+function optionalPercentage(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  const normalized = decimalValue(value, field, { min: 0, allowZero: true });
+  const parsed = new Decimal(normalized);
+  if (parsed.gt(100) || parsed.decimalPlaces() > 2) throw badRequest(`invalid ${field}`);
+  return parsed.toFixed(2);
 }
 
 function optionalEnum(value, field, allowed) {
@@ -632,6 +641,22 @@ export function normalizeMonitorSettings(input) {
     });
   }
   return normalized;
+}
+
+export function normalizeMonitorHistoryAdjustment(input = {}, { requireTarget = false } = {}) {
+  const targetAvailability = optionalPercentage(input.targetAvailability, 'targetAvailability');
+  if (requireTarget && targetAvailability === null) throw badRequest('targetAvailability is required');
+  return {
+    availabilityWindow: enumValue(input.availabilityWindow || '7d', 'availabilityWindow', MONITOR_AVAILABILITY_WINDOWS),
+    targetAvailability,
+    historyGreenifyPercent: input.historyGreenifyPercent === undefined
+      ? '90.00'
+      : (optionalPercentage(input.historyGreenifyPercent, 'historyGreenifyPercent') ?? '90.00'),
+    preserveLatestStatus: input.preserveLatestStatus === undefined
+      ? true
+      : booleanValue(input.preserveLatestStatus, 'preserveLatestStatus'),
+    reason: textValue(input.reason, 'reason', { required: false, max: 500 }),
+  };
 }
 
 export function normalizeCashTransaction(input) {

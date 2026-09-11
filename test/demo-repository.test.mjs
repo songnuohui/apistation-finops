@@ -4,6 +4,43 @@ import { DemoRepository } from '../src/repositories/demo-repository.mjs';
 
 const config = { baseCurrency: 'CNY', billingUnit: 'CNY', timezone: 'Asia/Shanghai' };
 
+test('demo monitor history adjustments persist until explicitly undone', async () => {
+  const repository = new DemoRepository(config);
+  const before = (await repository.listMonitorGroups()).find((item) => item.id === 1);
+  const originalAvailability = before.availabilityByWindow['7d'];
+  repository.monitorGroups.find((item) => item.id === 1).history.at(-1).status = 'unavailable';
+  const originalStatuses = (await repository.listMonitorGroups()).find((item) => item.id === 1).history.map((item) => item.status);
+
+  const settings = await repository.updateMonitorHistoryAdjustmentSettings(1, {
+    availabilityWindow: '7d',
+    targetAvailability: '92.50',
+    historyGreenifyPercent: '90.00',
+    preserveLatestStatus: true,
+    reason: '测试历史修正',
+  }, 'tester');
+  assert.equal(settings.targetAvailability, 92.5);
+  const applied = await repository.applyMonitorHistoryAdjustment(1, {
+    availabilityWindow: '7d',
+    targetAvailability: '92.50',
+    historyGreenifyPercent: '90.00',
+    preserveLatestStatus: true,
+    reason: '测试历史修正',
+  }, 'tester');
+  assert.equal(applied.resultingAvailability, 92.5);
+  assert.ok(applied.batch.changedHistoryCount > 0);
+  const afterApply = (await repository.listMonitorGroups()).find((item) => item.id === 1);
+  assert.equal(afterApply.availabilityByWindow['7d'], 92.5);
+  assert.equal(afterApply.history.at(-1).status, 'unavailable');
+  assert.equal(afterApply.historyAdjustment.lastBatch.id, applied.batch.id);
+  assert.equal((await repository.listMonitorGroups()).find((item) => item.id === 1).availabilityByWindow['7d'], 92.5);
+
+  await repository.undoMonitorHistoryAdjustment(1, 'tester');
+  const afterUndo = (await repository.listMonitorGroups()).find((item) => item.id === 1);
+  assert.equal(afterUndo.availabilityByWindow['7d'], originalAvailability);
+  assert.deepEqual(afterUndo.history.map((item) => item.status), originalStatuses);
+  assert.equal(afterUndo.historyAdjustment.lastBatch.revertedBy, 'tester');
+});
+
 test('demo writes remain visible for the process lifetime', async () => {
   const repository = new DemoRepository(config);
   const profile = await repository.createCostProfile({ name: '新模板', costType: 'subscription', currency: 'CNY', allocationMethod: 'standard_cost_weight' });

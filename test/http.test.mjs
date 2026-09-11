@@ -10,7 +10,7 @@ import { routeId } from '../src/http/route.mjs';
 import {
   normalizeAccountCostArchive, normalizeAccountCostPeriod, normalizeAccountCostPeriodDelete, normalizeAccountCostPeriodUpdate, normalizeAccountCostReprice, normalizeBulkAccountCostPeriods,
   normalizeAccountLedger, normalizeCashTransaction, normalizeCostProfile, normalizeMonitorGroup,
-  normalizeMonitorSettings, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
+  normalizeMonitorSettings, normalizeMonitorHistoryAdjustment, assertSupplierCredentials, normalizeSupplierConnection, normalizeSupplierQualityTarget,
   mergeSupplierCredentials,
   normalizeAccountProfitGuard,
   normalizeSub2ApiServiceAuthSettings,
@@ -202,6 +202,33 @@ test('monitor settings validate a bounded refresh interval', () => {
   assert.deepEqual(normalizeMonitorSettings({ refreshIntervalSeconds: '45' }), { refreshIntervalSeconds: 45 });
   assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '4' }), /invalid refreshIntervalSeconds/);
   assert.throws(() => normalizeMonitorSettings({ refreshIntervalSeconds: '3601' }), /invalid refreshIntervalSeconds/);
+});
+
+test('monitor history adjustments validate independent windows and percentages', () => {
+  assert.deepEqual(normalizeMonitorHistoryAdjustment({
+    availabilityWindow: '15d',
+    targetAvailability: '92.5',
+    historyGreenifyPercent: '90',
+    preserveLatestStatus: false,
+    reason: '历史探针误报修正',
+  }), {
+    availabilityWindow: '15d',
+    targetAvailability: '92.50',
+    historyGreenifyPercent: '90.00',
+    preserveLatestStatus: false,
+    reason: '历史探针误报修正',
+  });
+  assert.deepEqual(normalizeMonitorHistoryAdjustment({}), {
+    availabilityWindow: '7d',
+    targetAvailability: null,
+    historyGreenifyPercent: '90.00',
+    preserveLatestStatus: true,
+    reason: '',
+  });
+  assert.throws(() => normalizeMonitorHistoryAdjustment({ availabilityWindow: '10d' }), /invalid availabilityWindow/);
+  assert.throws(() => normalizeMonitorHistoryAdjustment({ targetAvailability: '100.001' }), /invalid targetAvailability/);
+  assert.throws(() => normalizeMonitorHistoryAdjustment({ historyGreenifyPercent: '-1' }), /invalid historyGreenifyPercent/);
+  assert.throws(() => normalizeMonitorHistoryAdjustment({}, { requireTarget: true }), /targetAvailability is required/);
 });
 
 test('supplier connections validate encrypted portal and API-key credentials', () => {
