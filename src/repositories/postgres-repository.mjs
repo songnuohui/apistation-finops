@@ -20,6 +20,10 @@ function jsonArray(value) {
   return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
 }
 
+function jsonbParam(value, fallback = []) {
+  return typeof value === 'string' ? value : JSON.stringify(value ?? fallback);
+}
+
 function comparableJson(value) {
   if (Array.isArray(value)) return value.map((item) => comparableJson(item));
   if (!value || typeof value !== 'object') return value;
@@ -2829,8 +2833,8 @@ export class PostgresRepository {
                   changed_history_count,changed_rollup_count,reason,created_by,created_at`,
       [
         id,input.availabilityWindow,input.targetAvailability,input.historyGreenifyPercent,
-        input.preserveLatestStatus,historyBefore.rows[0].snapshot,historyAfter.rows[0].snapshot,
-        rollupsBefore.rows[0].snapshot,rollupsAfter.rows[0].snapshot,
+        input.preserveLatestStatus,jsonbParam(historyBefore.rows[0].snapshot),jsonbParam(historyAfter.rows[0].snapshot),
+        jsonbParam(rollupsBefore.rows[0].snapshot),jsonbParam(rollupsAfter.rows[0].snapshot),
         Number(changedHistory.rows[0].count),
         Number(rollupChanges.rows[0].count),input.reason,actor,
       ]);
@@ -2887,7 +2891,7 @@ export class PostgresRepository {
         FROM jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)
         LEFT JOIN ${this.schema}.monitor_group_check_history h ON h.id=expected.id
         WHERE h.id IS NULL OR h.status<>expected.status
-        LIMIT 1`, [row.history_after]);
+        LIMIT 1`, [jsonbParam(row.history_after)]);
       if (historyConflict.rowCount) {
         throw httpError('monitor history changed after this adjustment; undo was not applied', 409);
       }
@@ -2903,7 +2907,7 @@ export class PostgresRepository {
              OR r.total_checks<>expected.total_checks
              OR r.ok_count<>expected.ok_count
            ))
-        LIMIT 1`, [row.rollups_after, id]);
+        LIMIT 1`, [jsonbParam(row.rollups_after), id]);
       if (rollupConflict.rowCount) {
         throw httpError('monitor rollups changed after this adjustment; undo was not applied', 409);
       }
@@ -2911,7 +2915,7 @@ export class PostgresRepository {
         UPDATE ${this.schema}.monitor_group_check_history h
         SET status=expected.status
         FROM jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)
-        WHERE h.id=expected.id`, [row.history_before]);
+        WHERE h.id=expected.id`, [jsonbParam(row.history_before)]);
       await client.query(`
         DELETE FROM ${this.schema}.monitor_group_daily_rollups r
         USING jsonb_to_recordset($1::jsonb) AS expected(
@@ -2919,7 +2923,7 @@ export class PostgresRepository {
         WHERE r.monitor_group_id=$2
           AND r.model=expected.model
           AND r.bucket_date=expected.bucket_date
-          AND expected.existed_before=FALSE`, [row.rollups_before,id]);
+          AND expected.existed_before=FALSE`, [jsonbParam(row.rollups_before),id]);
       await client.query(`
         UPDATE ${this.schema}.monitor_group_daily_rollups r
         SET total_checks=expected.total_checks,
@@ -2930,7 +2934,7 @@ export class PostgresRepository {
         WHERE r.monitor_group_id=$2
           AND r.model=expected.model
           AND r.bucket_date=expected.bucket_date
-          AND expected.existed_before=TRUE`, [row.rollups_before,id]);
+          AND expected.existed_before=TRUE`, [jsonbParam(row.rollups_before),id]);
       const result = await client.query(`
         UPDATE ${this.schema}.monitor_group_history_adjustment_batches
         SET reverted_at=NOW(),reverted_by=$2

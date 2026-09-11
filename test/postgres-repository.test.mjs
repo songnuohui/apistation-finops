@@ -1537,6 +1537,11 @@ test('monitor history adjustment uses the selected window and records FinOps sna
     historyQuery.text,
     /non_green_count::numeric\s*\*\s*\$8::numeric\s*\/\s*100\.0[\s\S]*::bigint/,
   );
+  const batchQuery = queries.find((query) => query.text.includes('INSERT INTO "finops".monitor_group_history_adjustment_batches'));
+  assert.deepEqual(JSON.parse(batchQuery.params[5]), [{ id: 11, status: 'failed' }]);
+  assert.deepEqual(JSON.parse(batchQuery.params[6]), [{ id: 11, status: 'operational' }]);
+  assert.deepEqual(JSON.parse(batchQuery.params[7]), [{ model: 'gpt-test', bucket_date: '2026-09-10', total_checks: 40, ok_count: 35, existed_before: true }]);
+  assert.deepEqual(JSON.parse(batchQuery.params[8]), [{ model: 'gpt-test', bucket_date: '2026-09-10', total_checks: 40, ok_count: 37, existed_before: true }]);
   const rollupQuery = queries.find((query) => query.text.includes('FROM "finops".monitor_group_daily_rollups'));
   assert.deepEqual(rollupQuery.params.slice(0, 2), [1, 'gpt-test']);
   assert.match(rollupQuery.text, /bucket_date\s*>=\s*\(\(.+\)::date\s*-\s*\$5::int\)/);
@@ -1576,6 +1581,7 @@ test('monitor history adjustment undo rejects a deleted history row', async () =
   );
   const conflictQuery = queries.find((query) => query.text.includes('jsonb_to_recordset($1::jsonb) AS expected(id bigint,status text)'));
   assert.match(conflictQuery.text, /h\.id IS NULL/);
+  assert.deepEqual(JSON.parse(conflictQuery.params[0]), [{ id: 11, status: 'operational' }]);
   assert.equal(queries.at(-1).text, 'ROLLBACK');
 });
 
