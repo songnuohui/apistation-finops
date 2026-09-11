@@ -1533,6 +1533,10 @@ test('monitor history adjustment uses the selected window and records FinOps sna
   assert.equal(historyQuery.params[0], 1);
   assert.equal(historyQuery.params[1], 'gpt-test');
   assert.equal(historyQuery.params[5], 7);
+  assert.match(
+    historyQuery.text,
+    /non_green_count::numeric\s*\*\s*\$8::numeric\s*\/\s*100\.0[\s\S]*::bigint/,
+  );
   const rollupQuery = queries.find((query) => query.text.includes('FROM "finops".monitor_group_daily_rollups'));
   assert.deepEqual(rollupQuery.params.slice(0, 2), [1, 'gpt-test']);
   assert.ok(queries.every((query) => !/\b(?:public|sub2api)\./i.test(query.text)));

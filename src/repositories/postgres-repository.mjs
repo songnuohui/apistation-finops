@@ -2671,7 +2671,9 @@ export class PostgresRepository {
         )
         SELECT id,status AS before_status,'operational'::varchar(24) AS after_status
         FROM eligible
-        WHERE random_rank <= round(non_green_count * $8 / 100.0)`, [
+        WHERE random_rank <= round(
+          non_green_count::numeric * $8::numeric / 100.0
+        )::bigint`, [
         id,primaryModel,monitor.rows[0].history_started_at,nowAt,this.config.timezone || 'UTC',
         windowDays,input.preserveLatestStatus,input.historyGreenifyPercent,
       ]);
