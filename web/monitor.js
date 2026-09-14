@@ -56,6 +56,13 @@ const providerText = {
   grok: 'Grok',
 };
 
+const providerToneByKey = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  gemini: 'gemini',
+  grok: 'grok',
+};
+
 function multiplier(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return '--';
@@ -117,7 +124,9 @@ function card(group) {
   const history = normalizedHistory(group);
   const availabilityByWindow = group.availabilityByWindow || { '7d': group.availabilityPercent };
   const availability = availabilityByWindow[selectedWindow];
-  const provider = providerText[String(group.provider || '').toLowerCase()] || group.provider || '上游分组';
+  const providerKey = String(group.provider || '').trim().toLowerCase();
+  const provider = providerText[providerKey] || String(group.provider || '').trim() || '上游分组';
+  const providerTone = providerToneByKey[providerKey] || 'unknown';
   const model = group.modelLabel || '分组整体状态';
   const historyBars = Array.from({ length: Math.max(0, 60 - history.length) }, () => null)
     .concat(history)
@@ -126,11 +135,11 @@ function card(group) {
   return `<article class="group-card is-${escapeHtml(status)}">
     <header class="group-card-header">
       <div class="group-title">
-        <div class="group-symbol" aria-hidden="true"><img src="/icons/activity.svg" alt=""></div>
+        <div class="group-symbol is-${providerTone}" aria-hidden="true"><span class="group-symbol-icon"></span></div>
         <div class="group-heading">
           <h3 class="group-name">${escapeHtml(group.name || `分组 #${group.id}`)}</h3>
           <div class="group-tags">
-            <span class="provider-tag">${escapeHtml(provider)}</span>
+            <span class="provider-tag is-${providerTone}">${escapeHtml(provider)}</span>
             <span class="model-tag">${escapeHtml(model)}</span>
           </div>
         </div>

@@ -30,6 +30,9 @@ const providerOptions = [
   { value: 'gemini', label: 'Gemini', icon: Cloud },
   { value: 'grok', label: 'Grok', icon: CircleDot },
 ];
+const providerLabels: Record<string, string> = Object.fromEntries(
+  providerOptions.map((provider) => [provider.value, provider.label]),
+);
 const apiModeOptions = [
   { value: 'chat_completions', label: 'OpenAI Compatible', hint: '使用 /v1/chat/completions，发送 messages，适合大多数兼容接口。' },
   { value: 'responses', label: 'Responses API', hint: '使用 /v1/responses，发送 instructions + input，适合支持 Responses 的接口。' },
@@ -77,6 +80,16 @@ function statusLabel(value: any) {
 function statusClass(value: any) {
   return ['healthy'].includes(String(value)) ? 'success'
     : ['unavailable'].includes(String(value)) ? 'danger' : 'warning';
+}
+
+function providerLabel(value: any) {
+  const key = String(value || '').trim().toLowerCase();
+  return providerLabels[key] || String(value || '').trim() || '未知平台';
+}
+
+function providerClass(value: any) {
+  const key = String(value || '').trim().toLowerCase();
+  return providerLabels[key] ? `is-${key}` : 'is-unknown';
 }
 
 function groupStatus(group: AnyRecord) {
@@ -441,7 +454,7 @@ onMounted(load);
           <thead><tr><th>分组</th><th>状态</th><th>当前展示倍率</th><th>Sub2API 倍率</th><th>探测</th><th>记录</th><th>启用</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="group in groups" :key="group.id">
-              <td><strong>{{ group.name }}</strong><small>ID {{ group.sourceGroupId }}<template v-if="group.modelLabel"> · {{ group.modelLabel }}</template></small></td>
+              <td><strong>{{ group.name }}</strong><small class="monitor-group-meta"><span class="monitor-provider-tag" :class="providerClass(group.provider)">{{ providerLabel(group.provider) }}</span><span>ID {{ group.sourceGroupId }}</span><template v-if="group.modelLabel"> · {{ group.modelLabel }}</template></small></td>
               <td><span class="status-pill" :class="statusClass(groupStatus(group))">{{ statusLabel(groupStatus(group)) }}</span><small>{{ group.probeConfigured ? dateTime(group.lastObservedAt) : '请补充 Endpoint、API Key 和主模型' }}</small></td>
               <td><strong class="group-current-multiplier">{{ multiplier(group.currentMultiplier) }}</strong><small>仅展示当前值</small></td>
               <td><strong>{{ multiplier(group.sourceGroupMultiplier) }}</strong><small>Sub2API 当前值</small></td>
@@ -487,7 +500,7 @@ onMounted(load);
                 v-for="provider in providerOptions"
                 :key="provider.value"
                 type="button"
-                :class="['provider-option', providerButtonClass(provider.value)]"
+                :class="['provider-option', providerClass(provider.value), providerButtonClass(provider.value)]"
                 :aria-pressed="editor.provider === provider.value"
                 @click="selectProvider(provider.value)"
               >
@@ -605,6 +618,12 @@ onMounted(load);
 .group-monitor-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
 .group-monitor-table{min-width:1180px!important}
 .group-monitor-table td small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.group-monitor-table td small.monitor-group-meta{display:flex;align-items:center;flex-wrap:wrap;gap:5px}
+.monitor-provider-tag{display:inline-flex;max-width:none;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;background:#f3f4f6;color:#4b5563;font-size:9px;font-weight:800;line-height:1.1}
+.monitor-provider-tag.is-openai{border-color:#b9e8d2;background:#e5f8ef;color:#047857}
+.monitor-provider-tag.is-anthropic{border-color:#f4c7ab;background:#fff1e8;color:#c2410c}
+.monitor-provider-tag.is-gemini{border-color:#b7dff2;background:#e3f5fd;color:#0369a1}
+.monitor-provider-tag.is-grok{border-color:#d4d4d8;background:#f0f0f1;color:#3f3f46}
 .group-current-multiplier{color:var(--primary-dark)}
 .monitor-announcement-field{display:grid;gap:7px;color:#53677f;font-size:11px}
 .monitor-announcement-field textarea{width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:7px;resize:vertical;background:#fbfdff;color:var(--ink);font:inherit;line-height:1.6}
@@ -616,8 +635,12 @@ onMounted(load);
 .group-monitor-editor-modal{width:min(920px,100%)}
 .provider-picker{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
 .provider-option{min-width:0;min-height:42px;display:flex;align-items:center;justify-content:center;gap:7px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#52657c;font-size:12px;transition:border-color .16s ease,background-color .16s ease,color .16s ease,box-shadow .16s ease}
-.provider-option:hover{border-color:#8db3e7;background:#f7faff}
-.provider-option.active{border-color:#11a78e;background:#effcf8;color:#087d68;box-shadow:0 0 0 1px #11a78e}
+.provider-option:hover{background:#f7faff}
+.provider-option.active{box-shadow:0 0 0 1px currentColor}
+.provider-option.is-openai:hover,.provider-option.is-openai.active{border-color:#059669;background:#effcf8;color:#047857}
+.provider-option.is-anthropic:hover,.provider-option.is-anthropic.active{border-color:#ea580c;background:#fff4ec;color:#c2410c}
+.provider-option.is-gemini:hover,.provider-option.is-gemini.active{border-color:#0284c7;background:#edf9fe;color:#0369a1}
+.provider-option.is-grok:hover,.provider-option.is-grok.active{border-color:#71717a;background:#f4f4f5;color:#3f3f46}
 .api-mode-field{padding:12px;border:1px solid #cfe0fa;border-radius:7px;background:#f5f9ff}
 .api-mode-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
 .api-mode-option{display:grid;gap:4px;padding:11px 12px;border:1px solid #cfe0fa;border-radius:7px;background:#fff;color:#53657a;text-align:left}

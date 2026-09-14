@@ -16,6 +16,21 @@
   --red-soft: #ffeaed;
   --gray: #819194;
   --gray-soft: #edf2f1;
+  --provider-openai: #059669;
+  --provider-openai-dark: #047857;
+  --provider-openai-soft: #e5f8ef;
+  --provider-anthropic: #ea580c;
+  --provider-anthropic-dark: #c2410c;
+  --provider-anthropic-soft: #fff1e8;
+  --provider-gemini: #0284c7;
+  --provider-gemini-dark: #0369a1;
+  --provider-gemini-soft: #e3f5fd;
+  --provider-grok: #52525b;
+  --provider-grok-dark: #3f3f46;
+  --provider-grok-soft: #f0f0f1;
+  --provider-unknown: #6b7280;
+  --provider-unknown-dark: #4b5563;
+  --provider-unknown-soft: #f3f4f6;
 }
 
 * { box-sizing: border-box; }
@@ -68,8 +83,16 @@ button:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.brand-mark {
   background: var(--green-soft);
   color: var(--green-dark);
+}
+
+.group-symbol {
+  background: var(--provider-unknown-soft);
+  color: var(--provider-unknown-dark);
 }
 
 .brand-mark {
@@ -383,7 +406,33 @@ h1 {
   border-radius: 9px;
 }
 
-.group-symbol img { width: 16px; height: 16px; }
+.group-symbol-icon {
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  -webkit-mask: url("/icons/activity.svg") center / contain no-repeat;
+  mask: url("/icons/activity.svg") center / contain no-repeat;
+}
+
+.group-symbol.is-openai {
+  background: var(--provider-openai-soft);
+  color: var(--provider-openai-dark);
+}
+
+.group-symbol.is-anthropic {
+  background: var(--provider-anthropic-soft);
+  color: var(--provider-anthropic-dark);
+}
+
+.group-symbol.is-gemini {
+  background: var(--provider-gemini-soft);
+  color: var(--provider-gemini-dark);
+}
+
+.group-symbol.is-grok {
+  background: var(--provider-grok-soft);
+  color: var(--provider-grok-dark);
+}
 
 .group-heading { min-width: 0; }
 
@@ -420,9 +469,34 @@ h1 {
 }
 
 .provider-tag {
-  background: var(--green-soft);
-  color: var(--green-dark);
+  border: 1px solid transparent;
+  background: var(--provider-unknown-soft);
+  color: var(--provider-unknown-dark);
   font-weight: 800;
+}
+
+.provider-tag.is-openai {
+  border-color: #b9e8d2;
+  background: var(--provider-openai-soft);
+  color: var(--provider-openai-dark);
+}
+
+.provider-tag.is-anthropic {
+  border-color: #f4c7ab;
+  background: var(--provider-anthropic-soft);
+  color: var(--provider-anthropic-dark);
+}
+
+.provider-tag.is-gemini {
+  border-color: #b7dff2;
+  background: var(--provider-gemini-soft);
+  color: var(--provider-gemini-dark);
+}
+
+.provider-tag.is-grok {
+  border-color: #d4d4d8;
+  background: var(--provider-grok-soft);
+  color: var(--provider-grok-dark);
 }
 
 .model-tag {
