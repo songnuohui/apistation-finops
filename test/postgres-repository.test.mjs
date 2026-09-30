@@ -1073,6 +1073,68 @@ test('monitor candidates merge the sanitized source catalog with usage activity'
   assert.doesNotMatch(queries[0].text, /credentials|model_routing/i);
 });
 
+test('monitor availability windows handle PostgreSQL date values independently', async () => {
+  const queries = [];
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: config.timezone });
+  const todayAtUtcMidnight = new Date(`${today}T00:00:00Z`);
+  const bucketDate = (daysAgo) => {
+    const value = new Date(todayAtUtcMidnight);
+    value.setUTCDate(value.getUTCDate() - daysAgo);
+    return value;
+  };
+  const pool = {
+    async query(text, params = []) {
+      queries.push({ text, params });
+      if (text.includes('SELECT g.*,c.name AS source_group_name')) {
+        return {
+          rows: [{
+            id: '1', name: 'Test monitor', source_group_id: '10', model_label: 'gpt-test',
+            source_group_name: 'Test group', platform: 'openai', source_group_multiplier: '0.1',
+            provider: 'openai', api_mode: 'chat_completions', endpoint: 'https://example.test',
+            api_key_ciphertext: 'ciphertext', api_key_masked: '****', primary_model: 'gpt-test',
+            extra_models: [], group_name: '', extra_headers: {}, body_override_mode: 'off',
+            body_override: {}, display_order: 1, enabled: true, refresh_interval_seconds: 300,
+            jitter_seconds: 0, history_started_at: bucketDate(20).toISOString(), last_status: 'operational',
+            last_message: '', last_checked_at: bucketDate(0).toISOString(), last_latency_ms: 100,
+            last_ping_latency_ms: 5, display_multiplier: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('monitor_group_history_adjustment_settings')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT DISTINCT ON (h.monitor_group_id,h.model)')) {
+        return {
+          rows: [{
+            monitor_group_id: '1', model: 'gpt-test', status: 'operational', latency_ms: 100,
+            ping_latency_ms: 5, message: '', checked_at: bucketDate(0).toISOString(),
+          }],
+          rowCount: 1,
+        };
+      }
+      if (text.includes('WITH ranked AS')) return { rows: [], rowCount: 0 };
+      if (text.includes('monitor_group_daily_rollups')) {
+        return {
+          rows: [
+            { monitor_group_id: '1', model: 'gpt-test', bucket_date: bucketDate(2), total_checks: 10, ok_count: 8 },
+            { monitor_group_id: '1', model: 'gpt-test', bucket_date: bucketDate(10), total_checks: 20, ok_count: 20 },
+            { monitor_group_id: '1', model: 'gpt-test', bucket_date: bucketDate(20), total_checks: 30, ok_count: 15 },
+          ],
+          rowCount: 3,
+        };
+      }
+      assert.fail(`unexpected query: ${text}`);
+    },
+  };
+
+  const repository = new PostgresRepository(pool, config);
+  const groups = await repository.listMonitorGroups();
+  const group = groups[0];
+
+  assert.deepEqual(group.availabilitySampleCount, { '7d': 10, '15d': 30, '30d': 60 });
+  assert.deepEqual(group.availabilityByWindow, { '7d': 80, '15d': 93.33, '30d': 71.67 });
+  assert.equal(group.availabilityPercent, 80);
+});
+
 test('first account multiplier of the day starts at local midnight', async () => {
   const queries = [];
   const client = {

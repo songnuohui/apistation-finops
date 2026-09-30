@@ -8,6 +8,14 @@ function number(value) {
   return value === null || value === undefined ? 0 : Number(value);
 }
 
+function dateKey(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+  }
+  const text = String(value ?? '').trim();
+  return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : '';
+}
+
 function nullableNumber(value) {
   return value === null || value === undefined ? null : Number(value);
 }
@@ -2508,9 +2516,10 @@ export class PostgresRepository {
       for (const days of [7, 15, 30]) {
         const cutoff = new Date(`${today}T00:00:00Z`);
         cutoff.setUTCDate(cutoff.getUTCDate() - (days - 1));
+        const cutoffKey = cutoff.toISOString().slice(0, 10);
         const stats = groupRollups
           .filter((item) => item.model === group.primaryModel)
-          .filter((item) => String(item.bucket_date).slice(0, 10) >= cutoff.toISOString().slice(0, 10))
+          .filter((item) => dateKey(item.bucket_date) >= cutoffKey)
           .reduce((total, item) => ({
             total: total.total + number(item.total_checks),
             ok: total.ok + number(item.ok_count),
