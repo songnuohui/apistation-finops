@@ -1,0 +1,24 @@
+[Unit]
+Description=FinOps fixed read-only Sub2API backup exporter
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/apistation-finops/repo/scripts/backup-source.py
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=finops-backup-source
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/finops-backup-source
+MemoryMax=192M
+CPUQuota=25%
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

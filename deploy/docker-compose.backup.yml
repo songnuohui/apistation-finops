@@ -1,0 +1,47 @@
+services:
+  apistation-finops:
+    networks:
+      - backups
+
+  finops-backup-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backup
+    image: apistation-finops-backup:local
+    container_name: apistation-finops-backup
+    restart: unless-stopped
+    environment:
+      FINOPS_BACKUP_WORKER_TOKEN: "${FINOPS_BACKUP_WORKER_TOKEN:?Set backup worker token}"
+    networks:
+      - backups
+    volumes:
+      - finops-backup-data:/var/lib/finops-backup
+      - /run/finops-backup-source:/run/source:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 64
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8093/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  backups:
+    driver: bridge
+
+volumes:
+  finops-backup-data:

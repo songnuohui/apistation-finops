@@ -19,6 +19,7 @@ const OAuthSupplyView = defineAsyncComponent(() => import('./components/OAuthSup
 const ReplenishmentView = defineAsyncComponent(() => import('./components/ReplenishmentView.vue'));
 const EmailCenterView = defineAsyncComponent(() => import('./components/EmailCenterView.vue'));
 const ModelAuditView = defineAsyncComponent(() => import('./components/ModelAuditView.vue'));
+const BackupsView = defineAsyncComponent(() => import('./components/BackupsView.vue'));
 
 type AnyRecord = Record<string, any>;
 
@@ -57,6 +58,7 @@ const oauthSupplyRefreshToken = ref(0);
 const replenishmentRefreshToken = ref(0);
 const emailRefreshToken = ref(0);
 const modelAuditRefreshToken = ref(0);
+const backupRefreshToken = ref(0);
 const activeUsageTab = ref<'users' | 'models' | 'events'>('users');
 const sort = ref('userChargeCny');
 const direction = ref<'asc' | 'desc'>('desc');
@@ -74,6 +76,7 @@ const nav = [
   { id: 'replenishment', label: '自动补号', icon: RefreshCw, group: '自动化接入' },
   { id: 'email', label: '邮件中心', icon: Mail, group: '运营工具' },
   { id: 'model-audit', label: '模型审计', icon: ShieldCheck, group: '运营工具' },
+  { id: 'backups', label: '数据备份', icon: DatabaseZap, group: '运营工具' },
 ];
 const pageMeta: Record<string, [string, string]> = {
   overview: ['经营总览', '现金、消耗、成本与毛利'],
@@ -86,6 +89,7 @@ const pageMeta: Record<string, [string, string]> = {
   replenishment: ['自动补号', '库存、订单、验号、Sub2API 导入和采购成本统一管理'],
   email: ['邮件中心', '公告、活动、订阅和发送记录'],
   'model-audit': ['模型审计', '检查上游响应模型是否符合全局合法映射'],
+  backups: ['数据备份', 'Sub2API 业务数据只读备份与七牛加密存储'],
 };
 
 const supplierTab = computed(() => String(route.query.tab || 'connections'));
@@ -111,6 +115,7 @@ const showRangeControl = computed(() => (
   && page.value !== 'email'
   && page.value !== 'group-monitor'
   && page.value !== 'model-audit'
+  && page.value !== 'backups'
   && (page.value !== 'suppliers' || supplierTab.value === 'quality')
 ));
 const customRangeError = computed(() => {
@@ -196,6 +201,7 @@ async function loadPage() {
     else if (page.value === 'replenishment') replenishmentRefreshToken.value += 1;
     else if (page.value === 'email') emailRefreshToken.value += 1;
     else if (page.value === 'model-audit') modelAuditRefreshToken.value += 1;
+    else if (page.value === 'backups') backupRefreshToken.value += 1;
   } finally { loading.value = false; }
 }
 
@@ -493,6 +499,7 @@ function syncBodyScrollLock() {
         />
         <EmailCenterView v-else-if="page === 'email'" :refresh-token="emailRefreshToken" @toast="showToast" />
         <ModelAuditView v-else-if="page === 'model-audit'" :refresh-token="modelAuditRefreshToken" @toast="showToast" />
+        <BackupsView v-else-if="page === 'backups'" :refresh-token="backupRefreshToken" @toast="showToast" />
         <div v-else-if="false" class="page-view">
           <Toolbar v-model="search" placeholder="搜索供应商、模型或密钥" :loading="loading" />
           <section class="panel table-panel">

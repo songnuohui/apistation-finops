@@ -1,0 +1,9 @@
+FROM node:22-alpine
+WORKDIR /app
+RUN apk add --no-cache restic ca-certificates && mkdir -p /var/lib/finops-backup && chown node:node /var/lib/finops-backup
+COPY --chown=node:node src/backup ./src/backup
+COPY --chown=node:node src/services/backup-policy.mjs ./src/services/backup-policy.mjs
+USER node
+ENV NODE_ENV=production NODE_OPTIONS=--max-old-space-size=192
+EXPOSE 8093
+CMD ["node", "src/backup/worker.mjs"]

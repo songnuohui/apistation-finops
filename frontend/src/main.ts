@@ -18,6 +18,7 @@ const routes = [
   { path: '/replenishment', component: App },
   { path: '/email', component: App },
   { path: '/model-audit', component: App },
+  { path: '/backups', component: App },
 ];
 
 const router = createRouter({
