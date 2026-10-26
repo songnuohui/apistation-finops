@@ -8,6 +8,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeBackupSettings, mergeBackupSecrets, resticEnvironment, backupError } from '../services/backup-policy.mjs';
+import { resticStorageError } from './storage-errors.mjs';
 
 const BASE = '/var/lib/finops-backup';
 const STAGING = `${BASE}/staging/current`;
@@ -73,6 +74,7 @@ function restic(args, settings, secrets, signal, progress) {
     let output = '';
     let summary = null;
     let overflow = false;
+    let diagnostic = '';
     child.stdout.on('data', (chunk) => {
       if (!progress) {
         output += chunk.toString();
@@ -92,10 +94,10 @@ function restic(args, settings, secrets, signal, progress) {
         } catch { /* Never return CLI output or file contents to the web process. */ }
       }
     });
-    child.stderr.resume();
+    child.stderr.on('data', (chunk) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-65536); });
     child.on('error', () => reject(backupError('备份工具启动失败或任务超时', 503)));
     child.on('close', (code) => {
-      if (code !== 0 || overflow) return reject(backupError('存储操作失败；请检查区域、密钥、仓库密码、访问权限和仓库锁', 502));
+      if (code !== 0 || overflow) return reject(resticStorageError(code, diagnostic, overflow));
       resolve(progress ? summary : output);
     });
   });

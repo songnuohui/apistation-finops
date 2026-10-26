@@ -59,6 +59,18 @@ Do not share production SSH or database credentials through the settings page.
 
 Qiniu S3 endpoint/region compatibility and scoped permissions must be verified
 with the actual user-provided bucket; a saved form is not proof of a usable backup.
+Use the documented regional endpoint, for example `https://s3.cn-south-1.qiniucs.com`
+with region `cn-south-1`. The bucket is a separate field: do not paste its
+`<bucket>.s3.<region>.qiniucs.com` domain into the regional endpoint field. Legacy
+hyphenated endpoints remain accepted for existing configurations, but are not
+selected by default or silently rewritten. Endpoint changes still require confirmation.
+See https://developer.qiniu.com/kodo/4088/s3-access-domainname.
+
+Storage failures return fixed, categorized messages, never raw CLI diagnostics or
+credentials. `Access Denied` does not prove that the repository is uninitialized
+or that the repository password is wrong: cloud authentication/authorization failed
+before those could be verified. Re-enter a matching AK/SK pair in FinOps, not chat.
+Do not initialize, force-unlock, or overwrite a repository to fix authentication.
 
 ## Data format and increments
 

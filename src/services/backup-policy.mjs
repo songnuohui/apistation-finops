@@ -1,6 +1,6 @@
 export const BACKUP_DEFAULTS = Object.freeze({
   enabled: false,
-  endpoint: 'https://s3-cn-east-1.qiniucs.com',
+  endpoint: 'https://s3.cn-east-1.qiniucs.com',
   region: 'cn-east-1',
   bucket: '',
   prefix: 'sub2api-backup',
@@ -48,10 +48,11 @@ export function normalizeBackupSettings(input, previous = BACKUP_DEFAULTS) {
   }
   let endpoint;
   try { endpoint = new URL(result.endpoint); } catch { throw backupError('七牛 S3 接口地址错误'); }
-  const host = /^s3-(cn-east-[12]|cn-north-1|cn-south-1|us-north-1|ap-southeast-1)\.qiniucs\.com$/.exec(endpoint.hostname);
+  // Keep saved legacy endpoints usable; new configurations use Qiniu's documented s3. endpoints.
+  const host = /^s3[.-](cn-east-[12]|cn-north-1|cn-south-1|us-north-1|ap-southeast-1)\.qiniucs\.com$/.exec(endpoint.hostname);
   if (!host || endpoint.protocol !== 'https:' || endpoint.port || endpoint.username || endpoint.password
     || endpoint.pathname !== '/' || endpoint.search || endpoint.hash || host[1] !== result.region) {
-    throw backupError('仅允许区域匹配的七牛官方 HTTPS S3 接口');
+    throw backupError('请填写与区域匹配、不含空间名的七牛 HTTPS S3 接口，例如 https://s3.cn-south-1.qiniucs.com');
   }
   result.endpoint = endpoint.origin;
   if (result.bucket && !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(result.bucket)) throw backupError('空间名称格式错误');

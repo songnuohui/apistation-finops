@@ -17,7 +17,7 @@ const working = ref('');
 const errorMessage = ref('');
 const confirmation = ref<{ title: string; message: string; action: () => Promise<void> } | null>(null);
 const form = ref<RecordValue>({
-  enabled: false, endpoint: 'https://s3-cn-east-1.qiniucs.com', region: 'cn-east-1', bucket: '', prefix: 'sub2api-backup',
+  enabled: false, endpoint: 'https://s3.cn-east-1.qiniucs.com', region: 'cn-east-1', bucket: '', prefix: 'sub2api-backup',
   intervalMinutes: 60, timeoutMinutes: 30, uploadLimitKiB: 2048, keepHourly: 48, keepDaily: 30, keepWeekly: 8,
   autoPrune: false, accessKey: '', secretKey: '', password: '',
 });
@@ -149,8 +149,8 @@ watch(() => props.refreshToken, () => void load());
       <form class="panel" @submit.prevent="save()">
         <header class="panel-head"><div><h2>七牛加密仓库</h2><p>敏感值不回显；留空保持原值。仓库密码必须在 FinOps 之外独立保存。</p></div><Cloud :size="22" class="head-icon" /></header>
         <div class="form-grid">
-          <label>区域<select v-model="form.region" :disabled="disabled" @change="form.endpoint = `https://s3-${form.region}.qiniucs.com`"><option value="cn-east-1">华东 cn-east-1</option><option value="cn-east-2">华东 cn-east-2</option><option value="cn-north-1">华北 cn-north-1</option><option value="cn-south-1">华南 cn-south-1</option><option value="us-north-1">北美 us-north-1</option><option value="ap-southeast-1">新加坡 ap-southeast-1</option></select></label>
-          <label>S3 HTTPS 接口<input v-model="form.endpoint" type="url" required :disabled="disabled" /></label>
+          <label>区域<select v-model="form.region" :disabled="disabled" @change="form.endpoint = `https://s3.${form.region}.qiniucs.com`"><option value="cn-east-1">华东 cn-east-1</option><option value="cn-east-2">华东 cn-east-2</option><option value="cn-north-1">华北 cn-north-1</option><option value="cn-south-1">华南 cn-south-1</option><option value="us-north-1">北美 us-north-1</option><option value="ap-southeast-1">新加坡 ap-southeast-1</option></select></label>
+          <label>区域 S3 HTTPS 接口（不含空间名）<input v-model="form.endpoint" type="url" required :disabled="disabled" :placeholder="`https://s3.${form.region}.qiniucs.com`" /></label>
           <label>私有空间名称<input v-model="form.bucket" maxlength="63" required :disabled="disabled" autocomplete="off" /></label>
           <label>专用仓库目录<input v-model="form.prefix" required :disabled="disabled" autocomplete="off" /></label>
           <label>Access Key<input v-model="form.accessKey" type="password" :placeholder="settings.accessKeyConfigured ? '已配置，留空保持' : '请输入访问密钥'" :disabled="disabled" autocomplete="new-password" /></label>
