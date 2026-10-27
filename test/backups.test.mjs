@@ -111,6 +111,48 @@ test('settings encrypt all secrets at rest and never return them to the browser'
   await service.save({ prefix: 'another-repository', password: 'replacement-password-123456', confirmRepositoryChange: true }, 'test-admin');
 });
 
+test('credential rotation preserves distinct AK/SK through encrypted storage and worker requests', async () => {
+  const { service } = setup();
+  await service.save({ bucket: 'test-bucket', ...credentials }, 'test-admin');
+  const rotated = { accessKey: 'new-independent-access-key', secretKey: 'new-independent-secret-key' };
+  await service.save(rotated, 'test-admin');
+  await service.save({ accessKey: '', secretKey: '', password: '', uploadLimitKiB: 4096 }, 'test-admin');
+  let calls = 0;
+  service.request = async (route, payload) => {
+    calls++;
+    assert.equal(route, '/storage/test');
+    assert.deepEqual(payload.secrets, { ...credentials, ...rotated });
+    const env = resticEnvironment(payload.settings, payload.secrets, { PATH: '/bin' });
+    assert.equal(env.AWS_ACCESS_KEY_ID, rotated.accessKey);
+    assert.equal(env.AWS_SECRET_ACCESS_KEY, rotated.secretKey);
+    assert.equal(env.RESTIC_PASSWORD, credentials.password);
+    return { ok: true };
+  };
+  await service.action('test');
+  assert.equal(calls, 1);
+});
+
+test('identical AK/SK are rejected without saving or sending cloud requests, including legacy settings', async () => {
+  const { service, repository } = setup();
+  await service.save({ bucket: 'test-bucket', ...credentials }, 'test-admin');
+  const previous = await repository.settings();
+  let calls = 0;
+  service.request = async () => { calls++; return { ok: true }; };
+  const same = 'same-value-in-both-access-key-fields';
+  await assert.rejects(service.save({ accessKey: same, secretKey: same }, 'test-admin'), /Access Key 和 Secret Key 不能相同/);
+  await assert.rejects(service.save({ secretKey: credentials.accessKey }, 'test-admin'), /Access Key 和 Secret Key 不能相同/);
+  assert.deepEqual(await repository.settings(), previous);
+  repository.memory.credentials_encrypted = service.vault.encrypt({ ...credentials, accessKey: same, secretKey: same });
+  await assert.rejects(service.action('test'), /Access Key 和 Secret Key 不能相同/);
+  await assert.rejects(service.action('init', { confirm: true }), /Access Key 和 Secret Key 不能相同/);
+  await assert.rejects(service.run('test-admin'), /Access Key 和 Secret Key 不能相同/);
+  assert.equal((await repository.list()).length, 0);
+  assert.equal(calls, 0);
+  assert.throws(() => mergeBackupSecrets({ accessKey: same, secretKey: same }), /不能相同/);
+  await service.save({ secretKey: 'corrected-independent-secret-key' }, 'test-admin');
+  assert.equal((await service.context()).secrets.secretKey, 'corrected-independent-secret-key');
+});
+
 test('changing only the endpoint preserves secrets and still requires repository confirmation', async () => {
   const { service } = setup();
   await service.save({ bucket: 'test-bucket', region: 'cn-south-1', endpoint: 'https://s3-cn-south-1.qiniucs.com', ...credentials }, 'test-admin');

@@ -72,13 +72,21 @@ export function mergeBackupSecrets(input, previous = {}) {
     result[key] = input[key];
   }
   if (input.password && input.password.length < 16) throw backupError('仓库密码至少需要 16 个字符，请独立保管');
+  assertDistinctAccessKeys(result);
   return result;
+}
+
+function assertDistinctAccessKeys(secrets) {
+  if (secrets.accessKey && secrets.accessKey === secrets.secretKey) {
+    throw backupError('Access Key 和 Secret Key 不能相同：请分别填写七牛同一组密钥中的 AK 和 SK，并保存配置；请检查浏览器是否自动填入了相同值');
+  }
 }
 
 export function assertBackupConfigured(settings, secrets) {
   if (!settings.bucket || !secrets.accessKey || !secrets.secretKey || !secrets.password) {
     throw backupError('请先保存七牛空间、访问密钥和仓库密码');
   }
+  assertDistinctAccessKeys(secrets);
 }
 
 export function publicBackupSettings(settings, secrets = {}) {

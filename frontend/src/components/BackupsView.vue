@@ -153,9 +153,9 @@ watch(() => props.refreshToken, () => void load());
           <label>区域 S3 HTTPS 接口（不含空间名）<input v-model="form.endpoint" type="url" required :disabled="disabled" :placeholder="`https://s3.${form.region}.qiniucs.com`" /></label>
           <label>私有空间名称<input v-model="form.bucket" maxlength="63" required :disabled="disabled" autocomplete="off" /></label>
           <label>专用仓库目录<input v-model="form.prefix" required :disabled="disabled" autocomplete="off" /></label>
-          <label>Access Key<input v-model="form.accessKey" type="password" :placeholder="settings.accessKeyConfigured ? '已配置，留空保持' : '请输入访问密钥'" :disabled="disabled" autocomplete="new-password" /></label>
-          <label>Secret Key<input v-model="form.secretKey" type="password" :placeholder="settings.secretKeyConfigured ? '已配置，留空保持' : '请输入密钥'" :disabled="disabled" autocomplete="new-password" /></label>
-          <label>仓库加密密码<input v-model="form.password" type="password" minlength="16" :placeholder="settings.passwordConfigured ? '已配置，请保留原密码' : '至少 16 个字符，请独立保管'" :disabled="disabled" autocomplete="new-password" /></label>
+          <label>Access Key<input v-model="form.accessKey" name="qiniu-access-key" type="password" :placeholder="settings.accessKeyConfigured ? '已配置，留空保持' : '请输入访问密钥'" :disabled="disabled" autocomplete="off" autocapitalize="none" :spellcheck="false" /></label>
+          <label>Secret Key<input v-model="form.secretKey" name="qiniu-secret-key" type="password" :placeholder="settings.secretKeyConfigured ? '已配置，留空保持' : '请输入密钥'" :disabled="disabled" autocomplete="off" autocapitalize="none" :spellcheck="false" /></label>
+          <label>仓库加密密码<input v-model="form.password" name="restic-repository-password" type="password" minlength="16" :placeholder="settings.passwordConfigured ? '已配置，请保留原密码' : '至少 16 个字符，请独立保管'" :disabled="disabled" autocomplete="off" /></label>
         </div>
         <h3 class="backup-subheading">计划与保留策略</h3>
         <div class="form-grid">

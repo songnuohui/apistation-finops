@@ -51,6 +51,10 @@ scoped access credentials, and a strong Restic repository password. Passwords ar
 encrypted at rest with the deployment key, never returned by GET, and blanks
 preserve existing secrets. An existing repository password cannot be arbitrarily
 replaced: use the original password or a separate new repository prefix.
+AK and SK are different values from the same Qiniu key pair. Identical values
+are rejected before saving or contacting cloud storage, including legacy saved
+credentials. The access fields use separate names and disable password autofill;
+check both values if a browser password manager fills them automatically.
 
 Use source inspection, initialize ONLY the dedicated empty repository, test the
 repository, then run the first backup. Retain the repository password, matching DDL
