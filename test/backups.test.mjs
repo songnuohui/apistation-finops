@@ -56,6 +56,10 @@ test('documented Qiniu endpoints are accepted without silently changing legacy r
 
 test('storage errors distinguish authentication, missing repository, password and lock without exposing diagnostics', () => {
   const cases = [
+    [1, 'write /tmp/restic-temp-pack: no space left on device', /本地临时空间不足/],
+    [1, 'disk quota exceeded', /本地临时空间不足/],
+    [1, 'ENOSPC', /本地临时空间不足/],
+    [1, 'EDQUOT', /本地临时空间不足/],
     [1, 'SignatureDoesNotMatch', /七牛认证失败/],
     [1, 'InvalidAccessKeyId', /七牛认证失败/],
     [1, 'BadToken', /七牛认证失败/],

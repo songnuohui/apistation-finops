@@ -75,6 +75,7 @@ INSERT INTO ops_system_logs VALUES(1,'must-be-excluded');'''
             break
         time.sleep(0.1)
     run(['docker', 'run', '-d', '--name', worker, '--network', 'none', '--memory', '384m', '--cpus', '0.5',
+         '--read-only', '--tmpfs', '/tmp:size=64m,mode=1777',
          '-e', 'FINOPS_BACKUP_WORKER_TOKEN=' + token, '-v', str(scratch / 'socket') + ':/run/source:ro',
          '-v', str(scratch / 'data') + ':/var/lib/finops-backup', '-v', str(wrapper) + ':/usr/local/bin/restic:ro',
          'apistation-finops-backup:review'])
@@ -88,7 +89,7 @@ INSERT INTO ops_system_logs VALUES(1,'must-be-excluded');'''
     else:
         raise RuntimeError('fixture worker not ready')
     payload = {'settings': {'bucket': 'synthetic-fixture', 'autoPrune': True}, 'secrets': {
-        'accessKey': 'synthetic', 'secretKey': 'synthetic', 'password': 'synthetic-fixture-password'}}
+        'accessKey': 'synthetic-ak', 'secretKey': 'synthetic-sk', 'password': 'synthetic-fixture-password'}}
     call('/storage/init', payload)
     for iteration in range(2):
         job = str(uuid.uuid4())

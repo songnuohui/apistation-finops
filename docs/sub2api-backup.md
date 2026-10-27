@@ -99,6 +99,15 @@ reused by new self-contained snapshot manifests. Plain staging files are private
 to the worker volume (0700/0600) and removed after each attempt; that temporary
 volume is not itself encrypted by this feature. Do not give other processes access.
 
+Restic stages encrypted upload packs in private per-command directories under
+`/var/lib/finops-backup/tmp` on the disk-backed worker volume. They must not use
+the container's 64 MiB `/tmp` tmpfs: concurrent uploads can exhaust it even when
+the server disk has free space. Directories are removed after each command exits;
+startup removes leftovers from an interrupted worker. Allow disk space for both
+the uncompressed source export and in-flight encrypted packs/cache.
+Fatal JSON errors from Restic stdout and stderr are classified without exposing
+raw diagnostics. Local disk exhaustion is reported separately from cloud authentication.
+
 The worker confirms the committed cloud snapshot and runs Restic repository
 metadata checks before reporting success. This does not prove a database restore
 and does not read back every data block. No actual restore is performed automatically.
@@ -139,3 +148,11 @@ rows, no published ports, no production mounts and no cloud connection. It check
 fixed source exports, referenced usage, empty tables, two backup runs, local Restic
 deduplication/check/retention, full TAR download and hashes. It performs no database
 restore. Containers and synthetic files are removed in the test's finally block.
+
+For the upload-space regression, run `test/backup-restic-linux-integration.mjs`
+inside a disposable review-image container with `--network none --read-only`,
+`--tmpfs /tmp:size=64m,mode=1777` and a fresh disk-backed volume mounted at
+`/var/lib/finops-backup`. Mount the fixture file read-only and run it with Node.
+It uses 192 MiB of random synthetic data and a slow loopback-only storage server:
+the old tmpfs path must fail, while the production disk path must commit a
+snapshot, pass repository checks and remove temporary pack directories.

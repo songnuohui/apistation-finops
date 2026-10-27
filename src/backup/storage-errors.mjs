@@ -3,6 +3,9 @@ import { backupError } from '../services/backup-policy.mjs';
 export function resticStorageError(code, diagnostic = '', overflow = false) {
   // Classify only known diagnostics. Never expose CLI output, URLs, or file contents.
   if (overflow) return backupError('存储工具响应过大，操作已停止，不能确认完成', 502);
+  if (/ENOSPC|EDQUOT|no space left on device|disk quota exceeded/i.test(diagnostic)) {
+    return backupError('备份执行器本地临时空间不足，无法完成上传；请检查备份数据卷的可用磁盘空间', 502);
+  }
   if (/SignatureDoesNotMatch|signature.*does not match|InvalidAccessKeyId|BadToken|bad token/i.test(diagnostic)) {
     return backupError('七牛认证失败：请核对同一组 Access Key 和 Secret Key 是否完整、有效；此错误不是仓库加密密码错误', 502);
   }
@@ -27,5 +30,5 @@ export function resticStorageError(code, diagnostic = '', overflow = false) {
   if (code === 10 || /(?:config.*(?:NoSuchKey|specified key does not exist|no such file)|(?:NoSuchKey|specified key does not exist|no such file).*config)/is.test(diagnostic)) {
     return backupError('该目录未找到备份仓库配置：请先核对空间和目录；只有确认是新的专用空目录时才可初始化', 502);
   }
-  return backupError('存储操作失败，不能确认完成；请检查七牛区域、访问凭证、仓库密码和权限', 502);
+  return backupError('存储操作失败，不能确认完成；请检查备份执行器资源、网络及云存储状态', 502);
 }

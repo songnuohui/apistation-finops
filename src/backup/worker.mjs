@@ -8,7 +8,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeBackupSettings, mergeBackupSecrets, resticEnvironment, backupError } from '../services/backup-policy.mjs';
-import { resticStorageError } from './storage-errors.mjs';
+import { restic, RESTIC_TEMP_ROOT } from './restic.mjs';
 
 const BASE = '/var/lib/finops-backup';
 const STAGING = `${BASE}/staging/current`;
@@ -62,45 +62,6 @@ async function sourceInspection() {
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString());
-}
-
-function restic(args, settings, secrets, signal, progress) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('restic', ['--limit-upload', String(settings.uploadLimitKiB), ...args], {
-      env: resticEnvironment(settings, secrets), stdio: ['ignore', 'pipe', 'pipe'], signal,
-    });
-    const decoder = new StringDecoder('utf8');
-    let pending = '';
-    let output = '';
-    let summary = null;
-    let overflow = false;
-    let diagnostic = '';
-    child.stdout.on('data', (chunk) => {
-      if (!progress) {
-        output += chunk.toString();
-        if (output.length > 8 * 1024 * 1024) { overflow = true; child.kill(); }
-        return;
-      }
-      pending += decoder.write(chunk);
-      if (pending.length > 1024 * 1024) { overflow = true; child.kill(); return; }
-      let index;
-      while ((index = pending.indexOf('\n')) >= 0) {
-        const line = pending.slice(0, index);
-        pending = pending.slice(index + 1);
-        try {
-          const event = JSON.parse(line);
-          if (event.message_type === 'summary') summary = event;
-          if (event.message_type === 'status') progress(event);
-        } catch { /* Never return CLI output or file contents to the web process. */ }
-      }
-    });
-    child.stderr.on('data', (chunk) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-65536); });
-    child.on('error', () => reject(backupError('备份工具启动失败或任务超时', 503)));
-    child.on('close', (code) => {
-      if (code !== 0 || overflow) return reject(resticStorageError(code, diagnostic, overflow));
-      resolve(progress ? summary : output);
-    });
-  });
 }
 
 const RESTORE = `# Sub2API data-only backup
@@ -235,6 +196,7 @@ async function runJob(item, settings, secrets) {
   } catch (error) {
     item.status = 'failed';
     item.error = error.statusCode ? error.message : '任务中断或超时，不能确认备份完成；请检查云端恢复点';
+    item.progress.failedPhase = item.progress.phase;
     item.progress.phase = 'failed';
   } finally {
     item.completedAt = new Date().toISOString();
@@ -250,7 +212,9 @@ async function download(input, settings, secrets, res) {
   const signal = AbortSignal.timeout(7200000);
   const snapshots = JSON.parse(await restic(['snapshots', '--json', '--host', 'sub2api', '--tag', 'finops-sub2api'], settings, secrets, signal));
   if (!snapshots.some((entry) => entry.id === input.id && entry.paths?.includes(STAGING))) throw backupError('当前仓库中没有该恢复点', 404);
-  const child = spawn('restic', ['dump', '--archive', 'tar', input.id, STAGING], { env: resticEnvironment(settings, secrets), stdio: ['ignore', 'pipe', 'pipe'], signal });
+  const child = spawn('restic', ['dump', '--archive', 'tar', input.id, STAGING], {
+    env: { ...resticEnvironment(settings, secrets), TMPDIR: RESTIC_TEMP_ROOT }, stdio: ['ignore', 'pipe', 'pipe'], signal,
+  });
   child.stderr.resume();
   let started = false;
   child.stdout.once('data', () => { started = true; res.writeHead(200, { 'Content-Type': 'application/x-tar', 'Cache-Control': 'no-store' }); });
@@ -272,6 +236,8 @@ async function download(input, settings, secrets, res) {
 
 await fs.mkdir(`${BASE}/jobs`, { recursive: true, mode: 0o700 });
 await fs.rm(STAGING, { recursive: true, force: true });
+await fs.rm(RESTIC_TEMP_ROOT, { recursive: true, force: true });
+await fs.mkdir(RESTIC_TEMP_ROOT, { mode: 0o700 });
 for (const name of (await fs.readdir(`${BASE}/jobs`)).filter((name) => /^[a-f0-9-]+\.json$/.test(name))) {
   const item = JSON.parse(await fs.readFile(path.join(BASE, 'jobs', name), 'utf8'));
   if (['queued', 'running'].includes(item.status)) {
