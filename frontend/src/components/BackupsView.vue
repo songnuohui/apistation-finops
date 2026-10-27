@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { AlertTriangle, CheckCircle2, Cloud, Database, Download, HardDrive, Play, RefreshCw, Save, ShieldCheck, X } from 'lucide-vue-next';
+import { AlertTriangle, CheckCircle2, Cloud, Database, Download, HardDrive, Info, Play, RefreshCw, Save, ShieldCheck, X } from 'lucide-vue-next';
 import { get, send } from '../api';
+import { backupSize, backupSizeColumns, formatBackupBytes as bytes } from '../backup-metrics';
 import PaginationBar from './PaginationBar.vue';
 
 type RecordValue = Record<string, any>;
@@ -35,15 +36,14 @@ let disposed = false;
 const disabled = computed(() => Boolean(working.value || activeJob.value));
 const ready = computed(() => settings.value.workerConfigured && settings.value.encryptionReady
   && settings.value.bucket && settings.value.passwordConfigured && settings.value.accessKeyConfigured && settings.value.secretKeyConfigured);
+const historyRows = computed(() => jobs.value.map((item) => ({
+  job: item, sizes: backupSizeColumns.map((column) => ({ key: column.key, ...backupSize(item, column.key) })),
+})));
+const latestPackedSize = computed(() => backupSize(lastSuccess.value, 'addedPackedBytes'));
+const latestRawSize = computed(() => backupSize(lastSuccess.value, 'addedBytes'));
 const stages: Record<string, string> = { queued: '等待执行', exporting: '只读导出', uploading: '加密去重上传', checking: '仓库完整性检查', completed: '已完成', failed: '失败' };
 const states: Record<string, string> = { queued: '排队中', running: '执行中', completed: '已完成', failed: '失败' };
 const dateTime = (value: any) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'medium' }).format(new Date(value)) : '—';
-function bytes(value: any) {
-  if (value === undefined || value === null) return '—';
-  const number = Number(value);
-  const unit = number >= 1073741824 ? 1073741824 : number >= 1048576 ? 1048576 : number >= 1024 ? 1024 : 1;
-  return `${(number / unit).toFixed(unit === 1 ? 0 : 1)} ${{ 1: 'B', 1024: 'KiB', 1048576: 'MiB', 1073741824: 'GiB' }[unit]}`;
-}
 function copySettings() {
   for (const key of Object.keys(form.value)) {
     if (!['accessKey', 'secretKey', 'password'].includes(key) && settings.value[key] !== undefined) form.value[key] = settings.value[key];
@@ -155,13 +155,17 @@ watch(() => props.refreshToken, () => void load());
         <article class="metric-card"><span>自动备份</span><strong>{{ settings.enabled ? '已启用' : '已关闭' }}</strong><small>间隔 {{ settings.intervalMinutes || 60 }} 分钟 · 上海时间</small></article>
         <article class="metric-card"><span>最近成功的源快照</span><strong class="backup-time">{{ dateTime(lastSuccess?.progress?.sourceAt) }}</strong><small>不是上传完成时间</small></article>
         <article class="metric-card"><span>下次计划执行</span><strong class="backup-time">{{ dateTime(settings.nextRunAt) }}</strong><small>已有任务运行时不重叠执行</small></article>
-        <article class="metric-card"><span>最近压缩后新增量</span><strong>{{ bytes(lastSuccess?.progress?.addedPackedBytes) }}</strong><small>新增原始量 {{ bytes(lastSuccess?.progress?.addedBytes) }}</small></article>
+        <article class="metric-card">
+          <div class="backup-metric-heading"><span>最近新增块（压缩后）</span><button class="backup-metric-help" type="button" :title="backupSizeColumns[0].description" :aria-label="backupSizeColumns[0].description"><Info :size="14" /></button></div>
+          <strong class="backup-metric-value" :class="{ 'is-missing': latestPackedSize.missing }" :title="latestPackedSize.detail">{{ latestPackedSize.text }}</strong>
+          <small v-if="lastSuccess" :title="latestRawSize.detail">压缩前 {{ latestRawSize.text }}</small>
+        </article>
       </div>
-      <section v-if="activeJob" class="backup-running" aria-live="polite"><RefreshCw class="spin" :size="20" /><div><strong>{{ stages[activeJob.progress?.phase] || '任务已提交' }}</strong><p>已读取 {{ bytes(activeJob.progress?.readBytes) }}<template v-if="activeJob.progress?.totalBytes"> · 已处理 {{ bytes(activeJob.progress.bytesDone) }} / {{ bytes(activeJob.progress.totalBytes) }}</template></p></div></section>
+      <section v-if="activeJob" class="backup-running" aria-live="polite"><RefreshCw class="spin" :size="20" /><div><strong>{{ stages[activeJob.progress?.phase] || '任务已提交' }}</strong><p>已导出 {{ backupSize(activeJob, 'readBytes').text }}<template v-if="activeJob.progress?.totalBytes"> · 去重扫描 {{ bytes(activeJob.progress.bytesDone) }} / {{ bytes(activeJob.progress.totalBytes) }}</template></p></div></section>
       <section class="panel">
         <header class="panel-head"><div><h2>备份任务</h2><p>仓库检查不代表已完成数据库恢复验证。</p></div><button class="icon-button" title="刷新记录" aria-label="刷新记录" @click="load()"><RefreshCw :size="17" /></button></header>
-        <div class="backup-table-wrap" :aria-busy="historyLoading"><table class="backup-table backup-history-table"><thead><tr><th>开始时间</th><th>触发方式</th><th>状态</th><th>源快照时间</th><th>读取量</th><th>新增原始量</th><th>压缩后新增量</th><th>结果</th></tr></thead><tbody>
-          <tr v-for="item in jobs" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.kind === 'scheduled' ? '定时' : '手动' }}</td><td><span class="status-pill" :class="item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : 'warning'">{{ states[item.status] }}</span></td><td>{{ dateTime(item.progress?.sourceAt) }}</td><td>{{ bytes(item.progress?.readBytes) }}</td><td>{{ bytes(item.progress?.addedBytes) }}</td><td>{{ bytes(item.progress?.addedPackedBytes) }}</td><td class="backup-result"><span v-if="item.error" class="backup-danger">{{ item.error }}</span><span v-else-if="item.progress?.warning">{{ item.progress.warning }}</span><code v-else-if="item.progress?.snapshotId" :title="item.progress.snapshotId">{{ item.progress.snapshotId.slice(0, 12) }}</code><span v-else>{{ stages[item.progress?.phase] || '等待执行' }}</span></td></tr>
+        <div class="backup-table-wrap" :aria-busy="historyLoading"><table class="backup-table backup-history-table"><thead><tr><th>开始时间</th><th>触发方式</th><th>状态</th><th>源快照时间</th><th v-for="column in backupSizeColumns" :key="column.key" class="backup-size-cell" :class="{ 'backup-size-primary': column.key === 'addedPackedBytes' }"><div class="backup-size-heading">{{ column.label }}<button class="backup-metric-help" type="button" :title="column.description" :aria-label="`${column.label}：${column.description}`"><Info :size="14" /></button></div></th><th>结果</th></tr></thead><tbody>
+          <tr v-for="{ job: item, sizes } in historyRows" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.kind === 'scheduled' ? '定时' : '手动' }}</td><td><span class="status-pill" :class="item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : 'warning'">{{ states[item.status] }}</span></td><td>{{ dateTime(item.progress?.sourceAt) }}</td><td v-for="size in sizes" :key="size.key" class="backup-size-cell" :class="{ 'backup-size-primary': size.key === 'addedPackedBytes', 'is-missing': size.missing }" :title="size.detail">{{ size.text }}<small v-if="size.partial" class="backup-size-partial">{{ size.partial }}</small></td><td class="backup-result"><span v-if="item.error" class="backup-danger">{{ item.error }}</span><span v-else-if="item.progress?.warning">{{ item.progress.warning }}</span><code v-else-if="item.progress?.snapshotId" :title="item.progress.snapshotId">{{ item.progress.snapshotId.slice(0, 12) }}</code><span v-else>{{ stages[item.progress?.phase] || '等待执行' }}</span></td></tr>
           <tr v-if="!jobs.length"><td colspan="8" class="backup-empty">{{ historyLoading ? '正在读取任务记录…' : '尚无备份记录。请先保存存储配置、初始化专用仓库，再手动执行首份备份。' }}</td></tr>
         </tbody></table></div>
         <PaginationBar v-model:page="page" v-model:page-size="pageSize" :total="total" />
@@ -219,6 +223,17 @@ watch(() => props.refreshToken, () => void load());
 .backup-running{display:flex;align-items:center;gap:15px;padding:15px 0;color:var(--primary)}.backup-running p{margin:6px 0 0;font-size:12px;color:var(--muted)}
 .backup-table-wrap{overflow:auto}.backup-table{border-collapse:collapse;width:100%;min-width:850px;font-size:12px}.backup-table th{text-align:left;color:var(--muted);font-weight:600;background:var(--surface-soft);padding:12px}.backup-table td{padding:14px 12px;border-bottom:1px solid var(--line);vertical-align:top}.backup-table code{font-size:11px}.backup-result{max-width:300px;overflow-wrap:anywhere}.backup-empty{text-align:center!important;color:var(--muted);padding:35px 16px!important;white-space:normal}
 .backup-history-table{min-width:1050px}
+.backup-metric-heading,.backup-size-heading{display:flex;align-items:center;gap:5px}
+.backup-metric-help{display:inline-grid;place-items:center;flex:0 0 20px;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);cursor:help}
+.backup-metric-help:hover,.backup-metric-help:focus-visible{color:var(--primary);background:var(--primary-soft)}
+.backup-metric-heading span{min-width:0;line-height:20px}
+.backup-metric-value{font-variant-numeric:tabular-nums}
+.backup-metric-value.is-missing{font-size:16px;color:var(--muted);font-weight:500}
+.backup-table .backup-size-cell{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted)}
+.backup-size-heading{justify-content:flex-end}
+.backup-table .backup-size-primary:not(.is-missing){color:var(--ink);font-weight:600}
+.backup-table .is-missing{color:var(--muted);font-weight:400}
+.backup-size-partial{display:block;margin-top:4px;font-size:11px;font-weight:400;color:var(--amber)}
 .backup-subheading{margin:25px 0 15px;font-size:14px;padding-top:20px;border-top:1px solid var(--line)}
 .backup-actions{justify-content:flex-start;margin-top:20px}.backup-actions button,.backup-toolbar>button{display:inline-flex;align-items:center;gap:7px}.backup-checks{display:flex;flex-wrap:wrap;gap:20px;margin:20px 0}.backup-checks label{display:flex;align-items:center;gap:8px;font-size:13px}.backup-checks input{width:16px;height:16px;accent-color:var(--primary)}
 .backup-danger{color:var(--red)}.backup-muted,.backup-table-names{font-size:12px;line-height:1.9;color:var(--muted);overflow-wrap:anywhere}.backup-source-state{justify-content:flex-start;font-size:12px;margin-bottom:15px}.backup-view details{border-top:1px solid var(--line);padding:12px 0}.backup-view summary{cursor:pointer;font-size:13px}.backup-confirm{max-width:550px}.backup-confirm p{font-size:14px;line-height:1.9;color:var(--muted)}.backup-confirm header,.backup-confirm footer{display:flex;justify-content:space-between;gap:12px;align-items:center}.backup-confirm h2{font-size:17px;margin:0}.backup-confirm footer{justify-content:flex-end;margin-top:20px}
