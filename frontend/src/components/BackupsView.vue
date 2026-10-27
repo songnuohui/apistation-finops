@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { AlertTriangle, CheckCircle2, Cloud, Database, Download, HardDrive, Play, RefreshCw, Save, ShieldCheck, X } from 'lucide-vue-next';
 import { get, send } from '../api';
+import PaginationBar from './PaginationBar.vue';
 
 type RecordValue = Record<string, any>;
 const props = defineProps<{ refreshToken?: number }>();
@@ -9,6 +10,12 @@ const emit = defineEmits<{ toast: [message: string] }>();
 const tab = ref('overview');
 const settings = ref<RecordValue>({});
 const jobs = ref<RecordValue[]>([]);
+const page = ref(1);
+const pageSize = ref(20);
+const total = ref(0);
+const activeJob = ref<RecordValue | null>(null);
+const lastSuccess = ref<RecordValue | null>(null);
+const historyLoading = ref(false);
 const snapshots = ref<RecordValue[]>([]);
 const source = ref<RecordValue | null>(null);
 const snapshotLoaded = ref(false);
@@ -22,9 +29,9 @@ const form = ref<RecordValue>({
   autoPrune: false, accessKey: '', secretKey: '', password: '',
 });
 let timer: ReturnType<typeof setInterval>;
-let polling = false;
-const activeJob = computed(() => jobs.value.find((item) => ['queued', 'running'].includes(item.status)));
-const lastSuccess = computed(() => jobs.value.find((item) => item.status === 'completed'));
+let requestVersion = 0;
+let formLoaded = false;
+let disposed = false;
 const disabled = computed(() => Boolean(working.value || activeJob.value));
 const ready = computed(() => settings.value.workerConfigured && settings.value.encryptionReady
   && settings.value.bucket && settings.value.passwordConfigured && settings.value.accessKeyConfigured && settings.value.secretKeyConfigured);
@@ -50,14 +57,25 @@ async function perform(name: string, action: () => Promise<void>) {
   try { await action(); } catch (error: any) { errorMessage.value = error.message || '操作失败'; emit('toast', errorMessage.value); }
   finally { working.value = ''; }
 }
-async function load(initial = false) {
+async function load() {
+  if (disposed || working.value === 'save') return;
+  const version = ++requestVersion;
+  historyLoading.value = true;
   try {
-    const [value, history] = await Promise.all([get('/backups/settings'), get('/backups/jobs')]);
+    const [value, history] = await Promise.all([get('/backups/settings'), get(`/backups/jobs?page=${page.value}&page_size=${pageSize.value}`)]);
+    if (disposed || version !== requestVersion) return;
     settings.value = value;
     jobs.value = history.items || [];
-    if (initial) copySettings();
-  } catch (error: any) { errorMessage.value = error.message; }
-  finally { loading.value = false; }
+    total.value = history.total;
+    activeJob.value = history.activeJob || null;
+    lastSuccess.value = history.lastSuccess || null;
+    if (!formLoaded) { copySettings(); formLoaded = true; }
+    const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value));
+    if (page.value > lastPage) page.value = lastPage;
+  } catch (error: any) { if (!disposed && version === requestVersion) errorMessage.value = error.message; }
+  finally {
+    if (!disposed && version === requestVersion) { loading.value = false; historyLoading.value = false; }
+  }
 }
 async function save(confirmRepositoryChange = false) {
   const repositoryChanged = settings.value.bucket && ['endpoint', 'bucket', 'prefix'].some((key) => form.value[key] !== settings.value[key]);
@@ -66,12 +84,17 @@ async function save(confirmRepositoryChange = false) {
     return;
   }
   await perform('save', async () => {
+    requestVersion++;
+    historyLoading.value = false;
+    loading.value = false;
     settings.value = await send('/backups/settings', 'PATCH', { ...form.value, confirmRepositoryChange });
     copySettings();
+    formLoaded = true;
     snapshots.value = [];
     snapshotLoaded.value = false;
     emit('toast', settings.value.enabled ? '配置已保存，自动备份已启用' : '配置已保存，自动备份保持关闭');
   });
+  await load();
 }
 async function action(name: string) {
   await perform(name, async () => {
@@ -103,15 +126,15 @@ async function confirm() {
   confirmation.value = null;
   await value?.action();
 }
-onMounted(async () => {
-  await load(true);
-  timer = setInterval(async () => {
-    if (polling || working.value) return;
-    polling = true;
-    try { await load(); } finally { polling = false; }
+onMounted(() => {
+  void load();
+  timer = setInterval(() => {
+    if (!historyLoading.value && !working.value) void load();
   }, 5000);
 });
-onUnmounted(() => clearInterval(timer));
+onUnmounted(() => { disposed = true; requestVersion++; clearInterval(timer); });
+watch(pageSize, () => { page.value = 1; });
+watch([page, pageSize], () => void load());
 watch(() => props.refreshToken, () => void load());
 </script>
 
@@ -132,15 +155,16 @@ watch(() => props.refreshToken, () => void load());
         <article class="metric-card"><span>自动备份</span><strong>{{ settings.enabled ? '已启用' : '已关闭' }}</strong><small>间隔 {{ settings.intervalMinutes || 60 }} 分钟 · 上海时间</small></article>
         <article class="metric-card"><span>最近成功的源快照</span><strong class="backup-time">{{ dateTime(lastSuccess?.progress?.sourceAt) }}</strong><small>不是上传完成时间</small></article>
         <article class="metric-card"><span>下次计划执行</span><strong class="backup-time">{{ dateTime(settings.nextRunAt) }}</strong><small>已有任务运行时不重叠执行</small></article>
-        <article class="metric-card"><span>最近新增上传量</span><strong>{{ bytes(lastSuccess?.progress?.addedBytes) }}</strong><small>只上传变化的数据块</small></article>
+        <article class="metric-card"><span>最近压缩后新增量</span><strong>{{ bytes(lastSuccess?.progress?.addedPackedBytes) }}</strong><small>新增原始量 {{ bytes(lastSuccess?.progress?.addedBytes) }}</small></article>
       </div>
       <section v-if="activeJob" class="backup-running" aria-live="polite"><RefreshCw class="spin" :size="20" /><div><strong>{{ stages[activeJob.progress?.phase] || '任务已提交' }}</strong><p>已读取 {{ bytes(activeJob.progress?.readBytes) }}<template v-if="activeJob.progress?.totalBytes"> · 已处理 {{ bytes(activeJob.progress.bytesDone) }} / {{ bytes(activeJob.progress.totalBytes) }}</template></p></div></section>
       <section class="panel">
-        <header class="panel-head"><div><h2>备份任务</h2><p>记录最近 100 次执行结果；仓库检查不代表已完成数据库恢复验证。</p></div><button class="icon-button" title="刷新记录" aria-label="刷新记录" @click="load()"><RefreshCw :size="17" /></button></header>
-        <div class="backup-table-wrap"><table class="backup-table"><thead><tr><th>开始时间</th><th>触发方式</th><th>状态</th><th>源快照时间</th><th>读取量 / 新增上传</th><th>结果</th></tr></thead><tbody>
-          <tr v-for="item in jobs" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.kind === 'scheduled' ? '定时' : '手动' }}</td><td><span class="status-pill" :class="item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : 'warning'">{{ states[item.status] }}</span></td><td>{{ dateTime(item.progress?.sourceAt) }}</td><td>{{ bytes(item.progress?.readBytes) }} / {{ bytes(item.progress?.addedBytes) }}</td><td class="backup-result"><span v-if="item.error" class="backup-danger">{{ item.error }}</span><span v-else-if="item.progress?.warning">{{ item.progress.warning }}</span><code v-else-if="item.progress?.snapshotId" :title="item.progress.snapshotId">{{ item.progress.snapshotId.slice(0, 12) }}</code><span v-else>{{ stages[item.progress?.phase] || '等待执行' }}</span></td></tr>
-          <tr v-if="!jobs.length"><td colspan="6" class="backup-empty">{{ loading ? '正在读取任务记录…' : '尚无备份记录。请先保存存储配置、初始化专用仓库，再手动执行首份备份。' }}</td></tr>
+        <header class="panel-head"><div><h2>备份任务</h2><p>仓库检查不代表已完成数据库恢复验证。</p></div><button class="icon-button" title="刷新记录" aria-label="刷新记录" @click="load()"><RefreshCw :size="17" /></button></header>
+        <div class="backup-table-wrap" :aria-busy="historyLoading"><table class="backup-table backup-history-table"><thead><tr><th>开始时间</th><th>触发方式</th><th>状态</th><th>源快照时间</th><th>读取量</th><th>新增原始量</th><th>压缩后新增量</th><th>结果</th></tr></thead><tbody>
+          <tr v-for="item in jobs" :key="item.id"><td>{{ dateTime(item.createdAt) }}</td><td>{{ item.kind === 'scheduled' ? '定时' : '手动' }}</td><td><span class="status-pill" :class="item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : 'warning'">{{ states[item.status] }}</span></td><td>{{ dateTime(item.progress?.sourceAt) }}</td><td>{{ bytes(item.progress?.readBytes) }}</td><td>{{ bytes(item.progress?.addedBytes) }}</td><td>{{ bytes(item.progress?.addedPackedBytes) }}</td><td class="backup-result"><span v-if="item.error" class="backup-danger">{{ item.error }}</span><span v-else-if="item.progress?.warning">{{ item.progress.warning }}</span><code v-else-if="item.progress?.snapshotId" :title="item.progress.snapshotId">{{ item.progress.snapshotId.slice(0, 12) }}</code><span v-else>{{ stages[item.progress?.phase] || '等待执行' }}</span></td></tr>
+          <tr v-if="!jobs.length"><td colspan="8" class="backup-empty">{{ historyLoading ? '正在读取任务记录…' : '尚无备份记录。请先保存存储配置、初始化专用仓库，再手动执行首份备份。' }}</td></tr>
         </tbody></table></div>
+        <PaginationBar v-model:page="page" v-model:page-size="pageSize" :total="total" />
       </section>
       <div class="backup-notice"><Database :size="18" /><span>每次读取业务表的一致性快照，云端按变化块去重存储。不支持任意时刻恢复；实际数据损失窗口还包含导出和上传耗时。备份不包含 FinOps、Redis、建表语句或索引。</span></div>
     </template>
@@ -194,6 +218,7 @@ watch(() => props.refreshToken, () => void load());
 .backup-notice svg{flex-shrink:0;margin-top:2px}.backup-notice span{flex:1;overflow-wrap:anywhere}.backup-notice.error{border-color:var(--red);background:#fff1f3;color:#a32a40}
 .backup-running{display:flex;align-items:center;gap:15px;padding:15px 0;color:var(--primary)}.backup-running p{margin:6px 0 0;font-size:12px;color:var(--muted)}
 .backup-table-wrap{overflow:auto}.backup-table{border-collapse:collapse;width:100%;min-width:850px;font-size:12px}.backup-table th{text-align:left;color:var(--muted);font-weight:600;background:var(--surface-soft);padding:12px}.backup-table td{padding:14px 12px;border-bottom:1px solid var(--line);vertical-align:top}.backup-table code{font-size:11px}.backup-result{max-width:300px;overflow-wrap:anywhere}.backup-empty{text-align:center!important;color:var(--muted);padding:35px 16px!important;white-space:normal}
+.backup-history-table{min-width:1050px}
 .backup-subheading{margin:25px 0 15px;font-size:14px;padding-top:20px;border-top:1px solid var(--line)}
 .backup-actions{justify-content:flex-start;margin-top:20px}.backup-actions button,.backup-toolbar>button{display:inline-flex;align-items:center;gap:7px}.backup-checks{display:flex;flex-wrap:wrap;gap:20px;margin:20px 0}.backup-checks label{display:flex;align-items:center;gap:8px;font-size:13px}.backup-checks input{width:16px;height:16px;accent-color:var(--primary)}
 .backup-danger{color:var(--red)}.backup-muted,.backup-table-names{font-size:12px;line-height:1.9;color:var(--muted);overflow-wrap:anywhere}.backup-source-state{justify-content:flex-start;font-size:12px;margin-bottom:15px}.backup-view details{border-top:1px solid var(--line);padding:12px 0}.backup-view summary{cursor:pointer;font-size:13px}.backup-confirm{max-width:550px}.backup-confirm p{font-size:14px;line-height:1.9;color:var(--muted)}.backup-confirm header,.backup-confirm footer{display:flex;justify-content:space-between;gap:12px;align-items:center}.backup-confirm h2{font-size:17px;margin:0}.backup-confirm footer{justify-content:flex-end;margin-top:20px}

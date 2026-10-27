@@ -374,7 +374,7 @@ async function api(request,res,url){
   if(url.pathname.startsWith('/api/backups')) {
     if(request.method==='GET'&&url.pathname==='/api/backups/settings')return json(res,200,await backupService.status());
     if(request.method==='PATCH'&&url.pathname==='/api/backups/settings')return json(res,200,await backupService.save(await body(request),auth.actor));
-    if(request.method==='GET'&&url.pathname==='/api/backups/jobs')return json(res,200,{items:await backupRepository.list()});
+    if(request.method==='GET'&&url.pathname==='/api/backups/jobs')return json(res,200,await backupRepository.listPage(pagination(url.searchParams)));
     if(request.method==='POST'&&url.pathname==='/api/backups/run')return json(res,202,await backupService.run(auth.actor));
     const action=/^\/api\/backups\/(source|test|init|snapshots)$/.exec(url.pathname);
     if(request.method==='POST'&&action)return json(res,200,await backupService.action(action[1],await body(request)));

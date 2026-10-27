@@ -40,6 +40,23 @@ export class BackupRepository {
     return (await this.pool.query(`SELECT * FROM ${this.schema}.backup_jobs ORDER BY created_at DESC LIMIT 100`)).rows.map(job);
   }
 
+  async listPage({ page = 1, pageSize = 20 } = {}) {
+    const offset = (page - 1) * pageSize;
+    if (!this.pool) {
+      const all = [...this.jobs].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt) || b.id.localeCompare(a.id));
+      return {
+        items: all.slice(offset, offset + pageSize), total: all.length, page, pageSize,
+        activeJob: all.find((item) => ['queued', 'running'].includes(item.status)) || null,
+        lastSuccess: all.find((item) => item.status === 'completed') || null,
+      };
+    }
+    const total = Number((await this.pool.query(`SELECT COUNT(*) AS total FROM ${this.schema}.backup_jobs`)).rows[0].total);
+    const items = (await this.pool.query(`SELECT * FROM ${this.schema}.backup_jobs ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`, [pageSize, offset])).rows.map(job);
+    const activeJob = await this.active();
+    const lastSuccess = job((await this.pool.query(`SELECT * FROM ${this.schema}.backup_jobs WHERE status='completed' ORDER BY created_at DESC, id DESC LIMIT 1`)).rows[0]);
+    return { items, total, page, pageSize, activeJob, lastSuccess };
+  }
+
   async active() {
     if (!this.pool) return this.jobs.find((item) => ['queued', 'running'].includes(item.status)) || null;
     return job((await this.pool.query(`SELECT * FROM ${this.schema}.backup_jobs WHERE status IN ('queued','running') LIMIT 1`)).rows[0]);

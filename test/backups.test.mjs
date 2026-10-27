@@ -232,3 +232,73 @@ test('configuration updates and task submission cannot overlap across awaited I/
   assert.equal((await repository.list()).length, 1);
   assert.equal((await service.status()).intervalMinutes, 30);
 });
+
+test('backup history pages expose every record beyond the former 100-job limit', async () => {
+  const { repository } = setup();
+  repository.jobs = Array.from({ length: 125 }, (_, index) => ({
+    id: String(index).padStart(3, '0'), status: 'completed', progress: {},
+    createdAt: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString(),
+  }));
+  const seen = [];
+  for (let page = 1; page <= 7; page++) {
+    const result = await repository.listPage({ page, pageSize: 20 });
+    assert.equal(result.total, 125);
+    assert.equal(result.page, page);
+    assert.equal(result.pageSize, 20);
+    assert.equal(result.items.length, page === 7 ? 5 : 20);
+    seen.push(...result.items.map((item) => item.id));
+  }
+  assert.deepEqual(seen, repository.jobs.map((item) => item.id).reverse());
+  assert.equal(new Set(seen).size, 125);
+  assert.deepEqual((await repository.listPage({ page: 8, pageSize: 20 })).items, []);
+});
+
+test('backup history orders timestamp ties deterministically and keeps global status off-page', async () => {
+  const { repository } = setup();
+  repository.jobs = [
+    { id: 'a', status: 'completed', progress: { addedBytes: 13000000, addedPackedBytes: 700000 }, createdAt: '2026-10-27T00:00:00Z' },
+    { id: 'c', status: 'running', progress: {}, createdAt: '2026-10-27T01:00:00Z' },
+    { id: 'b', status: 'failed', progress: {}, createdAt: '2026-10-27T00:00:00Z' },
+    { id: '0', status: 'completed', progress: { addedBytes: 42 }, createdAt: '2026-10-26T00:00:00Z' },
+  ];
+  const result = await repository.listPage({ page: 2, pageSize: 1 });
+  assert.deepEqual(result.items.map((item) => item.id), ['b']);
+  assert.equal(result.activeJob.id, 'c');
+  assert.equal(result.lastSuccess.id, 'a');
+  assert.equal(result.lastSuccess.progress.addedPackedBytes, 700000);
+  const historical = await repository.listPage({ page: 4, pageSize: 1 });
+  assert.equal(historical.items[0].progress.addedPackedBytes, undefined);
+});
+
+test('empty backup history returns empty summaries and pagination metadata', async () => {
+  const { repository } = setup();
+  assert.deepEqual(await repository.listPage(), {
+    items: [], total: 0, page: 1, pageSize: 20, activeJob: null, lastSuccess: null,
+  });
+});
+
+test('database-backed backup pagination uses bounded parameters and independent global summaries', async () => {
+  const row = { id: 'page-item', kind: 'scheduled', status: 'completed',
+    progress: { addedBytes: 13000000, addedPackedBytes: 700000 }, created_by: 'test-admin',
+    created_at: '2026-10-27T00:00:00Z', completed_at: '2026-10-27T00:01:00Z' };
+  const calls = [];
+  const repository = new BackupRepository({ async query(sql, params) {
+    calls.push({ sql, params });
+    if (sql.includes('COUNT(*)')) return { rows: [{ total: '125' }] };
+    if (sql.includes('LIMIT $1 OFFSET $2')) return { rows: [row] };
+    if (sql.includes("status IN ('queued','running')")) return { rows: [{ ...row, id: 'active', status: 'running' }] };
+    if (sql.includes("status='completed'")) return { rows: [{ ...row, id: 'latest' }] };
+    assert.fail('Unexpected query');
+  } }, { finopsSchema: 'finops' });
+  const result = await repository.listPage({ page: 3, pageSize: 50 });
+  assert.equal(result.total, 125);
+  assert.equal(result.page, 3);
+  assert.equal(result.pageSize, 50);
+  assert.equal(result.items[0].createdAt, row.created_at);
+  assert.equal(result.items[0].progress.addedPackedBytes, 700000);
+  assert.equal(result.activeJob.id, 'active');
+  assert.equal(result.lastSuccess.id, 'latest');
+  assert.match(calls[1].sql, /ORDER BY created_at DESC, id DESC/);
+  assert.deepEqual(calls[1].params, [50, 100]);
+  assert.ok(calls.every(({ sql }) => sql.startsWith('SELECT ') && sql.includes('"finops".backup_jobs')));
+});

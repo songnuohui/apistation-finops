@@ -182,7 +182,7 @@ async function runJob(item, settings, secrets) {
     const all = JSON.parse(await restic(['snapshots', '--json', '--host', 'sub2api', '--tag', 'finops-sub2api'], settings, secrets, signal));
     const committed = all.find((entry) => entry.id.startsWith(summary.snapshot_id));
     if (!committed) throw backupError('无法从云端确认刚完成的快照', 502);
-    item.progress = { ...item.progress, phase: 'checking', snapshotId: committed.id, addedBytes: summary.data_added, processedBytes: summary.total_bytes_processed };
+    item.progress = { ...item.progress, phase: 'checking', snapshotId: committed.id, addedBytes: summary.data_added, addedPackedBytes: summary.data_added_packed, processedBytes: summary.total_bytes_processed };
     await restic(['check'], settings, secrets, signal);
     item.status = 'completed';
     item.progress.phase = 'completed';

@@ -94,10 +94,22 @@ truncated dumps and missing table COPY sections before invoking Restic.
 
 Each run scans/exports selected source data: this is NOT incremental source
 reading, CDC, a transaction history, arbitrary-time PITR, or a complete system clone.
-Restic performs chunk deduplication and encryption. Unchanged cloud blocks are
-reused by new self-contained snapshot manifests. Plain staging files are private
+Restic performs chunk deduplication, compression and encryption. With repository
+format v2, its default automatic compression compresses new blocks before encryption
+and upload. Do not gzip the whole SQL file first: changes in one part of a compressed
+stream can impair deduplication of otherwise unchanged data. Unchanged cloud blocks
+are reused by new self-contained snapshot manifests. Plain staging files are private
 to the worker volume (0700/0600) and removed after each attempt; that temporary
 volume is not itself encrypted by this feature. Do not give other processes access.
+
+Job history is paginated (20 rows by default, selectable 10/20/50/100), not limited
+to the latest 100 jobs. The active task and latest successful task are queried
+independently of the selected page. `addedBytes` is Restic's deduplicated, uncompressed
+new blob size (`data_added`), not upload traffic. New jobs also record
+`addedPackedBytes` (`data_added_packed`), the compressed added blob size. This is not
+exact wire traffic or Qiniu billable usage: pack/index/snapshot overhead, requests
+and retries are separate. Historical records without this metric display no value;
+they are never estimated from raw sizes.
 
 Restic stages encrypted upload packs in private per-command directories under
 `/var/lib/finops-backup/tmp` on the disk-backed worker volume. They must not use
@@ -123,10 +135,15 @@ No automatic force-unlock, repository reinitialization, or overwrite is performe
 ## Independent recovery
 
 The cloud-points tab reads the repository itself, not only FinOps job records.
-Select a point to stream a full plaintext TAR package. It contains `data.sql`,
+Select a point to stream a full plaintext TAR package. The worker uses `restic dump`
+to fetch the needed cloud blocks on demand, decrypt and reconstruct the selected
+snapshot, and stream the TAR through FinOps to the browser. No prebuilt TAR is
+downloaded or retained on the server in advance. The package contains `data.sql`,
 `manifest.json` (source time, counts, checksum, schema fingerprint and exclusions),
 `validate.sql`, `SHA256SUMS` and `RESTORE.md`. Treat downloads as highly sensitive.
-There is no need to manually assemble an incremental chain. Verify download hashes.
+`data.sql` is a PostgreSQL data-only script (COPY data and sequence state), not DDL
+or an index backup. There is no need to manually assemble an incremental chain.
+Verify download hashes.
 
 Restore only to an isolated EMPTY PostgreSQL 15 database with matching precreated
 DDL, following RESTORE.md. Destination-only triggers are temporarily bypassed

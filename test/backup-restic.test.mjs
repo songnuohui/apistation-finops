@@ -35,11 +35,13 @@ test('Restic uses private disk-backed pack staging and accepts a final JSON line
     import fs from 'node:fs/promises';
     await fs.writeFile(process.env.TMPDIR + '/restic-temp-pack', 'synthetic-pack');
     process.stdout.write(JSON.stringify({message_type:'status', bytes_done:42}) + '\n');
-    process.stdout.write(JSON.stringify({message_type:'summary', snapshot_id:'abc12345'}));
+    process.stdout.write(JSON.stringify({message_type:'summary', snapshot_id:'abc12345', data_added:13000000, data_added_packed:700000}));
   `);
   const statuses = [];
   const summary = await restic(['backup', '--json'], settings, secrets, undefined, (event) => statuses.push(event), value.options);
   assert.equal(summary.snapshot_id, 'abc12345');
+  assert.equal(summary.data_added, 13000000);
+  assert.equal(summary.data_added_packed, 700000);
   assert.equal(statuses[0].bytes_done, 42);
   await value.assertClean();
 });

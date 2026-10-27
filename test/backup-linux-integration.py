@@ -101,7 +101,11 @@ INSERT INTO ops_system_logs VALUES(1,'must-be-excluded');'''
             time.sleep(0.2)
         assert result['status'] == 'completed', result
         assert not result['progress'].get('warning'), result
-        print(json.dumps({'iteration': iteration + 1, 'status': result['status'], 'addedBytes': result['progress']['addedBytes']}), flush=True)
+        assert isinstance(result['progress']['addedPackedBytes'], (int, float)), result
+        assert result['progress']['addedPackedBytes'] >= 0, result
+        print(json.dumps({'iteration': iteration + 1, 'status': result['status'],
+                          'addedBytes': result['progress']['addedBytes'],
+                          'addedPackedBytes': result['progress']['addedPackedBytes']}), flush=True)
     snapshots = json.loads(call('/snapshots', payload))['items']
     assert snapshots, snapshots
     archive = call('/download', {**payload, 'id': snapshots[0]['id']})
